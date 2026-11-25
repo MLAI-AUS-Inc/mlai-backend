@@ -173,6 +173,8 @@ def refund_decision(run, *, now=None) -> dict:
     owner_cancel = result.get("cancellation_reason") in OWNER_CANCEL_REASONS and run.status == "cancelled"
     if _delivery(run):
         return {**decision, "action": "keep", "why": "owner_cancelled_after_delivery" if owner_cancel else "delivered"}
+    if _mapping(_mapping(result.get("self_heal_v1")).get("pending_action")).get("state") == "reconciliation_required":
+        return {**decision, "why": "dispatch_unresolved"}
     if publication_state(run) == "unknown":
         return {**decision, "action": "keep", "why": "publication_unresolved"}
     if run.status not in TERMINAL_STATUSES:

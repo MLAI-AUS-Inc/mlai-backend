@@ -1,0 +1,10 @@
+{
+  "_recorded": "GET /app and GET /app/installations/{id} (permission blocks only; synthetic ids)",
+  "app": {"id": 424242, "slug": "fixture-app", "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read", "checks": "read"}},
+  "installation_full": {"id": 1000001, "account": {"login": "fixture-studio", "type": "Organization"},
+    "permissions": {"contents": "write", "pull_requests": "write", "metadata": "read"}, "suspended_at": null},
+  "installation_no_contents": {"id": 1000001, "account": {"login": "fixture-studio", "type": "Organization"},
+    "permissions": {"pull_requests": "write", "metadata": "read"}, "suspended_at": null},
+  "installation_read_only": {"id": 1000001, "account": {"login": "fixture-studio", "type": "Organization"},
+    "permissions": {"contents": "read", "pull_requests": "read", "metadata": "read"}, "suspended_at": null}
+}

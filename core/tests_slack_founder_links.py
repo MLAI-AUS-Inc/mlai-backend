@@ -19,6 +19,7 @@ from django.test import (
     TransactionTestCase,
     override_settings,
     skipUnlessDBFeature,
+    tag,
 )
 from django.urls import reverse
 from django.utils import timezone
@@ -281,6 +282,12 @@ class SlackServiceStrictUserLookupTests(SimpleTestCase):
         self.assertIsNone(SlackService.get_user_profile("UMISSING1"))
 
 
+# The migration tests below each rebuild the schema, which takes minutes, and
+# production runs PostgreSQL only. CI therefore runs them in the PostgreSQL
+# migration lane and leaves them out of the SQLite lane. A class with this tag
+# runs only where a PostgreSQL command names it: add a new one to "Run
+# migration tests" in .github/workflows/deploy.yml (a contract test checks).
+@tag("postgres-only")
 class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
     migrate_from = [("core", "0060_slackfounderlinkrequest_consumed_by_user")]
     migrate_to = [("core", "0061_clear_synthetic_web_slack_ids")]
@@ -333,6 +340,7 @@ class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
         )
 
 
+@tag("postgres-only")
 class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
     migrate_from = [
         ("core", "0062_slackfounderlinkrequest_created_index"),
@@ -696,6 +704,7 @@ class SlackFounderActorReferenceMigrationTests(TransactionTestCase):
         )
 
 
+@tag("postgres-only")
 class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
     migrate_from = [
         ("core", "0063_canonicalize_legacy_content_factory_actor_ids")
@@ -1052,6 +1061,7 @@ class SlackFounderActorMigrationHistoryGuardTests(TransactionTestCase):
         self.assertEqual(resolve_user_for_actor_id(canonical_actor_id).pk, user.pk)
 
 
+@tag("postgres-only")
 class SlackFounderActorMigrationAlreadyAppliedGuardTests(TransactionTestCase):
     migrate_from = [
         ("core", "0064_guard_legacy_actor_migration_history")
@@ -1141,6 +1151,7 @@ class SlackFounderActorMigrationAlreadyAppliedGuardTests(TransactionTestCase):
         )
 
 
+@tag("postgres-only")
 class SlackFounderActorOrphanedPrincipalGuardTests(TransactionTestCase):
     migrate_from = [
         ("core", "0065_recheck_legacy_actor_migration_attestation")
@@ -1392,6 +1403,7 @@ class SlackFounderActorOrphanedPrincipalGuardTests(TransactionTestCase):
         self.assertEqual(resolve_user_for_actor_id(actor_id).pk, user.pk)
 
 
+@tag("postgres-only")
 class SlackFounderActorDeletedBeforeHistoryGuardTests(TransactionTestCase):
     migrate_from = [
         ("core", "0062_slackfounderlinkrequest_created_index"),
@@ -3355,8 +3367,7 @@ class LinkedCoworkingEligibilityTests(APITestCase):
 
     def test_slack_only_placeholder_is_not_reported_as_founder_tools_linked(self):
         SlackFounderAccountLink.objects.all().delete()
-        self.slack_user.email = "ucowlink12@slack.placeholder.com"
-        self.slack_user.save(update_fields=["email"])
+        User.objects.filter(pk=self.slack_user.pk).update(email="ucowlink12@slack.placeholder.com")
 
         response = self.client.post(
             reverse("coworking-book"),
@@ -3375,8 +3386,7 @@ class LinkedCoworkingEligibilityTests(APITestCase):
 
     def test_admin_batch_does_not_report_placeholder_target_as_linked(self):
         SlackFounderAccountLink.objects.all().delete()
-        self.slack_user.email = "ucowlink12@slack.placeholder.com"
-        self.slack_user.save(update_fields=["email"])
+        User.objects.filter(pk=self.slack_user.pk).update(email="ucowlink12@slack.placeholder.com")
 
         response = self.client.post(
             reverse("coworking-book-many"),

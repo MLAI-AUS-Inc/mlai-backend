@@ -141,19 +141,33 @@ def queue_wake(connection_id, *, signal, expected_generation=None):
 
 def submit_immediate(identifier):
     """A bounded local fast path; the saved due operation is always the fallback."""
-    if not enabled() or not _SLOTS.acquire(blocking=False):
+    if not enabled():
         return False
+
+    def advance_with_jitter(operation_id):
+        time.sleep(random.uniform(0, 0.5))
+        advance_wake(operation_id)
+
+    return submit_operation(advance_with_jitter, identifier)
+
+
+def submit_operation(advance, identifier):
+    """Submit a committed, independently leased operation; the scheduler owns overflow and retries."""
+    if not _SLOTS.acquire(blocking=False):
+        return False
+
     def run():
-        close_old_connections()
         try:
-            time.sleep(random.uniform(0,0.5))
-            advance_wake(identifier)
-        finally:
             close_old_connections()
-            _SLOTS.release()
+            advance(identifier)
+        finally:
+            try:
+                close_old_connections()
+            finally:
+                _SLOTS.release()
     try:
         _POOL.submit(run)
-    except RuntimeError:
+    except (RuntimeError, OSError):
         _SLOTS.release()
         return False
     return True

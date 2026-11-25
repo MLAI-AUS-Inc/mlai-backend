@@ -2,6 +2,7 @@ import time
 
 from django.core.management.base import BaseCommand, CommandError
 
+from community_chat.email_change_delivery import process_email_change_jobs
 from community_chat.email_delivery import process_email_code_deliveries
 
 
@@ -23,6 +24,7 @@ class Command(BaseCommand):
 
         while True:
             counts = process_email_code_deliveries(limit=batch_size)
+            counts["email_changes"] = process_email_change_jobs(limit=batch_size)
             if options["once"]:
                 self.stdout.write(
                     "Chat email-code outbox: "

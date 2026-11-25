@@ -51,6 +51,9 @@ class SessionDeviceBindingTests(SimpleTestCase):
         self.addCleanup(devices.stop)
         self.conflicts = self.devices.filter.return_value.exclude.return_value
         self.conflicts.exists.return_value = False
+        self.retired_signer = self.enterContext(
+            patch("community_chat.email_change.retired_signer", return_value=False)
+        )
         atomic = patch("community_chat.account_sessions.transaction.atomic", side_effect=nullcontext)
         atomic.start()
         self.addCleanup(atomic.stop)
@@ -84,6 +87,17 @@ class SessionDeviceBindingTests(SimpleTestCase):
         self.assertIs(credentials.session, self.session)
         self.assertTrue(credentials.access_token.startswith(ACCESS_TOKEN_PREFIX))
         self.session.save.assert_called_once()
+
+    def test_retired_signer_cannot_authenticate_or_refresh(self):
+        self.retired_signer.return_value = True
+
+        with self.assertRaises(InvalidAccountSession):
+            authenticate_access_token(ACCESS_TOKEN_PREFIX + "synthetic")
+        with self.assertRaises(InvalidAccountSession):
+            rotate_account_session(REFRESH_TOKEN_PREFIX + "synthetic")
+
+        self.sessions.filter.return_value.update.assert_not_called()
+        self.session.save.assert_not_called()
 
     def test_mixed_session_can_still_be_signed_out(self):
         self.conflicts.exists.return_value = True

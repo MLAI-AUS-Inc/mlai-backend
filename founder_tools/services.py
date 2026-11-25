@@ -23,6 +23,7 @@ from core.actor_ids import (
 from integrations.utils import normalize_domain
 from organizations.models import Organization
 
+from . import membership
 from .models import VibeRaisingCompany, VibeRaisingProfile
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,9 @@ def organization_owner_user_id(organization) -> int | None:
     """
     if organization is None:
         return None
+    workspace = membership.shared_workspace(organization)
+    if workspace:
+        return membership.active_memberships(workspace).order_by("joined_at", "id").values_list("user_id", flat=True).first()
     try:
         from .startup_team import pinned_owner
     except (ImportError, AttributeError):
@@ -261,11 +265,14 @@ def organization_owner_user_id(organization) -> int | None:
             return owner_id
     live, stale = _organization_claims(organization)
     first = (live or stale or [None])[0]
-    return first.profile.user_id if first else None
+    return first.profile.user_id if first and first.profile_id else None
 
 
 def user_may_use_organization(user, organization) -> bool:
     """Existing tenant history requires an established founder owner."""
+    workspace = membership.shared_workspace(organization)
+    if workspace:
+        return membership.has_membership(user, workspace)
     owner_id = organization_owner_user_id(organization)
     return owner_id is not None and owner_id == getattr(user, "id", None)
 
@@ -291,6 +298,8 @@ def user_may_claim_organization(user, organization) -> bool:
     Unowned history otherwise still needs review. Tenancy reads keep using
     :func:`user_may_use_organization`, which this does not widen.
     """
+    if membership.shared_workspace(organization):
+        return False
     if user_may_use_organization(user, organization):
         return True
     live, stale = _organization_claims(organization)
@@ -437,6 +446,10 @@ def apply_company_domain_change(company: VibeRaisingCompany, new_domain, *, user
     )
 
     if not target_exists and exclusive:
+        if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+            summary = summarize_organization_data(organization)
+            if organization_has_material_data(summary):
+                raise CompanyDomainChangeBlocked(company, organization.domain, normalized_new, summary)
         old_domain = organization.domain
         organization.domain = normalized_new
         organization.save(update_fields=["domain"])
@@ -450,6 +463,8 @@ def apply_company_domain_change(company: VibeRaisingCompany, new_domain, *, user
         return "renamed"
 
     summary = summarize_organization_data(organization)
+    if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+        raise CompanyDomainChangeBlocked(company, organization.domain, normalized_new, summary)
     if organization_has_material_data(summary):
         if not confirmed:
             raise CompanyDomainChangeBlocked(company, organization.domain, normalized_new, summary)
@@ -964,8 +979,10 @@ def get_or_create_founder_profile(user) -> VibeRaisingProfile:
 
 @transaction.atomic
 def set_active_company(profile: VibeRaisingProfile, company: VibeRaisingCompany) -> VibeRaisingProfile:
-    if company.profile_id != profile.id:
-        raise ValueError("Company does not belong to this profile.")
+    if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+        company = membership.lock_company_edit(profile.user, company)
+    if not membership.companies_for_user(profile.user).filter(pk=company.pk).exists():
+        raise ValueError("Startup is unavailable to this account.")
     ensure_company_organization(company)
     profile.active_company = company
     profile.save(update_fields=["active_company", "updated_at"])
@@ -975,10 +992,8 @@ def set_active_company(profile: VibeRaisingProfile, company: VibeRaisingCompany)
 @transaction.atomic
 def resolve_active_company(profile: VibeRaisingProfile) -> VibeRaisingCompany | None:
     from founder_tools.profile_fields import visible_companies
-    company = profile.active_company or visible_companies(profile.companies.all()).order_by("created_at", "name").first()
-    if company and profile.active_company_id != company.id:
-        profile.active_company = company
-        profile.save(update_fields=["active_company", "updated_at"])
+    companies = visible_companies(membership.companies_for_user(profile.user))
+    company = companies.filter(pk=profile.active_company_id).first() or companies.order_by("created_at", "name").first()
     if company:
         ensure_company_organization(company)
     return company
@@ -997,10 +1012,7 @@ def get_founder_company_context(user, company_id=None, *, persist_active=False) 
     profile = get_or_create_founder_profile(user)
     from .startup_team import bound_member_context
     member = bound_member_context(user, company_id) if company_id else None
-    if profile.role != VibeRaisingProfile.ROLE_FOUNDER and member is None:
-        raise PermissionError("Only founders can access this product.")
-
-    companies = profile.companies.select_related("organization")
+    companies = membership.companies_for_user(user)
     if company_id:
         # `companies` is already scoped to this profile, so .get() enforces
         # ownership (DoesNotExist for a company the user does not own).
@@ -1009,6 +1021,10 @@ def get_founder_company_context(user, company_id=None, *, persist_active=False) 
         except VibeRaisingCompany.DoesNotExist:
             if member is not None:
                 return member
+            if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
+                # Non-founders reach only shared startups they belong to;
+                # anything else stays a role refusal, not a lookup miss.
+                raise PermissionError("Only founders can access this product.")
             raise
         # By default a per-request company_id only SCOPES this request; it does
         # NOT mutate the profile's shared active_company. Only the explicit
@@ -1021,8 +1037,12 @@ def get_founder_company_context(user, company_id=None, *, persist_active=False) 
     else:
         company = resolve_active_company(profile)
         if company is None:
+            if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
+                raise PermissionError("Only founders can access this product.")
             raise VibeRaisingCompany.DoesNotExist("No founder company exists.")
 
+    if profile.role != VibeRaisingProfile.ROLE_FOUNDER and company.membership_policy != VibeRaisingCompany.SHARED_ACCESS:
+        raise PermissionError("Only founders can access this product.")
     organization = ensure_company_organization(company)
     if organization is None:
         raise Organization.DoesNotExist("Company domain is required.")

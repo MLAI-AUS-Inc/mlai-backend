@@ -12,6 +12,7 @@ from . import telemetry
 
 POSTING_METHODS = frozenset({
     "chat.postMessage", "chat.update", "chat.delete", "reactions.add", "reactions.remove",
+    "files.completeUploadExternal",
 })
 
 
@@ -21,7 +22,8 @@ def channel_budget_method(method, kwargs):
         return None
     for key in ("json", "data", "params"):
         arguments = kwargs.get(key)
-        channel = arguments.get("channel") if isinstance(arguments, Mapping) else None
+        channel_arg = "channel_id" if method == "files.completeUploadExternal" else "channel"
+        channel = arguments.get(channel_arg) if isinstance(arguments, Mapping) else None
         if isinstance(channel, str) and channel.strip():
             channel = channel.strip()
             key = f"{method}:{channel}"

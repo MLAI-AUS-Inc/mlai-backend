@@ -68,7 +68,7 @@ class ReviewActionAuditTests(SimpleTestCase):
         self.enterContext(patch.object(WebsiteConnectionOperation.objects, 'select_for_update', return_value=self.operations))
         self.enterContext(patch.object(WebsiteConnectionOperation.objects, 'filter', return_value=self.operations))
         self.enterContext(patch.object(VibeRaisingProfile.objects, 'get_or_create', return_value=(self.profile, False)))
-        self.enterContext(patch.object(VibeRaisingProfile, 'companies', fixtures.rows(self.company)))
+        self.enterContext(patch('founder_tools.membership.companies_for_user', return_value=fixtures.rows(self.company)))
         self.enterContext(patch.object(OrganizationContentConfig.objects, 'get_or_create', return_value=(self.config, False)))
         self.enterContext(patch.object(OrganizationContentConfig.objects, 'filter', return_value=Query([self.config])))
         self.enterContext(patch.object(ContentFactoryRun.objects, 'prefetch_related', return_value=Query([self.run], ContentFactoryRun)))

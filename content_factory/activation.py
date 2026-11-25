@@ -198,6 +198,12 @@ def durable_integration_evidence(config, connection, *, now=None):
         return {**base, "reasonCode": "publishing_adapter_required"}
     if connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers):
         return {**base, "reasonCode": "integration_required"}
+    if any(item.get("code") == "github_access_required" for item in connection.blockers):
+        # The repository moved to an account MLAI can't see yet.
+        return {**base, "reasonCode": "github_access_required"}
+    if any(item.get("code") == "CONNECTION_READ_ONLY" for item in connection.blockers):
+        # The repository is archived on GitHub, so it cannot take pull requests.
+        return {**base, "reasonCode": "CONNECTION_READ_ONLY"}
     if any(item.get("code") == "repository_source_changed" for item in connection.blockers):
         return {**base, "reasonCode": "repository_source_changed"}
     if not mapping(connection.capabilities).get("publishingReady"):
@@ -218,7 +224,15 @@ def durable_integration_evidence(config, connection, *, now=None):
             return {**base, "reasonCode": "verification_required"}
     contract = mapping(target.contract)
     route = str(contract.get("route_path") or contract.get("public_path") or str(contract.get("route_template") or "").split("{")[0] or "/articles")
-    return {**base, "verified": True, "publishingVerified": live_deployment_verified(connection, target, now=now), "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
+    live = live_deployment_verified(connection, target, now=now)
+    # MLAI's own build and render proof of the merged source is what publishing
+    # needs; the founder's host deploying it is a background status
+    # (website_live_status) unless ARTICLES_READY_ON_MERGE_ENABLED is off.
+    # A target that needs sealed execution proof keeps its live check.
+    from .website_live_status import enabled as ready_on_merge
+    proven = ready_on_merge() and not required(connection, target)
+    return {**base, "verified": True, "publishingVerified": live or proven, "liveVerified": live,
+            "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
 
 
 def first_article_capability(state):
@@ -260,6 +274,7 @@ def article_capabilities(config, *, domain="", user=None, account=None, evidence
         "github_unavailable": "GitHub is temporarily unavailable. Try again shortly.",
         "github_write_required": "Grant repository write access before preparing or publishing articles.",
         "repository_source_changed": "The repository source changed. Scan and verify the current source.",
+        "CONNECTION_READ_ONLY": "Your website's code is archived on GitHub. Unarchive it on GitHub to carry on.",
         "publishing_adapter_required": "The custom build is verified. Connect an article publishing adapter or write a portable draft.",
     }
     write_verified=access.get("verified") is True and writable is True

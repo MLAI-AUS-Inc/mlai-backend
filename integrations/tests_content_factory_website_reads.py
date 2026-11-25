@@ -45,7 +45,12 @@ class WebsiteAppRunReadTests(WebsiteDatabaseFixture, TestCase):
         transition_connection(self.config, action="disconnect", expected=self.binding)
         saved = _sync_remote_run_payload(self.run.run_id, self.snapshot())
         self.assertEqual(saved.status, "cancelled")
-        self.assertEqual(saved.result, {"retained": "original history"})
+        # The disconnect records why the system stopped the run (B24); the
+        # worker's newer result is never adopted over the original history.
+        self.assertEqual(saved.result, {"retained": "original history", "cancelled_by": "system",
+                                        "cancellation_reason": "system_stop", "cancellation_transition": "disconnect",
+                                        "cancellation_generation": 1})
+        self.assertNotIn("new_worker_result", saved.result)
         self.assertEqual(saved.run_request, self.binding)
 
     def test_reconnect_does_not_rebind_old_run_even_with_newer_execution_generation(self):

@@ -34,6 +34,23 @@ def report_account_id(user, organization, provider):
     scope = _RUN_ACCOUNTS.get()
     if scope is not None and scope[:2] == (user.pk, getattr(organization, "pk", None)):
         return scope[2].get(provider) or 0
+    return _saved_report_account_id(user, organization, provider)
+
+
+def account_choice_required(user, organization, provider):
+    """True when several accounts are connected and the founder has not picked one.
+
+    Reads the saved choice, never a run's pins: a pin taken from the most
+    recently updated sibling is a guess, not a choice.
+    """
+    if organization is None or _saved_report_account_id(user, organization, provider) is not None:
+        return False
+    return ExternalServiceConnection.objects.filter(
+        user=user, organization=organization, provider=provider,
+    ).exclude(status="disconnected").count() > 1
+
+
+def _saved_report_account_id(user, organization, provider):
     if organization is None:
         return None
     profile = StartupProfile.objects.filter(organization=organization).first()

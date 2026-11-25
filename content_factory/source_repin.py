@@ -12,9 +12,19 @@ from workflow_runs.models import ContentFactoryRun
 from . import p2_foundation, registry_policy
 from .website_contract import WebsiteAuthorityError, CONNECTION_FIELDS, connection_contract
 from .website_connections import authority_guard, REPOSITORY_WORKFLOWS
+from .website_models import WebsiteConnection
 
 SHA = re.compile(r"[a-f0-9]{40}\Z")
 REASONS = frozenset({"source_changed_mid_run", "setup_start_moved", "resume_latest"})
+# With ARTICLES_SOURCE_FOLLOW_ENABLED, a founder who pushes a few times while an
+# article is written still gets it. Content Factory's
+# harness.source_repin.FOLLOW_MAX_REPINS must match.
+FOLLOW_MAX_REPINS = 10
+
+
+def follow_enabled():
+    """ARTICLES_SOURCE_FOLLOW_ENABLED: re-pin every startup's runs, not only the P2 cohort's."""
+    return bool(getattr(settings, "ARTICLES_SOURCE_FOLLOW_ENABLED", False))
 
 
 def _mapping(value):
@@ -30,13 +40,29 @@ def _refuse(*, limit=False):
 
 
 def repin_limit():
-    """Return the registry's bounded source re-pin limit, failing closed."""
+    """Return the registry's bounded source re-pin limit, failing closed.
+
+    An explicit 0 (or an unreadable value) turns re-pins off whatever the
+    follow switch says. Otherwise the follow switch outranks the registry's
+    positive limit, which is the P2 self-heal budget rather than a cap on
+    following ordinary pushes; Content Factory's _max_repins agrees.
+    """
     value = registry_policy.limits().get("source_repins_per_run", 2)
-    return min(value, 2) if type(value) is int and value >= 0 else 0
+    limit = min(value, 2) if type(value) is int and value >= 0 else 0
+    if limit == 0:
+        return 0
+    return max(limit, FOLLOW_MAX_REPINS) if follow_enabled() else limit
 
 
-def validated_history(value, *, max_repins=2):
-    """Validate a bounded backend receipt before trusting its source lineage."""
+def validated_history(value, *, max_repins=None):
+    """Validate a bounded backend receipt before trusting its source lineage.
+
+    By default a stored receipt is accepted up to FOLLOW_MAX_REPINS whatever
+    the follow switch says now, so turning the switch off never makes an
+    earlier, valid lineage unreadable. Whether another re-pin is allowed is
+    checked separately against repin_limit().
+    """
+    max_repins = max(repin_limit(), FOLLOW_MAX_REPINS) if max_repins is None else max_repins
     receipt = _mapping(value)
     history = receipt.get("history")
     count = receipt.get("repins")
@@ -83,12 +109,53 @@ def _settled(run):
     return False
 
 
+ACTIVE_STATUSES = frozenset({"queued", "running", "failed", "blocked", "awaiting_delivery_mode",
+                             "awaiting_confirmation", "awaiting_approval", "approval_required"})
+ARTICLE_WORKFLOWS = frozenset({"direct_generate", "confirmed_topic", "article_revision"})
+# Any of these on a finished draft means the founder approved it or it is
+# being published: its review is bound to the exact preview commit.
+_HANDED_OFF_KEYS = ("article_publish_approval_receipt", "publish_child_run_id", "promoted_publish_job_id",
+                    "promote_bundle_requested_at", "publish_handoff_pending", "publish_pr_url")
+
+
+def _unapproved_draft(run):
+    """A finished article draft still awaiting review, whose preview may be rebuilt on a newer commit."""
+    result = _mapping(run.result)
+    return (follow_enabled() and run.status == "completed" and run.workflow in ARTICLE_WORKFLOWS
+            and not any(result.get(key) for key in _HANDED_OFF_KEYS))
+
+
 def _precheck(run):
-    if (not getattr(settings, "ARTICLES_SOURCE_REPIN_ENABLED", False) or run.organization_id is None
-            or not p2_foundation.p2_applies(run.organization) or run.workflow not in REPOSITORY_WORKFLOWS
-            or run.status not in {"queued", "running", "failed", "blocked", "awaiting_delivery_mode",
-                                  "awaiting_confirmation", "awaiting_approval", "approval_required"} or _settled(run)):
+    # With the follow switch every startup's run may re-pin; without it only a
+    # P2-cohort run with ARTICLES_SOURCE_REPIN_ENABLED, as before.
+    cohort_allowed = follow_enabled() or (getattr(settings, "ARTICLES_SOURCE_REPIN_ENABLED", False)
+                                          and run.organization_id is not None and p2_foundation.p2_applies(run.organization))
+    if (not cohort_allowed or run.organization_id is None or run.workflow not in REPOSITORY_WORKFLOWS
+            or (run.status not in ACTIVE_STATUSES and not _unapproved_draft(run)) or _settled(run)):
         raise _refuse()
+
+
+def _resolve_repin(run, before, after):
+    """With ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED, ask the one source resolver first.
+
+    Read outside any lock (one GitHub compare of from_sha...to_sha). Every
+    check below still runs; this can only refuse earlier, never allow more.
+    """
+    from .website_connections import resolve_run_source, single_source_resolver_enabled
+    if not single_source_resolver_enabled():
+        return None
+    try:
+        contract = connection_contract(_mapping(run.run_request))
+    except WebsiteAuthorityError:
+        contract = {}
+    connection = WebsiteConnection.objects.filter(pk=contract["website_connection_id"]).first() if contract else None
+    if connection is None:
+        return None
+    decision = resolve_run_source(run, "repin", connection=connection, pinned_sha=before, head_ref=after,
+                                  github_repo=connection.github_repo)
+    if not decision.proceeds:
+        raise _refuse()
+    return decision
 
 
 def repin_source(run_id, payload):
@@ -108,6 +175,7 @@ def repin_source(run_id, payload):
     run = ContentFactoryRun.objects.select_related("organization").filter(run_id=run_id).first()
     if run is None:
         raise ContentFactoryRun.DoesNotExist
+    _resolve_repin(run, before, after)
     from .run_ownership import owner_receipt
     if (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1:
         return _repin_owned_source(run, payload)

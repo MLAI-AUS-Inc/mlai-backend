@@ -11,6 +11,8 @@ subsystem-specific contracts and runbooks.
 
 ## Backend maintenance
 
+- [PostgreSQL off-host backup and restore](../ops/postgres-backup/README.md) — encrypted snapshots, the production timer and isolated restore verification
+
 - [26 September release integration](backend-refactor-release-2026-09-26.md) — current-main fixes, validation and pending migration approval
 - [26 September migration proposal](backend-refactor-migration-proposal-2026-09-26.md) — empty graph merge and exact disposable-test inventory
 - [15 September release preparation](backend-refactor-release-2026-09-15.md) — historical integration and test scope
@@ -99,6 +101,7 @@ subsystem-specific contracts and runbooks.
 - [`community-chat-home.md`](community-chat-home.md)
 - [`community-chat-roo-dm.md`](community-chat-roo-dm.md) — owner-scoped Slack Roo chat
 - [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
+- [Roo avatar account contract](community-chat-roo-avatar.md) — persistent outfits, fur colour and current verified rank unlocks
 - [`volunteer-api.md`](volunteer-api.md) — gated member journey, recognition and Roo contracts
 
 - [Startup settings profile contract](startup-settings-profile-contract.md) — sparse profile saves, reviewed research, logo branding and scoped Chat facade
@@ -154,6 +157,7 @@ rollout sequence.
 
 ## Roo
 
+- [MLAI Arcade](mlai-arcade.md) — Pulse and level-up pulls, prize policy and account API.
 - [Roo awards to members without Slack](roo-chat-only-points.md)
 
 - [Roo event discounts](roo-event-discounts.md) — private quotes, general-point holds, one-use Luma coupons and supervised reconciliation.
@@ -177,6 +181,19 @@ approved work to the existing idempotent Linear issue writer. Deploy migration
 `integrations.0042_linear_meeting_action_batches` and these endpoints before
 the Roo release that renders durable review buttons.
 
+For meeting proposals, Roo sends `recheck_project_work` with the analysed
+snapshot and proposed outcome. Approval re-reads the project issue inventory
+before creating work. An existing match returns `alreadyTracked`. Review
+responses break approved items down into `counts.created` and
+`counts.alreadyTracked`.
+
+`POST /api/v1/integrations/linear/project-updates` requires an explicit
+`health` value of `onTrack`, `atRisk`, or `offTrack`. Roo supplies a compatible
+64-character hex `idempotency_key`. A repeat returns the original update when
+verified. Uncertain writes are checked against project update history before
+any retry. These changes use the existing receipt table. Deploy the backend
+before Roo sends the new guarded requests.
+
 ## Document status
 
 Documents in this directory are subsystem references, not a replacement for
@@ -197,3 +214,5 @@ identified as current by a maintained architecture document.
 - [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.
+
+- [Managed Chat channels](managed-channel-sections.md) covers scoped Linear, Plane and Luma sync, durable room identity and optional Slack event conversations.

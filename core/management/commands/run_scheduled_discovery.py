@@ -11,6 +11,10 @@ from core.slack_founder_link_retention import (
 )
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
+from content_factory.staff_hold_alerts import run_staff_hold_alert_sweep
+from content_factory.founder_stuck_alerts import run_founder_stuck_alert_sweep
+from content_factory.system_stopped_runs import run_system_stopped_run_sweep
+from content_factory.website_connection_invariants import run_connection_invariant_sweep
 from content_factory.founder_journey_sweeps import scheduled_founder_journey_sweeps
 from content_factory.founder_website_checks import scheduled_founder_website_checks
 from content_factory.self_heal_sweeps import scheduled_self_heal_sweeps
@@ -18,11 +22,15 @@ from content_factory.reconciliation import run_content_factory_reconciliation_sw
 from content_factory.run_reconciliation import run_authoritative_reconciliation_sweep
 from content_factory.run_terminal_settlement import run_terminal_settlement_sweep
 from content_factory.website_reconciliation import process_website_connection_operations
+from content_factory.website_live_status import run_live_status_sweep
+from content_factory.website_deploy_link import run_article_live_sweep
 from content_factory.dispatch_outbox import process_dispatch_outbox
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
+from crm.arcade_delivery import run_arcade_prize_delivery
 from crm.blasts import run_blast_dispatch_scheduler
 from crm.listmonk_sync import run_listmonk_sync_scheduler
 from crm.luma_sync import run_luma_guest_sync_scheduler
+from crm.reminders import run_reminder_scheduler
 from crm.warmup import run_warmup_scheduler
 from crm.deliverability.guardian import run_deliverability_guard
 from crm.deliverability.day_close import run_stream_day_close
@@ -46,7 +54,9 @@ from jobs.services.job_pipeline import enqueue_daily_jobs as run_daily_jobs_sche
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
 from mentoring.instant_booking import process_due_bookings
+from community_chat.intro_welcome import run_chat_intro_welcome_sweep
 from mentoring.calendar_sync import sync_due_sessions
+from mentoring.feedback import run_scheduler as run_mentor_feedback_scheduler
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
@@ -124,7 +134,28 @@ class Command(BaseCommand):
             # draft 24 h after a startup is created, Your turn for 72 h), for
             # every org. Gated by ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED and
             # bounded by ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK.
+            # Roo's Slack welcome for intros written in MLAI Chat (paid by
+            # the Volunteer pipeline, so Roo itself never sees them). Once
+            # per intro, recent intros only; COMMUNITY_CHAT_INTRO_WELCOME_ENABLED.
+            ("chat_intro_welcomes", run_chat_intro_welcome_sweep),
             ("founder_journey_alerts", run_founder_journey_alert_sweep),
+            # Workstream 5: an article held for staff, and still held at 24 h.
+            # Off unless ARTICLES_STAFF_HOLD_ALERTS_ENABLED is true.
+            ("staff_hold_alerts", run_staff_hold_alert_sweep),
+            # One "founder stuck" alert for every cohort: a stopped website
+            # setup, a website step retrying too long, or a latest run stopped
+            # with no next action. On unless ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED
+            # is false; at most one bounded pass every 10 minutes.
+            ("founder_stuck_alerts", run_founder_stuck_alert_sweep),
+            # B22: one staff alert per website connection in a state that
+            # should never happen (Ready with a scan blocker, an old open
+            # operation on a Ready site, ...). Local reads only, once an hour;
+            # honours ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED.
+            ("connection_invariants", run_connection_invariant_sweep),
+            # B24: an article run a connection or operation transition stopped
+            # is restarted once (connected, consent unchanged) or keeps its
+            # draft card with one Restart notice. A founder's cancel gives nothing.
+            ("system_stopped_runs", run_system_stopped_run_sweep),
             # P1 founder-journey sweeps (first profile, draft-ready outbox).
             # Runs only while MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED is on;
             # each sweep checks its own flag and never raises.
@@ -136,6 +167,16 @@ class Command(BaseCommand):
             # interval + batch cap), so it is safe to tick every loop.
             ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
             ("website_connection_operations", process_website_connection_operations),
+            # Whether each Ready website's host shows its merged articles setup:
+            # a background status with a staff alert after 24 h, never a lock.
+            # Off only with ARTICLES_READY_ON_MERGE_ENABLED=false; one bounded
+            # pass every 5 minutes.
+            ("website_live_status", run_live_status_sweep),
+            # Plan C14: merged articles not yet on the live site are re-checked
+            # and alert staff once past the bound; never a gate on a draft.
+            # Off unless ARTICLES_LIVE_URL_VERIFICATION_ENABLED; one bounded
+            # pass every 10 minutes.
+            ("article_live_checks", run_article_live_sweep),
             ("website_consistency", run_website_consistency_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
             # P2 self-heal sweeps (policy, refunds, merge worker, notifications,
@@ -145,6 +186,11 @@ class Command(BaseCommand):
             # Paid booking recovery continues even when new instant admission is off.
             ("mentor_booking_operations", lambda: {"status": "completed", **process_due_bookings()}),
             ("mentor_calendar_sync", lambda: {"status": "completed", **sync_due_sessions()}),
+            # Asks the founder how a session went a few minutes after its booked
+            # end (email + Roo Slack DM, three faces). Off unless
+            # MENTOR_FEEDBACK_ENABLED and MENTOR_FEEDBACK_NOT_BEFORE are set;
+            # one row per session makes every later tick a cheap check.
+            ("mentor_session_feedback", run_mentor_feedback_scheduler),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.
             ("stripe_payout_reconciliation", run_daily_payout_reconciliation),
@@ -188,6 +234,10 @@ class Command(BaseCommand):
             ("crm_deliverability_digest", run_daily_digest),
             ("crm_seed_checks", run_seed_checks),
             ("crm_stream_day_close", run_stream_day_close),
+            # Automatic event reminders (day before, hour before). Off unless
+            # CRM_AUTO_REMINDERS_ENABLED; queues through the normal blast path.
+            ("crm_event_reminders", run_reminder_scheduler),
+            ("arcade_prize_delivery", run_arcade_prize_delivery),
             ("crm_blast_dispatch", run_blast_dispatch_scheduler),
             # Polls listmonk for campaign progress, opens, clicks, bounces and
             # unsubscribes. Runs whenever listmonk is configured, throttled to

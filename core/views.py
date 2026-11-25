@@ -36,6 +36,7 @@ from .refresh_sessions import (
     revoke_refresh_credential,
 )
 from .models import Hackathon
+from .profile_avatars import encode_profile_avatar, store_profile_avatar
 from .serializers import (
     HackathonSerializer,
     MyTokenObtainPairSerializer,
@@ -473,6 +474,7 @@ class MagicLinkVerifyView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [AuthEndpointRateThrottle]
 
+    @transaction.atomic
     def get(self, request):
         token = request.query_params.get('token')
         logger.info("Received magic link verification request.")
@@ -497,10 +499,19 @@ class MagicLinkVerifyView(APIView):
                 if _invalid_operations_next_path(requested_next_path, next_param, app_param):
                     return _invalid_next_path_response()
 
-                user = User.objects.get(email__iexact=email)
+                users = User.objects.select_for_update()
+                versioned = 'user_id' in token_data and 'auth_version' in token_data
+                if versioned:
+                    user = users.get(pk=token_data['user_id'], email=email)
+                elif settings.MLAI_LEGACY_EMAIL_MAGIC_LINKS_ENABLED and 'user_id' not in token_data and 'auth_version' not in token_data:
+                    user = users.get(email__iexact=email)
+                else:
+                    raise User.DoesNotExist
                 from core.account_bans import account_is_banned
                 if account_is_banned(user):
                     return Response({"error": "Account unavailable."}, status=status.HTTP_403_FORBIDDEN)
+                if versioned and token_data['auth_version'] != user.auth_version:
+                    raise User.DoesNotExist
                 logger.info("Verified magic link for existing user_id=%s", user.id)
 
                 if app_param == 'admin' and not _is_operations_admin(user):
@@ -592,7 +603,7 @@ class MagicLinkVerifyView(APIView):
 
             except User.DoesNotExist:
                 logger.warning("Magic link referenced a user that no longer exists")
-                return Response({"error": "User does not exist."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
         else:
             logger.warning("Invalid or expired magic link token.")
             return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
@@ -702,7 +713,10 @@ class UpdateProfileView(APIView):
         full_name = request.data.get("full_name")
         first_name = request.data.get("first_name")
         last_name = request.data.get("last_name")
-        email = request.data.get("email")
+        supplied_email = User.objects.normalize_email(request.data.get("email"))
+        if supplied_email and supplied_email != user.email:
+            return Response({"error": "email_change_required"}, status=status.HTTP_400_BAD_REQUEST)
+        changed_fields = set()
         phone = request.data.get("phone")
         about = request.data.get("about")
         app_context = _normalize_app_context(request.data.get('app'), default='')
@@ -715,22 +729,27 @@ class UpdateProfileView(APIView):
         else:
             personas = request.data.get("personas")
 
-        logger.info(f"UpdateProfileView PATCH: user={user.email}, data_keys={list(request.data.keys())}, files_keys={list(request.FILES.keys())}")
+        logger.info("UpdateProfileView PATCH: user_id=%s", user.pk)
 
         # Update the user's profile information.
         if first_name:
             user.first_name = first_name
+            changed_fields.add("first_name")
         if last_name:
             user.last_name = last_name
+            changed_fields.add("last_name")
             
         if full_name:
             user.full_name = full_name
+            changed_fields.update(("first_name", "last_name"))
         
         if phone is not None:
             user.phone = phone
+            changed_fields.add("phone")
             
         if about is not None:
             user.about = about
+            changed_fields.add("about")
 
         if personas is not None:
             # Ensure it's a list and validate against known persona choices.
@@ -761,43 +780,10 @@ class UpdateProfileView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             user.personas = deduped_personas
+            changed_fields.add("personas")
 
-        # Only update the email if it's changed.
-        if email and email != user.email:
-            # TODO: Consider marking the email as unverified and sending a verification email.
-            user.email = email
-
-        user.save()
-
-        # Handle avatar upload
-        avatar_file = request.FILES.get('avatar')
-        if avatar_file:
-            try:
-                from PIL import Image
-                from io import BytesIO
-                from .firebase_utils import upload_file_to_storage
-
-                img = Image.open(avatar_file)
-                img.thumbnail((300, 300))
-
-                output_buffer = BytesIO()
-                img_format = img.format if img.format else 'PNG'
-                img.save(output_buffer, format=img_format)
-                output_buffer.seek(0)
-
-                filename = f"avatars/{user.id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
-                avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
-
-                if avatar_url:
-                    user.avatar_url = avatar_url
-                    user.save()
-
-            except Exception as e:
-                logger.error(f"Error uploading avatar: {e}")
-
-        # Handle team avatar upload
-        team_avatar_file = request.FILES.get('team_avatar')
-        if team_avatar_file:
+        team = None
+        if "team_avatar" in request.FILES:
             if app_context == 'hospital':
                 team = _active_hospital_team(user)
             elif app_context == 'esafety':
@@ -818,32 +804,45 @@ class UpdateProfileView(APIView):
                     _active_hospital_team(user)
                     or (user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None)
                 )
-            if team:
+            if team is None:
+                return Response(
+                    {"error": "An eligible team is required to upload a team avatar.", "field": "team_avatar"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        encoded_avatars = {}
+        for field in ("avatar", "team_avatar"):
+            if field in request.FILES:
                 try:
-                    from PIL import Image
-                    from io import BytesIO
-                    from .firebase_utils import upload_file_to_storage
+                    encoded_avatars[field] = encode_profile_avatar(request.FILES[field])
+                except ValueError as exc:
+                    return Response({"error": str(exc), "field": field}, status=status.HTTP_400_BAD_REQUEST)
 
-                    img = Image.open(team_avatar_file)
-                    img.thumbnail((300, 300))
+        avatar_urls = {}
+        owners = {"avatar": ("avatars", user.id)}
+        if team is not None:
+            owners["team_avatar"] = ("team-avatars", team.id)
+        for field, encoded in encoded_avatars.items():
+            directory, owner_id = owners[field]
+            try:
+                avatar_urls[field] = store_profile_avatar(encoded, directory, owner_id)
+            except Exception:
+                logger.warning("Profile image storage failed for field %s", field)
+            if not avatar_urls.get(field):
+                return Response(
+                    {"error": "The avatar could not be stored. Try again.", "field": field},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
-                    output_buffer = BytesIO()
-                    img_format = img.format if img.format else 'PNG'
-                    img.save(output_buffer, format=img_format)
-                    output_buffer.seek(0)
-
-                    filename = f"team-avatars/{team.id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
-                    team_avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
-
-                    if team_avatar_url:
-                        team.avatar_url = team_avatar_url
-                        team.save(update_fields=['avatar_url'])
-                        logger.info(f"Team avatar uploaded for team {team.id}: {team_avatar_url}")
-
-                except Exception as e:
-                    logger.error(f"Error uploading team avatar: {e}")
-            else:
-                logger.warning(f"User {user.email} uploaded team_avatar but has no team")
+        if "avatar" in avatar_urls:
+            user.avatar_url = avatar_urls["avatar"]
+            changed_fields.add("avatar_url")
+        with transaction.atomic():
+            if changed_fields:
+                user.save(update_fields=changed_fields | {"updated_at"})
+            if "team_avatar" in avatar_urls:
+                team.avatar_url = avatar_urls["team_avatar"]
+                team.save(update_fields=["avatar_url"])
 
         team_profile = user_team_profile(user)
 

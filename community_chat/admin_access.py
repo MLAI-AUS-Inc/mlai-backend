@@ -12,7 +12,10 @@ This "admin" is unrelated to Django's ``/admin/`` site and to the relay's
 
 from __future__ import annotations
 
-from roo.permissions import is_mlai_admin_user
+from django.conf import settings
+
+from roo.models import PointsAdmin
+from roo.permissions import is_mlai_admin_user, mlai_admin_role
 
 from .permissions import has_verified_installation
 
@@ -49,10 +52,24 @@ def admin_sections(request) -> list[str]:
     # Imported here: ``crm.access`` imports this module for its gate.
     from crm.access import crm_enabled
 
-    from django.conf import settings
     sections = ["crm"] if crm_enabled() else []
+    # Users and teams: every MLAI admin may see who else is one.
+    sections.append("team")
     if getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False) and getattr(request.user, "is_staff", False):
         sections.append("startups")
+    return sections + member_progress_capabilities(request.user)
+
+
+def member_progress_capabilities(user) -> list[str]:
+    """Keep private location reporting within verified committee authorisation."""
+    if mlai_admin_role(user) not in {"admin", "superuser"}:
+        return []
+    sections = ["member_progress"]
+    authorised = getattr(settings, "COMMUNITY_CHAT_MEMBER_PROGRESS_LOCATION_ACCOUNT_IDS", ())
+    if str(user.pk) in authorised or PointsAdmin.objects.filter(
+        user=user, is_active=True, role="committee",
+    ).exists():
+        sections.append("member_progress_locations")
     return sections
 
 

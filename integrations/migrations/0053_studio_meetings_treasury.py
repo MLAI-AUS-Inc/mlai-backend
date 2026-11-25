@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('integrations', '0051_google_connection_accounts'),
+        ('integrations', '0052_managed_channel_sections'),
         ('organizations', '0003_organization_billing_user'),
     ]
 

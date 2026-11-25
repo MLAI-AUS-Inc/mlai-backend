@@ -21,7 +21,8 @@ from core.models import User
 from content_factory.models import OrganizationContentConfig
 from content_factory.website_goal import mapping, stamp
 from organizations.models import Organization
-from .models import VibeRaisingCompany
+from . import membership
+from .models import StartupMembership, VibeRaisingCompany
 
 logger = logging.getLogger(__name__)
 KEY = 'startup_team'
@@ -32,8 +33,9 @@ ARTICLE_WORKFLOWS = frozenset({'article_generation', 'direct_generate', 'confirm
 
 class TeamError(ValueError):
     """A closed requester-safe error that exposes no tenant or person identity."""
-    def __init__(self, reason, detail, status=403):
+    def __init__(self, reason, detail, status=403, *, retry_at=None):
         self.reason, self.detail, self.status = reason, detail, status
+        self.retry_at = retry_at
         super().__init__(detail)
 
 
@@ -116,6 +118,11 @@ def _history(roster, event, actor, subject, now):
 
 
 def _manage(user, organization, roster):
+    workspace = membership.shared_workspace(organization)
+    if workspace:
+        if not membership.has_membership(user, workspace):
+            raise TeamError('not_found', 'Startup not found.', 404)
+        return
     if not _valid_user(user) or not roster or roster.get('frozen') or _owner(organization) != user.pk:
         raise TeamError('owner_only', 'Only the startup owner can do this.')
 
@@ -139,6 +146,9 @@ def viewer_role(user, organization):
     """Re-resolve current ownership or membership, without a permission cache."""
     if not _valid_user(user) or organization is None:
         return None
+    workspace = membership.shared_workspace(organization)
+    if workspace:
+        return 'owner' if membership.has_membership(user, workspace) else None
     with _locked(organization) as (_, roster):
         if _owner(organization) == user.pk:
             return 'owner'
@@ -149,6 +159,9 @@ def member_may_publish(user, organization):
     """Owners publish; only currently active members with explicit rights may."""
     if not _valid_user(user):
         return False
+    workspace = membership.shared_workspace(organization)
+    if workspace:
+        return membership.has_membership(user, workspace)
     with _locked(organization) as (_, roster):
         if _owner(organization) == user.pk:
             return not roster or not roster.get('frozen')
@@ -157,6 +170,9 @@ def member_may_publish(user, organization):
 
 def member_may_spend(user, organization):
     """A member uses startup billing only with a current explicit billing grant."""
+    workspace = membership.shared_workspace(organization)
+    if workspace:
+        return membership.has_membership(user, workspace)
     if not enabled() or not _valid_user(user):
         return False
     with _locked(organization) as (_, roster):
@@ -188,6 +204,8 @@ def member_context(user, company_id, *, need):
         company = VibeRaisingCompany(pk=company_id, name=saved.get('name', ''), domain=saved.get('domain', ''),
             organization=config.organization, profile=get_or_create_founder_profile(user))
     if company.organization_id is None:
+        return None
+    if membership.shared_workspace(company.organization):
         return None
     with _locked(company.organization) as (_, roster):
         rights = _rights(user, company.organization, roster)
@@ -221,6 +239,9 @@ def bound_member_context(user, company_id):
 
 def notification_recipients(organization, *, item, ask=None):
     """Resolve one-recipient candidates; owner-only asks never reach members."""
+    workspace = membership.shared_workspace(organization)
+    if workspace:
+        return User.objects.filter(pk__in=membership.active_memberships(workspace).values('user_id')).order_by('pk')
     owner = _owner(organization)
     ids = {owner} if owner else set()
     if ask == 'approve_on_github' and isinstance(item, str) and item.startswith('article:'):
@@ -248,7 +269,7 @@ def pending_request_count(organization):
 
 def pending_request_ids(organization):
     """Read opaque pending IDs for individually deduplicated owner notices."""
-    if not enabled():
+    if not (enabled() or membership.shared_workspace(organization)):
         return []
     now = timezone.now()
     with _locked(organization) as (_, roster):
@@ -258,7 +279,7 @@ def pending_request_ids(organization):
 
 def issue_join_reference(*, user, organization):
     """Issue an opaque, user-bound seven-day reference with no encoded identity."""
-    if not enabled() or not _valid_user(user) or organization is None:
+    if not _valid_user(user) or organization is None or not (enabled() or membership.shared_workspace(organization)):
         return None
     nonce = secrets.token_urlsafe(16)
     cache.set('startup_team:join-ref:' + hashlib.sha256(nonce.encode()).hexdigest(),
@@ -337,8 +358,6 @@ def _auto_join(user, organization):
 
 def request_join(*, user, join_reference, now=None):
     """Request membership without revealing the tenant or the owner to a caller."""
-    if not enabled():
-        raise TeamError('not_found', 'Not found.', 404)
     if not _verified(user):
         raise TeamError('email_unverified', 'Verify your email before joining the team.')
     if not isinstance(join_reference, str) or not 16 <= len(join_reference) <= 128:
@@ -351,9 +370,17 @@ def request_join(*, user, join_reference, now=None):
         raise TeamError('not_allowed', 'This request is not available.')
     now = now or timezone.now()
     with _locked(organization, create=True) as (config, roster):
+        workspace = membership.shared_workspace(organization)
+        if VibeRaisingCompany.objects.filter(organization=organization, email_invites_enabled=True).exists():
+            raise TeamError('invite_closed', 'Use an email invitation to join.', 409)
+        if not (workspace or enabled()):
+            raise TeamError('not_found', 'Not found.', 404)
         if roster.get('frozen') or _owner(organization) is None:
             raise TeamError('not_available', 'The team needs an ownership review.', 409)
-        if _member(roster, user) or roster['owner_user_id'] == user.pk:
+        if workspace:
+            if membership.has_membership(user, workspace):
+                return {'status': 'joined', 'companyId': str(workspace.pk)}
+        elif _member(roster, user) or roster['owner_user_id'] == user.pk:
             return {'status': 'joined'}
         pending = next((row for row in roster['requests'] if row.get('user_id') == user.pk
             and row.get('state') == 'pending' and (stamp(row.get('expires_at')) or now) > now), None)
@@ -362,7 +389,7 @@ def request_join(*, user, join_reference, now=None):
         _rate(user, organization, now=now)
         if sum(row.get('state') == 'pending' and (stamp(row.get('expires_at')) or now) > now for row in roster['requests']) >= 10:
             raise TeamError('rate_limited', 'Please try again later.', 429)
-        if _auto_join(user, organization):
+        if not workspace and _auto_join(user, organization):
             _join(roster, user, state='unconfirmed', via='domain', actor=None, now=now)
             roster['requests'].append({'request_id': str(uuid4()), 'user_id': user.pk, 'state': 'pending',
                 'created_at': now.isoformat(), 'expires_at': (now + timedelta(days=7)).isoformat(),
@@ -388,6 +415,9 @@ def decide_request(*, organization, user, request_id, decision, now=None):
     with _locked(organization, create=True) as (config, roster):
         _manage(user, organization, roster)
         row = next((row for row in roster['requests'] if row.get('request_id') == str(request_id)), None)
+        workspace = membership.shared_workspace(organization)
+        if workspace and row and row.get('state') == ('approved' if decision == 'approve' else 'declined'):
+            return {'status': row['state']}
         if row is None or row.get('state') != 'pending' or (stamp(row.get('expires_at')) or now) <= now:
             raise TeamError('request_closed', 'This request has already closed.', 409)
         member_user = User.objects.filter(pk=row['user_id'], is_active=True, email_verified_at__isnull=False).first()
@@ -395,7 +425,10 @@ def decide_request(*, organization, user, request_id, decision, now=None):
             raise TeamError('email_unverified', 'The requester must verify their email.', 409)
         row.update(state='approved' if decision == 'approve' else 'declined', decided_at=now.isoformat(), decided_by_user_id=user.pk)
         if decision == 'approve':
-            _join(roster, member_user, state='active', via='owner_approval', actor=user, now=now)
+            if workspace:
+                _admit_shared(workspace, member_user, source='request', actor=user, now=now)
+            else:
+                _join(roster, member_user, state='active', via='owner_approval', actor=user, now=now)
             _notify('notify_join_approved', organization, member_user)
         else:
             unconfirmed = next((member for member in roster['members'] if member.get('user_id') == row['user_id']
@@ -414,6 +447,25 @@ def update_member(*, organization, user, member_id, rights=None, remove=False, n
     """Recheck management or self-leave inside the same membership row lock."""
     now = now or timezone.now()
     with _locked(organization, create=True) as (config, roster):
+        workspace = membership.shared_workspace(organization)
+        if workspace:
+            _manage(user, organization, roster)
+            if not remove:
+                raise TeamError('equal_access', 'Everyone on this team has full startup access.', 409)
+            members = membership.active_memberships(workspace)
+            target = members.filter(pk=member_id).select_related('user').first()
+            if target is None:
+                raise TeamError('not_found', 'Not found.', 404)
+            if not members.exclude(pk=target.pk).exists():
+                raise TeamError('last_member', 'Invite someone else or close the startup for everyone.', 409)
+            membership.remove(workspace, target, actor=user, now=now)
+            if mapping(roster.get('invite')).get('created_by_user_id') == target.user_id:
+                roster['invite'] = None
+            for pending in roster['requests']:
+                if pending.get('user_id') == target.user_id and pending.get('state') == 'pending':
+                    pending.update(state='withdrawn', decided_at=now.isoformat(), decided_by_user_id=user.pk)
+            _save(config, roster)
+            return {'status': 'removed'}
         row = next((row for row in roster['members'] if row.get('memberId') == str(member_id)), None)
         if row is None:
             raise TeamError('not_found', 'Not found.', 404)
@@ -421,6 +473,10 @@ def update_member(*, organization, user, member_id, rights=None, remove=False, n
             _manage(user, organization, roster)
         if remove:
             roster['members'].remove(row)
+            from .startup_email_invitations import revoke_open
+            removed_user = User.objects.filter(pk=row['user_id']).first()
+            if removed_user:
+                revoke_open(organization, now, person=removed_user)
             _history(roster, 'removed', user, row['user_id'], now)
             if row['state'] == 'unconfirmed':
                 from content_factory.founder_journey_alerts import queue_founder_journey_alert
@@ -444,6 +500,8 @@ def invite_link(*, organization, user, action, now=None):
     now = now or timezone.now()
     with _locked(organization, create=True) as (config, roster):
         _manage(user, organization, roster)
+        if VibeRaisingCompany.objects.filter(organization=organization, email_invites_enabled=True).exists():
+            raise TeamError('invite_closed', 'Use an email invitation to join.', 409)
         token = secrets.token_urlsafe(32) if action == 'create' else None
         roster['invite'] = {'token_sha256': hashlib.sha256(token.encode()).hexdigest(), 'created_at': now.isoformat(),
             'created_by_user_id': user.pk, 'expires_at': (now + timedelta(days=7)).isoformat(), 'uses': 0, 'max_uses': 5} if token else None
@@ -454,10 +512,15 @@ def invite_link(*, organization, user, action, now=None):
     return {'status': 'revoked'}
 
 
+def _admit_shared(workspace, user, *, source, actor, now):
+    if (membership.active_memberships(workspace).count() >= 100
+            and not membership.has_membership(user, workspace)):
+        raise TeamError('team_full', 'This team has reached its member limit.', 409)
+    return membership.admit(workspace, user, source=source, actor=actor, now=now)
+
+
 def join_invite(*, user, token, now=None):
     """Consume one verified invite use under the organization lock, token-free logs."""
-    if not enabled():
-        raise TeamError('not_found', 'Not found.', 404)
     if not _verified(user):
         raise TeamError('email_unverified', 'Verify your email before joining the team.')
     if not isinstance(token, str) or len(token) != 43:
@@ -470,32 +533,52 @@ def join_invite(*, user, token, now=None):
     now = now or timezone.now()
     organization = config.organization
     with _locked(organization) as (config, roster):
+        workspace = membership.shared_workspace(organization)
+        if not (workspace or enabled()):
+            raise TeamError('not_found', 'Not found.', 404)
         invitation = mapping((roster or {}).get('invite'))
         if (not roster or roster.get('frozen') or _owner(organization) is None
                 or not secrets.compare_digest(invitation.get('token_sha256', ''), digest)
                 or (stamp(invitation.get('expires_at')) or now) <= now
-                or type(invitation.get('uses')) is not int or invitation['uses'] >= 5):
+                or type(invitation.get('uses')) is not int):
             raise TeamError('invite_closed', 'This invite is no longer available.', 409)
-        if _member(roster, user) or roster['owner_user_id'] == user.pk:
+        if workspace and membership.has_membership(user, workspace):
+            return {'status': 'joined', 'companyId': str(workspace.pk)}
+        if invitation['uses'] >= 5:
+            raise TeamError('invite_closed', 'This invite is no longer available.', 409)
+        if not workspace and (_member(roster, user) or roster['owner_user_id'] == user.pk):
             return {'status': 'joined'}
         _rate(user, organization, invite=True, now=now)
-        member, created = _join(roster, user, state='active', via='invite_link', actor=None, now=now)
+        if workspace:
+            issued_at = stamp(invitation.get('created_at'))
+            inviter = User.objects.filter(pk=invitation.get('created_by_user_id')).first()
+            if (not issued_at or not membership.has_membership(inviter, workspace)
+                    or StartupMembership.objects.filter(company=workspace, user=user, removed_at__gte=issued_at).exists()):
+                raise TeamError('invite_closed', 'This invite is no longer available.', 409)
+            member, created = _admit_shared(workspace, user, source='invite_link', actor=inviter, now=now)
+        else:
+            member, created = _join(roster, user, state='active', via='invite_link', actor=None, now=now)
         if created:
             invitation['uses'] += 1
             _save(config, roster)
             _notify('notify_member_joined', organization, user)
-            logger.info('startup_team_invite_joined member_id=%s', member['memberId'])
-    return {'status': 'joined'}
+            logger.info('startup_team_invite_joined member_id=%s', member.pk if workspace else member['memberId'])
+    return {'status': 'joined', 'companyId': str(workspace.pk)} if workspace else {'status': 'joined'}
 
 
-def team_payload(*, organization, user):
+def team_payload(*, organization, user, company=None):
     """Owners see management details; members see first names only."""
-    if not enabled() or not _valid_user(user):
+    if not _valid_user(user):
         raise TeamError('not_found', 'Not found.', 404)
     now = timezone.now()
     with _locked(organization) as (_, roster):
+        workspace = membership.shared_workspace(organization)
+        if workspace:
+            _manage(user, organization, roster)
+        elif not enabled():
+            raise TeamError('not_found', 'Not found.', 404)
         owner = _owner(organization)
-        manage = bool(_valid_user(user) and owner == user.pk and not (roster or {}).get('frozen'))
+        manage = bool(workspace) or bool(_valid_user(user) and owner == user.pk and not (roster or {}).get('frozen'))
         if not manage and not _member(roster, user):
             raise TeamError('not_found', 'Not found.', 404)
         ids = {row.get('user_id') for row in (roster or {}).get('members', [])}
@@ -510,12 +593,25 @@ def team_payload(*, organization, user):
             if manage:
                 item.update(email=person.email, state=row['state'], rights=row['rights'], joinedAt=row['joined_at'])
             members.append(item)
+        if workspace:
+            members = [
+                {'memberId': str(row.pk), 'firstName': row.user.first_name, 'email': row.user.email,
+                 'role': 'member', 'state': 'active', 'rights': {'publish': True, 'billing': True},
+                 'joinedAt': row.joined_at.isoformat(), 'isYou': row.user_id == user.pk}
+                for row in membership.active_memberships(workspace).select_related('user').order_by('joined_at', 'id')
+            ]
         requests = [{'requestId': row['request_id'], 'firstName': users[row['user_id']].first_name or '',
             'email': users[row['user_id']].email, 'createdAt': row['created_at'], 'expiresAt': row['expires_at']}
             for row in (roster or {}).get('requests', []) if manage and row['user_id'] in users
             and row.get('state') == 'pending' and (stamp(row.get('expires_at')) or now) > now]
         payload = {'members': members, 'requests': requests, 'canManage': manage}
-        if manage:
+        if workspace:
+            payload['accessPolicy'] = 'shared'
+        if manage and company and VibeRaisingCompany.objects.filter(pk=company.pk, organization=organization,
+                                                                    email_invites_enabled=True).exists():
+            from .startup_email_invitations import pending, sending_enabled
+            payload.update(invitationMode='email', canSendInvitations=sending_enabled(), invitations=pending(company))
+        elif manage:
             invitation = mapping((roster or {}).get('invite'))
             payload['invite'] = {'active': bool(invitation and (stamp(invitation.get('expires_at')) or now) > now
                 and invitation.get('uses', 5) < 5), 'expiresAt': invitation.get('expires_at')}
@@ -530,6 +626,8 @@ def freeze_for_offboard(organization, user):
         if roster is None or roster.get('owner_user_id') != user.pk:
             return False
         if not roster.get('frozen'):
+            from .startup_email_invitations import revoke_open
+            revoke_open(organization, timezone.now())
             roster['frozen'] = True
             _history(roster, 'owner_left', user, user, timezone.now())
             _save(config, roster)
@@ -541,7 +639,9 @@ def member_companies(user):
     if not enabled() or not _valid_user(user):
         return []
     rows = []
-    for config in OrganizationContentConfig.objects.filter(pillar_strategy__has_key=KEY).select_related('organization').order_by('pk'):
+    for config in OrganizationContentConfig.objects.filter(pillar_strategy__has_key=KEY).exclude(
+            organization__founder_companies__membership_policy=VibeRaisingCompany.SHARED_ACCESS
+    ).select_related('organization').order_by('pk'):
         with _locked(config.organization) as (_, roster):
             rights = _rights(user, config.organization, roster)
             saved = mapping((roster or {}).get('company'))

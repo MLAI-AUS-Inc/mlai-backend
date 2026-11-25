@@ -99,8 +99,16 @@ def monitored_sender(sender):
 
 def is_owner(user):
     """Owner capability supplements, and never replaces, the existing admin gate."""
+    # By default every MLAI admin (superuser, admin or committee) manages
+    # sending; CRM_DELIVERABILITY_OWNERS still names who gets alert emails.
+    # CRM_ALL_ADMINS_ARE_OWNERS=false restores the named-owners-only gate.
+    from django.conf import settings
     from community_chat.admin_access import is_mlai_admin_user
-    return bool(is_mlai_admin_user(user) and str(user.email).lower() in policy.value("CRM_DELIVERABILITY_OWNERS"))
+    if not is_mlai_admin_user(user):
+        return False
+    if getattr(settings, "CRM_ALL_ADMINS_ARE_OWNERS", True):
+        return True
+    return str(user.email).lower() in policy.value("CRM_DELIVERABILITY_OWNERS")
 
 
 def stream_configured(stream):

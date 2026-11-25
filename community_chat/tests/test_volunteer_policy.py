@@ -15,6 +15,14 @@ from community_chat.volunteer.policy import (
 
 
 class VolunteerPolicyTests(unittest.TestCase):
+    def test_monthly_pulse_uses_actual_shared_approval_reward(self):
+        from startup_updates.reward_policy import MONTHLY_POINTS
+        actions = catalogue(7)
+        update = actions["monthly_startup_update"]
+        self.assertEqual(update["reward_roo"], str(MONTHLY_POINTS))
+        self.assertIn("first approved update", update["description"])
+        self.assertIn("5 points", update["description"])
+
     def test_helpful_answer_is_two_points_once_per_person_per_question(self):
         action = catalogue()["helpful_answer"]
         self.assertEqual(action["reward_roo"], "2")

@@ -227,6 +227,22 @@ class PolicyTests(TransactionTestCase):
         config = OrganizationContentConfig.objects.get(organization=self.org)
         self.assertEqual(len(config.pillar_strategy['ops_alerts']), 1)
 
+    def test_uncertain_remote_effect_transfers_to_staff_without_a_second_dispatch_or_refund(self):
+        from .no_delivery_refunds import refund_decision
+        run = self.run_for()
+        self.seed(run, first_failed_at=(self.now - timedelta(minutes=1)).isoformat())
+        pending = {'status': 'pending', 'reconciliation_required': True, 'reason': 'policy_resume_dispatch_uncertain'}
+        with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value=pending) as remote, \
+                patch.object(engine, '_alert') as alert:
+            engine.apply(run, engine.decide(run, now=self.now), now=self.now)
+            run.refresh_from_db()
+            self.assertEqual(run.result['self_heal_v1']['pending_action']['owner'], 'staff')
+            self.assertEqual(engine.decide(run, now=self.now + timedelta(hours=1)).action, 'none')
+            remote.assert_called_once()
+            alert.assert_called_once()
+        with override_settings(ARTICLES_REGISTRY_REFUNDS_ENABLED=True):
+            self.assertEqual(refund_decision(run)['why'], 'dispatch_unresolved')
+
     def test_uncertain_resume_reuses_reserved_attempt_after_short_lease(self):
         run = self.run_for()
         self.seed(run, first_failed_at=(self.now - timedelta(minutes=1)).isoformat())

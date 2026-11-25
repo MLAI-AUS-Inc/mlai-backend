@@ -306,12 +306,13 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 - **Authentication:** the Volunteer API's classes (`CommunityChatAccountAuthentication`, `CustomJWTAuthentication`).
 - **Who:** an MLAI admin or committee member: an active account with a linked, active `roo.PointsAdmin` row whose role is `admin` or `committee`, or a superuser (`roo.permissions.mlai_admin_role`). Portfolio leads, partners, Slack-ID-only bootstrap admins and Chat owners or admins don't count.
 - **Session:** the account's own verified, unrevoked device installation (`community_chat.admin_access.is_mlai_admin_request`). A JWT session has no installation, so it is never an admin here.
-- **Granting access:** add the person to the roster in `roo/management/commands/sync_committee_points_admins.py` and run it with `--apply`, or create a `PointsAdmin` linked to their account with role `admin` or `committee`.
+- **Granting access:** in MLAI Chat, Admin → Users and teams (below). Superusers and `admin` rows can add, change or remove people there. The roster in `roo/management/commands/sync_committee_points_admins.py` is exclusive, so running it with `--apply` deactivates anyone added in the app who isn't on it.
+- **Users and teams** (`community_chat/admin_team.py`, routes under `/api/v1/community-chat/admin/team/`): `GET` lists every active `PointsAdmin` row and every active superuser once, with role, team (`portfolio`) and whether they have admin access. `POST {account_id, role, team?}` grants `admin` or `committee`, reusing the account's existing row (an account with no Slack ID gets the placeholder `slack_user_id` `account:<profile id>`, swapped for the real one on a later change). `PATCH <id>/ {role?, team?}` changes a row; `DELETE <id>/` deactivates it, which also ends the person's Roo points-admin role. `GET search/?q=` finds accounts to add (two characters minimum, ten results). Committee members can look but get 403 `not_allowed` on writes. Superusers are read-only (409 `superuser_managed`); nobody changes their own role or removes themselves (409 `self_change`); the last `admin` can't go while no superuser exists (409 `last_admin`). Each change writes a `CrmAuditEvent` (`edit`, `target_type` `admin_team_member`).
 - **Flag:** `COMMUNITY_CHAT_CRM_ENABLED` (default off).
 - **`GET access/`** always answers 200 for a signed-in account, with `enabled`, `can_view` and `can_send`. Admins also get `luma_sync` and per-channel availability (`disabled` when a channel's flag is off, `not_configured` when a credential is missing). Others get `null` for both.
 - **Every other route** answers 403 `not_authorised` to anyone who isn't an MLAI admin, whatever the flag says, and then 404 `crm_disabled` to admins while the flag is off. Every view subclasses `community_chat.admin_views.MlaiAdminView`; a route-audit test fails if one doesn't.
 - **Services:** each write the views call (contacts, segments, uploads, blast drafts, queue, test send and cancel) also refuses a non-admin actor, so a caller that skips the views is still refused. Dispatch fails a live blast whose creator has lost admin (`last_error` `not_authorised`). The scheduler, commands and signature-verified Twilio webhooks have no actor and aren't gated.
-- **`GET /api/v1/community-chat/admin/access/`** (MLAI Chat's Admin tab, not Django's `/admin/`) always answers 200 for a signed-in account: `{"is_admin": true, "sections": ["crm"]}` for an admin (`crm` only while the flag is on), `{"is_admin": false, "sections": []}` for anyone else. Throttle scope `community_chat_admin` (`COMMUNITY_CHAT_ADMIN_RATE`, default `120/minute`).
+- **`GET /api/v1/community-chat/admin/access/`** (MLAI Chat's Admin tab, not Django's `/admin/`) always answers 200 for a signed-in account: `{"is_admin": true, "sections": ["crm", "team"]}` for an admin (`crm` only while the flag is on; `team` always), `{"is_admin": false, "sections": []}` for anyone else. Throttle scope `community_chat_admin` (`COMMUNITY_CHAT_ADMIN_RATE`, default `120/minute`).
 
 **Conventions**
 
@@ -564,6 +565,7 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 | `LISTMONK_BASE_URL` | listmonk on the `mlai-shared` network, e.g. `http://listmonk:9000`. Never hard-coded |
 | `LISTMONK_API_USER`, `LISTMONK_API_TOKEN` | The listmonk API user, sent as HTTP Basic auth. Email is `not_configured` without all three |
 | `LISTMONK_TEMPLATE_ID` | The MLAI campaign template's id; blank uses listmonk's default |
+| `CRM_EMAIL_ASSET_BASE_URL` | Where invite emails load the MLAI logo and icons from; defaults to `<DEFAULT_BACKEND_URL>/static/crm/email` |
 | `CRM_SENDING_DOMAINS` | Comma-separated `domain:route` pairs senders may use; route is `resend` or `google_relay` (default `news.mlai.au:resend`). Bad entries are logged and skipped |
 | `CRM_BLAST_DISPATCH_INTERVAL_SECONDS` | Dispatcher pass interval (default 60) |
 | `CRM_LISTMONK_SYNC_INTERVAL_SECONDS` | Feedback sync interval (default 300) |
@@ -572,7 +574,7 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 
 - **Version and network:** v6.2.x, pinned by digest. listmonk joins the `mlai-shared` network as `listmonk`; mlai-backend's API container (test sends) and scheduler container (both runners) must be on that network too.
 - **API user** for mlai-backend with permissions to manage lists, subscribers and campaigns, send test campaigns, and run **SQL subscriber queries** (`subscribers:sql_query`). The feedback sync filters subscribers with SQL expressions; without that permission the sync fails, which stops the shared scheduler until it is fixed.
-- **Template:** one MLAI-branded campaign template (`LISTMONK_TEMPLATE_ID`) with the sender identity and listmonk's unsubscribe link in the footer.
+- **Template:** one MLAI-branded campaign template (`LISTMONK_TEMPLATE_ID`) with the sender identity and listmonk's unsubscribe link in the footer. The source is `ops/listmonk/templates/mlai-campaign.html`: a plain white, Luma-style shell that invites (`crm/email_layouts.py`) are designed to sit in. Paste it over the template in listmonk to change it.
 - **SMTP:** one SMTP server per sending domain, tagged with that domain (v6.2 per-domain routing). The campaign's From address picks the server, so never add two servers for one domain. Google Workspace domains use `smtp-relay.gmail.com`; Resend domains send from the domain itself, with Resend's return path on `send.` keeping SPF aligned under relaxed DMARC.
 - **Privacy settings:** individual subscriber tracking on (per-person opens and clicks), `List-Unsubscribe` header with one-click unsubscribe, blocklisting allowed.
 - **Bounces:** bounce processing on, with the action "blocklist" for hard bounces.
@@ -997,3 +999,13 @@ stronger record from this implementation or treat a missing report as clean.
 
 Provider contracts: [Customer.io From overrides and tracking](https://docs.customer.io/integrations/api/app/tag/send-messages/sendemail/),
 [Resend domain tracking](https://github.com/resend/resend-skills/blob/main/skills/resend/references/sending/overview.md).
+
+## MLAI Arcade prize stock and email
+
+In Chat **Admin → Campaigns → MLAI Arcade prize stock**, choose **$50 Codex credits** and paste one code or one personal ChatGPT activation link per line. Each import accepts up to 200 entries. A second paste of the same code reports a duplicate. To stock half-price tickets, supply single-use discount codes for the named Luma event, its public event URL and a future local expiry. A Codex expiry is optional. The issuer must have provisioned the codes before import. Codes can be imported after deployment.
+
+Only authorised CRM admins on their verified device can import or see counts. Stock is encrypted using the existing connector credential keyring. Keep the old decryption keys on rotation so remaining and reserved codes stay redeemable. A recipient must have an active, email-verified account and a deliverable CRM/system email address. At most one Codex code may be awarded every 36 hours across the pool. Fewer qualifying spins can stretch a batch beyond 30 days.
+
+The existing discovery scheduler processes the reserved prize with the transactional Resend sender (`SYSTEM_EMAIL_RESEND_API_KEY`, `MLAI_SYSTEM_FROM_EMAIL`, `SYSTEM_EMAIL_REPLY_TO`). A winner receives both HTML and plain text, with their private activation link, instructions and the redemption deadline when one was supplied. Expiry is checked again at dispatch, including retries. A code that has expired before dispatch remains reserved for review. CRM records acceptance and exceptions in its audit log. System Email tracks Resend's subsequent delivery feedback. The message subject, logs and admin responses contain no codes. The code is reserved for that winner throughout retries.
+
+If **need review** increases, look up the matching `arcade_codex_delivery` CRM audit event and transactional System Email record using its reservation's `arcade-codex/<stock UUID>` key. Check address eligibility, suppressions, credentials and the provider receipt before contacting the winner. Ambiguous sends automatically retry with the same code/key for under 23 hours. A rejected or ambiguous reservation stays assigned to its original winner.

@@ -462,6 +462,31 @@ class ResearchAutomationCallbackTests(TestCase):
     def tearDown(self):
         self.override.disable()
 
+    @override_settings(DAILY_RESEARCH_EMAIL_TOPICS_ENABLED=True)
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_topic_selection_callback_emails_daily_topics_when_founder_chose_email(self, mock_post):
+        mock_post.return_value = _Response(200, {"id": "email-1"})
+        response = self.client.post(
+            reverse("content_factory_callback"),
+            {
+                "event_type": "topic_selection",
+                "job_id": "discovery-run-1",
+                "domain": "callback.example.com",
+                "notification_context": notification_context_for_run(self.run),
+                "selection": {
+                    "selected_keyword": "automation ideas",
+                    "options": [{"keyword": "automation ideas", "suggested_title": "Automation Ideas"}],
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        delivery = NotificationDelivery.objects.get(automation_run=self.run, event_type="topic_selection")
+        self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
+        mock_post.assert_called_once()
+        self.assertIn("Automation Ideas", str(mock_post.call_args))
+
+    @override_settings(DAILY_RESEARCH_EMAIL_TOPICS_ENABLED=False)
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_topic_selection_callback_saves_options_without_email(self, mock_post):
         mock_post.return_value = _Response(200, {"id": "email-1"})
@@ -893,17 +918,18 @@ class FanOutDeliveryTests(TestCase):
 
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_topic_selection_fans_out_to_opted_in_whatsapp_and_slack(self, mock_post, mock_dm):
+    def test_topic_selection_fans_out_to_opted_in_email_whatsapp_and_slack(self, mock_post, mock_dm):
         mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertEqual(len(deliveries), 2)
+        self.assertEqual(len(deliveries), 3)
         keys = {delivery.idempotency_key for delivery in deliveries}
         self.assertEqual(
             keys,
             {
                 f"{self.run.id}:{self.slack.id}:topic_selection",
+                f"{self.run.id}:{self.email.id}:topic_selection",
                 f"{self.run.id}:{self.whatsapp.id}:topic_selection",
             },
         )
@@ -911,7 +937,7 @@ class FanOutDeliveryTests(TestCase):
         mock_dm.assert_called_once()
 
         urls = [call.args[0] for call in mock_post.call_args_list]
-        self.assertFalse(any("resend.com" in url for url in urls))
+        self.assertEqual(sum("resend.com" in url for url in urls), 1)
         whatsapp_calls = [
             call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0]
         ]
@@ -929,9 +955,18 @@ class FanOutDeliveryTests(TestCase):
 
         # Re-delivering the same callback sends nothing new.
         repeat = send_topic_selection(self.callback_data)
-        self.assertEqual(len(repeat), 2)
+        self.assertEqual(len(repeat), 3)
         self.assertEqual(mock_dm.call_count, 1)
-        self.assertEqual(len(mock_post.call_args_list), 1)
+        self.assertEqual(len(mock_post.call_args_list), 2)
+
+    @override_settings(DAILY_RESEARCH_EMAIL_TOPICS_ENABLED=False)
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_email_topics_kill_switch_keeps_whatsapp_and_slack_only(self, mock_post, mock_dm):
+        mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
+        deliveries = send_topic_selection(self.callback_data)
+        self.assertEqual({d.channel_id for d in deliveries}, {self.slack.id, self.whatsapp.id})
+        self.assertFalse(any("resend.com" in call.args[0] for call in mock_post.call_args_list))
 
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "2.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
@@ -1104,8 +1139,8 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertFalse(any(d.channel_id == self.email.id for d in deliveries))
-        client.send_email.assert_not_called()
+        self.assertTrue(any(d.channel_id == self.email.id for d in deliveries))
+        client.send_email.assert_called_once()
         self.assertFalse(any("resend.com" in call.args[0] for call in mock_post.call_args_list))
 
     @override_settings(CUSTOMERIO_API_KEY="cio-key", CUSTOMERIO_TOPIC_TEMPLATE_ID="tmpl-77")
@@ -1135,8 +1170,8 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertFalse(any(d.channel_id == self.email.id for d in deliveries))
-        client.send_email.assert_not_called()
+        self.assertTrue(any(d.channel_id == self.email.id for d in deliveries))
+        client.send_email.assert_called_once()
         message_data = _topic_email_message_data(self.run, self.callback_data, self.email)
         self.assertEqual(message_data["domain"], "fanout.example.com")
         topics = message_data["topics"]
@@ -1245,7 +1280,8 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertEqual(len(deliveries), 1)
+        # Slack and email still receive topics; the opted-out WhatsApp does not.
+        self.assertEqual({d.channel_id for d in deliveries}, {self.slack.id, self.email.id})
         self.assertFalse(
             NotificationDelivery.objects.filter(channel=self.whatsapp).exists()
         )
@@ -1940,3 +1976,238 @@ class WhatsAppAnalyticsTemplateTests(TestCase):
         variables = json.loads(payload["ContentVariables"])
         self.assertEqual(variables["2"], "Topic One")
         self.assertNotIn("5", variables)
+
+
+@override_settings(
+    CONTENT_FACTORY_URL="https://content-factory.test",
+    CONTENT_FACTORY_API_KEY="cf-key",
+    DEFAULT_BACKEND_URL="https://api.test",
+    COMMUNITY_CHAT_FRONTEND_URL="https://chat.example.test",
+)
+class AutomationPointsPauseTests(TestCase):
+    """B18: one insufficient-points result pauses the automation and tells the founder once."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="Points Co", domain="automation.example.com",
+                                               competitors=["competitor.example.com"], seed_keywords=["k"])
+        self.user = User.objects.create_user(email="writer@example.com")
+        self.user.slack_id = "U_WRITER"
+        self.user.save(update_fields=["slack_id"])
+        self.automation = create_or_update_research_automation(
+            domain=self.org.domain, channel_type=NotificationChannelType.EMAIL, route_id=self.user.email,
+            user=self.user, timezone_name="Australia/Melbourne", frequency_per_day=1, local_send_times=["08:00"],
+            consent_state=NotificationConsentState.ACTIVE)
+        OrganizationContentConfig.objects.update_or_create(organization=self.org, defaults={"daily_discovery_enabled": True})
+
+    def _refusal(self):
+        return InsufficientRooPointsError({"message": "Finding topics uses 6 points. You have 2.",
+                                           "error_code": "INSUFFICIENT_ROO_POINTS", "required_points": 6,
+                                           "current_balance": 2, "cost_points": 6})
+
+    @patch("integrations.services.research_automations._content_factory_balance_for_user", return_value=2)
+    @patch("integrations.services.notification_adapters._send_email", return_value=(True, "email-1", {}))
+    @patch("integrations.services.research_automations.charge_content_factory_topic_generation_for_user")
+    @patch("content_factory.vibe_marketing_views._queue_content_factory_run")
+    def test_one_points_refusal_pauses_cancels_and_notifies_once(self, mock_queue, mock_charge, mock_post, _balance):
+        from integrations.services.daily_research_policy import MEMORY_KEY, POINTS_PAUSE_REASON
+        mock_charge.side_effect = self._refusal()
+        night_one = datetime(2026, 3, 23, 21, 5, tzinfo=dt_timezone.utc)
+        result = run_research_automation_scheduler(now=night_one)
+        self.assertEqual(result["failed"], 1)
+        mock_queue.assert_not_called()
+        self.automation.refresh_from_db()
+        self.assertEqual(self.automation.status, ResearchAutomationStatus.PAUSED)
+        memory = self.automation.metadata[MEMORY_KEY]
+        self.assertEqual(memory["pause_reason"], POINTS_PAUSE_REASON)
+        self.assertEqual((memory["points_required"], memory["points_balance"]), (6, 2))
+        self.assertFalse(OrganizationContentConfig.objects.get(organization=self.org).daily_discovery_enabled)
+        notices = NotificationDelivery.objects.filter(event_type="automation_paused_points")
+        self.assertEqual(notices.count(), 1)
+        self.assertEqual(notices.get().status, NotificationDeliveryStatus.SENT)
+        sent = str(mock_post.call_args)
+        self.assertIn("you need 4 more", sent)
+        self.assertIn("https://chat.example.test/my-startup/credits", sent)
+
+        # The following nights neither charge, dispatch nor notify again.
+        for day in (1, 2):
+            run_research_automation_scheduler(now=night_one + timedelta(days=day))
+        self.assertEqual(mock_charge.call_count, 1)
+        self.assertEqual(NotificationDelivery.objects.filter(event_type="automation_paused_points").count(), 1)
+        self.assertFalse(AutomationRun.objects.filter(status=AutomationRunStatus.SCHEDULED).exists())
+
+    @patch("integrations.services.research_automations._content_factory_balance_for_user", return_value=2)
+    @patch("integrations.services.notification_adapters._send_email", return_value=(True, "email-1", {}))
+    @patch("integrations.services.research_automations.charge_content_factory_topic_generation_for_user")
+    @patch("content_factory.vibe_marketing_views._queue_content_factory_run")
+    def test_a_topped_up_wallet_resumes_only_a_points_pause(self, mock_queue, mock_charge, mock_post, balance):
+        from integrations.services.daily_research_policy import MEMORY_KEY, pause_for_insufficient_points
+        self.assertTrue(pause_for_insufficient_points(self.org, required_points=6, current_balance=2))
+        self.assertFalse(pause_for_insufficient_points(self.org, required_points=6, current_balance=2))
+        night = datetime(2026, 3, 24, 21, 5, tzinfo=dt_timezone.utc)
+        self.assertEqual(run_research_automation_scheduler(now=night)["resumed_after_points"], 0)
+        balance.return_value = 6
+        mock_queue.return_value = _queued_content_factory_run("discovery-after-top-up")
+        mock_charge.return_value = (self.user, Ledger.objects.create(
+            user=self.user, kind="SPEND", source="CONTENT_FACTORY", delta=-6), 6)
+        result = run_research_automation_scheduler(now=night + timedelta(days=1))
+        self.assertEqual(result["resumed_after_points"], 1)
+        self.automation.refresh_from_db()
+        self.assertEqual(self.automation.status, ResearchAutomationStatus.ACTIVE)
+        self.assertNotIn("pause_reason", self.automation.metadata[MEMORY_KEY])
+        self.assertTrue(OrganizationContentConfig.objects.get(organization=self.org).daily_discovery_enabled)
+
+        # A founder's own pause is never lifted by a balance.
+        from integrations.services.daily_research_policy import record_manual_pause
+        record_manual_pause(self.org)
+        self.assertEqual(run_research_automation_scheduler(now=night + timedelta(days=2))["resumed_after_points"], 0)
+
+    @patch("integrations.services.research_automations.get_content_factory_research_cost_points", return_value=6)
+    @patch("integrations.services.research_automations._content_factory_balance_for_user", return_value=3)
+    def test_a_refusal_without_numbers_waits_for_the_price_of_a_run(self, balance, _cost):
+        from integrations.services.daily_research_policy import pause_for_insufficient_points
+        from integrations.services.research_automations import resume_automations_paused_for_points
+        self.assertTrue(pause_for_insufficient_points(self.org))
+        self.assertEqual(resume_automations_paused_for_points(), 0)
+        balance.return_value = 6
+        self.assertEqual(resume_automations_paused_for_points(), 1)
+        # The wallet checked is the one dispatch charges (the billing actor).
+        self.assertEqual(balance.call_args.args[0], self.user)
+
+    def test_a_content_factory_points_refusal_also_pauses(self):
+        from integrations.services.notification_adapters import send_error
+        run = AutomationRun.objects.create(
+            automation=self.automation, scheduled_for_at=datetime(2026, 3, 23, 21, 0, tzinfo=dt_timezone.utc),
+            local_date=datetime(2026, 3, 24).date(), slot_index=0, status=AutomationRunStatus.QUEUED,
+            idempotency_key="research-automation:points:2026-03-24:0")
+        with patch("integrations.services.notification_adapters.send_automation_paused_points") as notice:
+            send_error({"event_type": "error", "job_id": "cf-1", "error_code": "INSUFFICIENT_ROO_POINTS",
+                        "required_points": 6, "current_balance": 1,
+                        "notification_context": notification_context_for_run(run)})
+            send_error({"event_type": "error", "job_id": "cf-1", "error_code": "INSUFFICIENT_ROO_POINTS",
+                        "notification_context": notification_context_for_run(run)})
+        self.automation.refresh_from_db()
+        self.assertEqual(self.automation.status, ResearchAutomationStatus.PAUSED)
+        notice.assert_called_once()
+
+
+@override_settings(COMMUNITY_CHAT_FRONTEND_URL="https://chat.example.test")
+class EmptyResearchNightTests(TestCase):
+    """B23: scheduled research that finds nothing new is a completed, empty night."""
+
+    def setUp(self):
+        from tests.website_fixtures import CallbackFixtureClient
+        self.client = CallbackFixtureClient()
+        self.client.credentials(HTTP_X_API_KEY="test-roo-key")
+        self.override = override_settings(ROO_API_KEY="test-roo-key", INTERNAL_API_KEY="test-roo-key")
+        self.override.enable()
+        self.org = Organization.objects.create(name="Vyavos", domain="vyavos.example.com",
+                                               competitors=["competitor.example.com"], seed_keywords=["clinic ops"])
+        self.user = User.objects.create_user(email="founder@vyavos.example.com")
+        self.automation = create_or_update_research_automation(
+            domain=self.org.domain, channel_type=NotificationChannelType.EMAIL, route_id=self.user.email,
+            user=self.user, timezone_name="Australia/Melbourne", frequency_per_day=1, local_send_times=["08:00"],
+            consent_state=NotificationConsentState.ACTIVE)
+
+    def tearDown(self):
+        self.override.disable()
+
+    def _night(self, day, *, slot_index=0):
+        scheduled = datetime(2026, 3, 23, 21, 0, tzinfo=dt_timezone.utc) + timedelta(days=day)
+        return AutomationRun.objects.create(
+            automation=self.automation, scheduled_for_at=scheduled, local_date=(scheduled + timedelta(hours=11)).date(),
+            slot_index=slot_index, status=AutomationRunStatus.QUEUED, content_factory_run_id=f"vyavos-night-{day}",
+            idempotency_key=f"research-automation:vyavos:{day}:{slot_index}")
+
+    def _empty(self, run, reason="no_opportunities"):
+        response = self.client.post(reverse("content_factory_callback"), {
+            "event_type": "research_empty", "job_id": run.content_factory_run_id, "run_id": run.content_factory_run_id,
+            "domain": self.org.domain, "workflow": "auto_discovery", "outcome": "empty", "empty_reason": reason,
+            "empty_detail_code": "NO_OPPORTUNITIES", "notification_context": notification_context_for_run(run),
+        }, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.content)
+        return response
+
+    @patch("integrations.services.notification_adapters._send_email", return_value=(True, "email-1", {}))
+    def test_vyavos_three_empty_nights_no_failure_no_alert_one_notice(self, mock_post):
+        runs = [self._night(day) for day in range(4)]
+        for run in runs[:3]:
+            self._empty(run)
+            self._empty(run)  # A callback replay counts once.
+        for run in runs[:3]:
+            run.refresh_from_db()
+            self.assertEqual(run.status, AutomationRunStatus.COMPLETED)
+            self.assertEqual(run.last_error, "")
+        self.assertFalse(AutomationRun.objects.filter(status=AutomationRunStatus.FAILED).exists())
+        self.assertFalse(NotificationDelivery.objects.filter(event_type="error").exists())
+        notices = NotificationDelivery.objects.filter(event_type="research_empty")
+        self.assertEqual(notices.count(), 1)
+        self.assertEqual(notices.get().automation_run_id, runs[2].id)
+        self.assertIn("Add seed topics or competitors", str(mock_post.call_args))
+        self.assertIn("https://chat.example.test/my-startup/settings", str(mock_post.call_args))
+        # A fourth empty night in the same streak does not notify again.
+        self._empty(runs[3])
+        self.assertEqual(NotificationDelivery.objects.filter(event_type="research_empty").count(), 1)
+        self.automation.refresh_from_db()
+        self.assertEqual(self.automation.status, ResearchAutomationStatus.ACTIVE)
+
+    @patch("integrations.services.notification_adapters._send_email", return_value=(True, "email-1", {}))
+    def test_a_gap_or_a_night_with_topics_starts_a_new_streak(self, mock_post):
+        from integrations.services.daily_research_policy import reset_empty_streak
+        self._empty(self._night(0))
+        self._empty(self._night(1))
+        self._empty(self._night(3))  # Night 2 missing: the streak restarts.
+        self._empty(self._night(4))
+        self.assertFalse(NotificationDelivery.objects.filter(event_type="research_empty").exists())
+        reset_empty_streak(self.org)  # Topics were delivered.
+        self._empty(self._night(5))
+        self._empty(self._night(6))
+        self.assertFalse(NotificationDelivery.objects.filter(event_type="research_empty").exists())
+        self._empty(self._night(7))
+        self.assertEqual(NotificationDelivery.objects.filter(event_type="research_empty").count(), 1)
+
+    def test_an_empty_night_refunds_its_own_job_once(self):
+        run = self._night(0)
+        ContentFactoryJob.objects.create(job_id=run.content_factory_run_id, domain=self.org.domain,
+                                         slack_user_id="", status="queued", request_meta={})
+        with patch("integrations.services.article_generation.maybe_auto_refund_terminal_failure",
+                   return_value=(True, 6)) as refund:
+            response = self._empty(run)
+        refund.assert_called_once()
+        self.assertEqual(refund.call_args.kwargs["error_code"], "NO_OPPORTUNITIES")
+        self.assertEqual(response.json()["refunded_points"], 6)
+        self.assertEqual(ContentFactoryJob.objects.get(job_id=run.content_factory_run_id).status, "completed")
+
+    def test_a_late_empty_callback_after_topics_or_for_another_job_changes_nothing(self):
+        delivered = self._night(0)
+        delivered.selected_topic = "clinic rostering"
+        delivered.status = AutomationRunStatus.GENERATING
+        delivered.save(update_fields=["selected_topic", "status"])
+        other = self._night(1)
+        for run in (delivered, other):
+            ContentFactoryJob.objects.create(job_id=run.content_factory_run_id, domain=self.org.domain,
+                                             slack_user_id="", status="queued", request_meta={})
+        with patch("integrations.services.article_generation.maybe_auto_refund_terminal_failure",
+                   return_value=(True, 6)) as refund:
+            self.assertEqual(self._empty(delivered).json()["status"], "ignored")
+            response = self.client.post(reverse("content_factory_callback"), {
+                "event_type": "research_empty", "job_id": "someone-elses-run", "run_id": "someone-elses-run",
+                "domain": self.org.domain, "workflow": "auto_discovery", "outcome": "empty",
+                "empty_reason": "no_opportunities", "notification_context": notification_context_for_run(other),
+            }, format="json")
+            self.assertEqual(response.json()["status"], "ignored")
+        refund.assert_not_called()
+        delivered.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(delivered.status, AutomationRunStatus.GENERATING)
+        self.assertEqual(other.status, AutomationRunStatus.QUEUED)
+
+    def test_a_manual_run_is_not_an_empty_night(self):
+        run = self._night(0, slot_index=100)
+        self.assertEqual(notification_context_for_run(run)["automation_trigger"], "manual")
+        self._empty(run)
+        run.refresh_from_db()
+        self.assertEqual(run.status, AutomationRunStatus.QUEUED)
+        self.assertNotIn("empty_nights", (self.automation.metadata or {}).get("daily_research", {}))
+
+    def test_scheduled_slots_carry_the_scheduled_trigger(self):
+        self.assertEqual(notification_context_for_run(self._night(0))["automation_trigger"], "scheduled")

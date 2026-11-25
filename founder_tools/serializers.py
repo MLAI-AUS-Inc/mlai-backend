@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from . import membership
 from .models import VibeRaisingCompany, VibeRaisingProfile
 from .profile_fields import company_avatar_url, profile_details, validate_profile_fields, visible_companies
 from .services import ensure_company_organization, normalize_company_domain, normalize_company_linkedin_url
@@ -68,6 +69,8 @@ class FounderCompanySerializer(serializers.ModelSerializer):
         organization = instance.organization if instance.organization_id else None
         value.update(_serialize_startup_profile(organization) or {})
         value["avatar_url"] = value["avatarUrl"]
+        if instance.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+            value["accessPolicy"] = "shared"
         return value
 
     def get_entityTypeName(self, obj):
@@ -100,11 +103,12 @@ class FounderCompanySerializer(serializers.ModelSerializer):
             return False
         from startup_updates.models import UserStartupBinding
 
-        return UserStartupBinding.objects.filter(
-            user_id=obj.profile.user_id,
-            organization_id=obj.organization_id,
-            monthly_updates_enabled=True,
-        ).exists()
+        bindings = UserStartupBinding.objects.filter(
+            organization_id=obj.organization_id, monthly_updates_enabled=True,
+        )
+        if obj.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+            return bindings.filter(user_id__in=membership.active_memberships(obj).values("user_id")).exists()
+        return bindings.filter(user_id=obj.profile.user_id).exists() if obj.profile_id else False
 
 
 class FounderProfileSerializer(serializers.ModelSerializer):
@@ -121,26 +125,22 @@ class FounderProfileSerializer(serializers.ModelSerializer):
         fields = ["role", "organizationName", "activeCompanyId", "companies"]
 
     def get_activeCompanyId(self, obj):
-        if self.context.get("startup_owner_only"):
-            allowed = {company.pk for company in self._startup_companies(obj)}
-            if obj.active_company_id not in allowed:
-                return None
-        return str(obj.active_company_id) if obj.active_company_id else None
+        allowed = self._startup_companies(obj)
+        return str(obj.active_company_id) if any(company.pk == obj.active_company_id for company in allowed) else None
 
     def _startup_companies(self, obj):
         if not hasattr(self, "_startup_company_rows"):
             from .services import user_may_use_organization
 
-            self._startup_company_rows = [
-                company for company in visible_companies(obj.companies.select_related("organization").all())
-                if not company.organization_id or user_may_use_organization(obj.user, company.organization)
-            ]
+            rows = visible_companies(membership.companies_for_user(obj.user))
+            if self.context.get("startup_owner_only"):
+                rows = [company for company in rows if not company.organization_id or
+                        user_may_use_organization(obj.user, company.organization)]
+            self._startup_company_rows = list(rows)
         return self._startup_company_rows
 
     def get_companies(self, obj):
-        companies = (self._startup_companies(obj) if self.context.get("startup_owner_only")
-                     else visible_companies(obj.companies.select_related("organization").all()))
-        return FounderCompanySerializer(companies, many=True).data
+        return FounderCompanySerializer(self._startup_companies(obj), many=True).data
 
 
 class FounderProfileUpsertSerializer(AliasInputSerializer):
@@ -196,6 +196,9 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     # Acknowledges a domain change that re-points the company to a different
     # Organization, stranding the old org's data (structured 409 otherwise).
     confirmDomainChange = serializers.BooleanField(required=False, default=False)
+    # Onboarding v3 "Looks right": the owner confirms the name and one-liner, so
+    # a late website read can no longer change them. Ignored while the setting is off.
+    confirmProfile = serializers.BooleanField(required=False, default=False)
     name = serializers.CharField()
     domain = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     abn = serializers.CharField(allow_blank=True, allow_null=True, required=False)
@@ -256,12 +259,14 @@ class FounderActiveCompanySerializer(AliasInputSerializer):
 
 
 def serialize_founder_bootstrap(user, profile):
-    companies = visible_companies(profile.companies.select_related("organization").all())
-    active_company = profile.active_company or companies.order_by("created_at", "name").first()
+    companies = visible_companies(membership.companies_for_user(user))
+    active_company = companies.filter(pk=profile.active_company_id).first() or companies.order_by("created_at", "name").first()
     if active_company and not active_company.organization_id:
         ensure_company_organization(active_company)
 
-    supported = profile.role == VibeRaisingProfile.ROLE_FOUNDER
+    supported = profile.role == VibeRaisingProfile.ROLE_FOUNDER or bool(
+        active_company and active_company.membership_policy == VibeRaisingCompany.SHARED_ACCESS
+    )
     redirect_hint = None
     if not supported:
         redirect_hint = {"to": "/founder-tools", "reason": "unsupported_profile"}

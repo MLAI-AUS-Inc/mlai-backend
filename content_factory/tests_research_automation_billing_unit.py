@@ -250,3 +250,32 @@ class WorkerArticleAdmissionTests(SimpleTestCase):
                  patch.object(marketing, "_article_capabilities_for_context") as capability:
                 self.assertEqual(self.call().status_code, 403 if cfg is None else 409)
                 capability.assert_not_called()
+
+
+class BillingActorWithoutSlackTests(SimpleTestCase):
+    """Founders who picked email or WhatsApp often never linked Slack."""
+
+    def automation(self, *, channel_user, owner):
+        return Obj(notification_channel=Obj(user=channel_user), user=owner)
+
+    def test_slack_id_still_wins(self):
+        from integrations.services.notification_adapters import automation_billing_actor_slack_id
+        founder = Obj(pk=7, slack_id="U123")
+        self.assertEqual(automation_billing_actor_slack_id(self.automation(channel_user=founder, owner=None)), "U123")
+
+    @override_settings(DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED=True)
+    def test_founder_without_slack_bills_their_mlai_account(self):
+        from integrations.services.notification_adapters import automation_billing_actor_slack_id
+        founder = Obj(pk=7, slack_id="")
+        self.assertEqual(automation_billing_actor_slack_id(self.automation(channel_user=founder, owner=None)), "mlai_user:7")
+        self.assertEqual(automation_billing_actor_slack_id(self.automation(channel_user=None, owner=founder)), "mlai_user:7")
+
+    @override_settings(DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED=False)
+    def test_kill_switch_keeps_slack_only_billing(self):
+        from integrations.services.notification_adapters import automation_billing_actor_slack_id
+        founder = Obj(pk=7, slack_id="")
+        self.assertEqual(automation_billing_actor_slack_id(self.automation(channel_user=founder, owner=None)), "")
+
+    def test_no_user_has_no_billing_actor(self):
+        from integrations.services.notification_adapters import automation_billing_actor_slack_id
+        self.assertEqual(automation_billing_actor_slack_id(self.automation(channel_user=None, owner=None)), "")

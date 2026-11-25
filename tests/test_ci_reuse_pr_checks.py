@@ -1,4 +1,6 @@
 import ast
+import re
+import shlex
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -19,9 +21,17 @@ HEAD_SHA = "b" * 40
 TREE_SHA = "c" * 40
 WORKFLOW_ID = 123
 RUN_ID = 456
+IN_MEMORY_DATA_OPTION = " --tmpfs /var/lib/postgresql/data"
 
 
-def api_fixture(*, artifact_tree=TREE_SHA, expired=False, run_pull_number=42):
+def api_fixture(
+    *,
+    artifact_tree=TREE_SHA,
+    expired=False,
+    run_pull_number=42,
+    run_attempt=1,
+    artifact_attempt=1,
+):
     def api_get(path, params=None):
         if path.endswith(f"/commits/{COMMIT_SHA}/pulls"):
             return [
@@ -45,7 +55,7 @@ def api_fixture(*, artifact_tree=TREE_SHA, expired=False, run_pull_number=42):
                             if run_pull_number is None
                             else [{"number": run_pull_number}]
                         ),
-                        "run_attempt": 1,
+                        "run_attempt": run_attempt,
                     }
                 ]
             }
@@ -54,7 +64,7 @@ def api_fixture(*, artifact_tree=TREE_SHA, expired=False, run_pull_number=42):
                 "artifacts": [
                     {
                         "expired": expired,
-                        "name": attestation_name(artifact_tree, HEAD_SHA, 1),
+                        "name": attestation_name(artifact_tree, HEAD_SHA, artifact_attempt),
                     }
                 ]
             }
@@ -98,10 +108,70 @@ class ReusePrChecksTests(TestCase):
 
         self.assertFalse(reuse)
 
+    def test_reuses_attestation_kept_from_an_earlier_attempt_of_the_run(self):
+        # Re-running only a failed job keeps the checks job from attempt 1.
+        reuse, reason = self.route(api_fixture(run_attempt=2, artifact_attempt=1))
+
+        self.assertTrue(reuse)
+        self.assertIn(str(RUN_ID), reason)
+
+    def test_attestation_from_a_later_attempt_than_the_run_is_not_reused(self):
+        reuse, _reason = self.route(api_fixture(run_attempt=1, artifact_attempt=2))
+
+        self.assertFalse(reuse)
+
+    def test_expired_earlier_attempt_attestation_falls_back_to_full_checks(self):
+        reuse, _reason = self.route(
+            api_fixture(run_attempt=2, artifact_attempt=1, expired=True)
+        )
+
+        self.assertFalse(reuse)
+
     def test_attestation_from_another_pull_request_is_not_reused(self):
         reuse, _reason = self.route(api_fixture(run_pull_number=99))
 
         self.assertFalse(reuse)
+
+    def test_only_successful_runs_of_the_final_pull_request_commit_are_considered(self):
+        # A newer push cancels the run for the commit it replaced. That is safe
+        # because validation is only ever read from the final commit's runs.
+        fixture = api_fixture()
+        run_queries = []
+
+        def api_get(path, params=None):
+            if path.endswith(f"/actions/workflows/{WORKFLOW_ID}/runs"):
+                run_queries.append(dict(params))
+            return fixture(path, params)
+
+        reuse, _reason = self.route(api_get)
+
+        self.assertTrue(reuse)
+        self.assertEqual(
+            run_queries,
+            [
+                {
+                    "event": "pull_request",
+                    "head_sha": HEAD_SHA,
+                    "per_page": "100",
+                    "status": "success",
+                }
+            ],
+        )
+
+    def test_cancelled_run_is_not_reused_even_with_a_matching_attestation(self):
+        # The checks job can finish and attest before the run is cancelled.
+        fixture = api_fixture()
+
+        def api_get(path, params=None):
+            response = fixture(path, params)
+            if path.endswith(f"/actions/workflows/{WORKFLOW_ID}/runs"):
+                response["workflow_runs"][0]["conclusion"] = "cancelled"
+            return response
+
+        reuse, reason = self.route(api_get)
+
+        self.assertFalse(reuse)
+        self.assertIn("no successful workflow", reason)
 
     def test_direct_push_falls_back_without_querying_workflow_runs(self):
         def api_get(path, params=None):
@@ -131,7 +201,15 @@ class ReusePrChecksTests(TestCase):
         root = Path(__file__).resolve().parents[1]
         jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
         performance = jobs['p2-performance']
-        self.assertEqual(performance['services'], jobs['postgres-search']['services'])
+        # The timed tick keeps the disk-backed service it was calibrated on. The
+        # other PostgreSQL lanes run the same service with its files in memory.
+        search_service = jobs['postgres-search']['services']['postgres']
+        self.assertTrue(search_service['options'].endswith(IN_MEMORY_DATA_OPTION))
+        self.assertEqual(performance['services'], {'postgres': {
+            **search_service,
+            'options': search_service['options'].removesuffix(IN_MEMORY_DATA_OPTION),
+        }})
+        self.assertNotIn('docker exec', ''.join(step.get('run', '') for step in performance['steps']))
         self.assertEqual(performance['env'], jobs['postgres-search']['env'])
         self.assertIn('p2-performance', jobs['deploy']['needs'])
         self.assertIn("needs.p2-performance.result == 'success'", jobs['deploy']['if'])
@@ -167,9 +245,15 @@ class ReusePrChecksTests(TestCase):
         self.assertIn("  workflow_dispatch:", workflow)
         self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
         self.assertIn("github.ref == 'refs/heads/main'", workflow)
-        self.assertIn(
-            "github.event_name == 'pull_request' && github.sha || github.ref",
-            workflow,
+        # Main pushes and manual releases share one group, where a run in
+        # progress is never cancelled. Each pull request has its own group,
+        # where a later run cancels the one in progress.
+        self.assertEqual(
+            yaml.load(workflow, Loader=yaml.BaseLoader)["concurrency"],
+            {
+                "group": "mlai-backend-deploy-${{ github.ref }}",
+                "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+            },
         )
 
         with TemporaryDirectory() as temporary_directory:
@@ -180,3 +264,118 @@ class ReusePrChecksTests(TestCase):
             ):
                 self.assertEqual(main(), 0)
             self.assertIn("reuse_pr_checks=false", output_path.read_text())
+
+    def test_database_lanes_reuse_one_migrated_database_and_bound_in_memory_files(self):
+        root = Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
+        # Without this switch every `manage.py test` call re-applies all migrations.
+        for lane in ('checks', 'postgres-search', 'migration-tests', 'p2-performance'):
+            self.assertEqual(jobs[lane]['env']['MLAI_TEST_DATABASE_TEMPLATE'], '1', lane)
+        self.assertIn(
+            "TEST_RUNNER = 'mlai.test_runner.TemplateDatabaseRunner'",
+            (root / 'mlai/settings.py').read_text(),
+        )
+        # An in-memory data directory holds a limited number of files, and each
+        # emptied table leaves one until the next checkpoint. The two settings
+        # travel together, before any test command runs.
+        for lane in ('postgres-search', 'migration-tests'):
+            self.assertTrue(
+                jobs[lane]['services']['postgres']['options'].endswith(IN_MEMORY_DATA_OPTION),
+                lane,
+            )
+            first_step = jobs[lane]['steps'][0]['run']
+            self.assertIn('= tmpfs', first_step, lane)
+            # The image's first-start server answers on the socket only. Every
+            # database command of this step waits for, and uses, the address
+            # that only the final server serves.
+            self.assertIn('pg_isready -q -h 127.0.0.1', first_step, lane)
+            self.assertIn('psql -h 127.0.0.1', first_step, lane)
+            self.assertEqual(first_step.count(' -h 127.0.0.1 '), 2, lane)
+            self.assertIn("ALTER SYSTEM SET checkpoint_timeout = '30s'", first_step, lane)
+            self.assertIn("ALTER SYSTEM SET max_wal_size = '256MB'", first_step, lane)
+            self.assertIn('pg_reload_conf()', first_step, lane)
+
+    def test_every_postgres_only_test_is_selected_by_a_postgresql_lane(self):
+        root = Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
+        # Labels of the PostgreSQL commands that run tests with this tag. The
+        # SQLite lane excludes the tag, so nothing else runs them.
+        selected = set()
+        for lane in ('postgres-search', 'migration-tests'):
+            for step in jobs[lane]['steps']:
+                for command in step.get('run', '').replace('\\\n', ' ').splitlines():
+                    if 'manage.py test' not in command or '--tag' in command:
+                        continue
+                    if re.search(r'--exclude-tag[= ]postgres-only', command):
+                        continue
+                    selected.update(
+                        token for token in shlex.split(command)
+                        if re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+', token)
+                    )
+
+        def tagged(node):
+            return any(
+                isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name)
+                and decorator.func.id == 'tag' and any(
+                    isinstance(argument, ast.Constant) and argument.value == 'postgres-only'
+                    for argument in decorator.args
+                )
+                for decorator in node.decorator_list
+            )
+
+        targets = []
+        for path in root.rglob('test*.py'):
+            if any(part.startswith('.') for part in path.relative_to(root).parts):
+                continue
+            module = '.'.join(path.relative_to(root).with_suffix('').parts)
+            for parent in ast.parse(path.read_text()).body:
+                if not isinstance(parent, ast.ClassDef):
+                    continue
+                if tagged(parent):
+                    targets.append(f'{module}.{parent.name}')
+                targets.extend(
+                    f'{module}.{parent.name}.{node.name}' for node in parent.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and tagged(node)
+                )
+
+        # The six Slack founder-link migration classes run nowhere else.
+        founder_links = [target for target in targets if target.startswith('core.tests_slack_founder_links.')]
+        self.assertGreaterEqual(len(founder_links), 6)
+        missing = sorted(
+            target for target in targets
+            if not any(target == label or target.startswith(label + '.') for label in selected)
+        )
+        self.assertEqual(missing, [])
+
+    def test_parallel_test_commands_can_report_a_failure(self):
+        root = Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
+        parallel = {}
+        for name, job in jobs.items():
+            runs = [step.get('run', '') for step in job.get('steps', [])]
+            commands = [index for index, run in enumerate(runs) if '--parallel' in run]
+            if not commands:
+                continue
+            parallel[name] = [job['steps'][index]['name'] for index in commands]
+            # Without tblib a worker cannot send a failure's traceback back, and
+            # Django stops at the first failing test with an error about that.
+            installs = [
+                index for index, run in enumerate(runs)
+                if '-r .github/requirements-ci.lock' in run
+                and '--require-hashes' in run and '--only-binary=:all:' in run
+            ]
+            self.assertTrue(installs and installs[0] < commands[0], name)
+            self.assertNotIn('if', job['steps'][installs[0]], name)
+            # A dead worker hangs a parallel run instead of failing it.
+            for index in commands:
+                self.assertLessEqual(job['steps'][index].get('timeout-minutes', 0) or 999, 60, name)
+            # Each worker clones the migrated database, which the reuse sets up.
+            self.assertEqual(job['env']['MLAI_TEST_DATABASE_TEMPLATE'], '1', name)
+        # Only the migration tests, which are bound by one core each, run in
+        # parallel. Timing-sensitive suites stay serial.
+        self.assertEqual(parallel, {'migration-tests': ['Run migration tests']})
+        self.assertIn('tblib==', (root / '.github/requirements-ci.txt').read_text())
+        self.assertRegex(
+            (root / '.github/requirements-ci.lock').read_text(),
+            r'(?m)^tblib==\S+ \\\n\s+--hash=sha256:[0-9a-f]{64}',
+        )

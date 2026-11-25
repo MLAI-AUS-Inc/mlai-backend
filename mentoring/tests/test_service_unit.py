@@ -126,6 +126,13 @@ class TransitionTests(Base):
         self.points.refund.assert_not_called()
         self.points.award.assert_not_called()
 
+    def test_accept_of_a_free_session_charges_nothing(self):
+        s = make_session(price_roo=0)
+        self.accept(s)
+        self.assertEqual(s.status, 'accepted')
+        self.points.spend.assert_not_called()
+        self.assertIsNone(s.charge_ledger_entry)
+
     def test_accept_fails_cleanly_when_founder_is_now_too_poor(self):
         s = make_session()
         self.points.spend.side_effect = service.InsufficientBalanceError('no')
@@ -236,6 +243,16 @@ class TransitionTests(Base):
         self.assertEqual(kw['reference_type'], 'MENTOR_SESSION')
         self.assertEqual(s.status, 'completed')
 
+    def test_free_session_completes_without_a_payout(self):
+        # PointsService.award refuses a zero delta; a free session must still settle.
+        s = make_session('accepted', price_roo=0)
+        self.load(s)
+        self.clock = s.ends_at
+        MentoringService.complete(SID, self.actor_mentor)
+        self.points.award.assert_not_called()
+        self.assertIsNone(s.payout_ledger_entry)
+        self.assertEqual(s.status, 'completed')
+
     def test_payout_is_not_stamped_with_the_mentors_slack_id(self):
         # The weekly points-admin allowance sums EARN rows by created_by_slack_id.
         s = make_session('accepted')
@@ -263,6 +280,14 @@ class TransitionTests(Base):
         MentoringService._apply_settlement(s)
         self.assertEqual(s.status, 'completed')
         self.points.award.assert_called_once()
+
+    def test_auto_complete_of_a_free_session_settles_without_award(self):
+        # Regression: the scheduler retried this every tick and failed the whole run.
+        s = make_session('accepted', price_roo=0)
+        self.clock = s.ends_at + timedelta(hours=24)
+        MentoringService._apply_settlement(s)
+        self.points.award.assert_not_called()
+        self.assertEqual(s.status, 'completed')
 
     def test_no_auto_complete_before_grace(self):
         s = make_session('accepted')

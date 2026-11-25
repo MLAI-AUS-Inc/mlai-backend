@@ -94,7 +94,9 @@ def destination(organization, company_id, *, run_id=None, ask=None, item=None):
         path = "runs/" + quote(str(run_id), safe="") + "/draft"
     elif ask == "approve_join_request" or str(item or "").startswith("team:"):
         path = "team"
-    elif ask in {"approve_setup", "authorize_github", "approve_on_github"} or str(item or "").startswith("website:"):
+    elif (ask in {"approve_setup", "authorize_github", "approve_on_github", "send_pr_to_reviewer",
+                  "waiting_github_owner_approval", "choose_repository"}
+          or str(item or "").startswith(("website:", "github-owner:"))):
         path = "website"
     else:
         path = ""
@@ -165,6 +167,7 @@ def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=Non
             "ask_approve_on_github_protected": ("GitHub needs you to approve one change for your blog", None, "Approve on GitHub"),
             "ask_approve_on_github_site_test": (f"Your site has a test that expects exactly {expected if type(expected) is int else 'a fixed number of'} pages", "Approve a one-line change on GitHub.", "Approve on GitHub"),
             "ask_approve_join_request": ("Someone asked to join your team", None, "Review request"),
+            "ask_add_seed_topics": ("Research found nothing new", "Add seed topics or competitors, then run research again.", "Add seed topics"),
         }
         headline, body, label = rows.get(copy_id, ("Your articles", None, "Continue"))
         next_kind = None
@@ -173,6 +176,17 @@ def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=Non
         headline = "Your articles are still ready to copy" if exhausted else "Your article is ready to copy"
         body = "Your website's own checks didn't accept the new blog page." if exhausted else "We'll offer to add it to your website once your blog page works."
         label, next_kind = ("Send details to my developer" if exhausted else "Read your article"), "view_draft"
+    elif copy_id == "fixing":
+        # B10: a generic stop is ours to fix. Staff were alerted when it arrived;
+        # the points lines are the stop's, so a refund still shows.
+        outcome = outcome or {}
+        from .first_article_entitlement import entitled_request
+        free = bool(run and entitled_request(mapping(run.run_request)) and outcome.get("state") == "no_charge")
+        headline = "We're fixing this"
+        body = "Your free article is still waiting for you." if free else f"Refunded {outcome.get('points', 0)} points." if outcome.get("state") == "refunded" else "No charge."
+        if outcome.get("state") in {None, "pending"}:body = "We're checking the points for this article."
+        elif outcome.get("state") in {"charged", "kept"}:body = f"This article used {outcome.get('points') or 0} points."
+        next_kind = None
     elif copy_id == "stopped":
         outcome = outcome or {}
         from .first_article_entitlement import entitled_request
@@ -229,6 +243,11 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
         if is_delivered_content_only(run):
             exhausted = mapping(mapping(getattr(config, "pillar_strategy", None)).get("self_heal")).get("ladder")
             copy_id = "done_copy_ready_ladder_exhausted" if mapping(exhausted).get("exhausted_at") else "done_copy_ready_strategy"
+    if copy_id is None and run.status in {"failed", "blocked"}:
+        from .failure_policy_engine import class_before_wall_enabled, settled_without_delivery
+        if class_before_wall_enabled() and settled_without_delivery(run):
+            # D16: the points came back, so the founder starts again, never resumes.
+            copy_id = "stopped"
     if copy_id is None and count:
         copy_id = "ask_check_highlighted"
     from .founder_journey_contract import effective_approval_state
@@ -245,7 +264,7 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
         copy_id = "working_publishing"
     if copy_id is None and (run.status in {"failed", "blocked", "cancelled", "denied"} or code):
         copy_id = registry_policy.copy_id_for(code, organization=organization, terminal=run.status in {"failed", "blocked", "cancelled", "denied"}, self_heal=mapping(result.get("self_heal_v1")))
-        if entry is None:
+        if entry is None and copy_id != "fixing":
             copy_id = "working"
     if copy_id is None:
         return None

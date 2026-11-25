@@ -66,7 +66,9 @@ MARKER_VERSION = 1
 LEGACY = "legacy"
 NEW_JOURNEY = "new_journey"
 COHORTS = frozenset({LEGACY, NEW_JOURNEY})
-ASSIGNED_BY = frozenset({"create", "report_apply", "opt_in", "launch_window"})
+# ``backfill`` (plan E6): the marker-backfill command froze the organisation's
+# effective cohort as it was; it never moves an organisation between cohorts.
+ASSIGNED_BY = frozenset({"create", "report_apply", "opt_in", "launch_window", "backfill"})
 
 NAMED_LEGACY_DOMAINS = frozenset({"talathrive.com", "vyavos.com", "pawshareclub.com", "la-vie.com.au", "mlai.au"})
 SETUP_WORKFLOWS = ("article_system_setup", "repo_scan", "content_factory_scan")
@@ -524,9 +526,12 @@ def _runs(organization):
 
 def _published_articles(organization):
     from .models import ArticlePublishStatus, WrittenArticle
+    from .website_content_files import not_live_q
+    # Plan C7: a content file merged onto main is not a published article.
     return WrittenArticle.objects.filter(organization_id=organization.pk).filter(
         Q(publish_status__in=[ArticlePublishStatus.MERGED, ArticlePublishStatus.LIVE])
-        | Q(published_at__isnull=False) | Q(on_main_verified_at__isnull=False) | Q(live_verified_at__isnull=False))
+        | Q(published_at__isnull=False) | Q(on_main_verified_at__isnull=False) | Q(live_verified_at__isnull=False)
+    ).exclude(not_live_q())
 
 
 def legacy_reasons(organization, config=None) -> list[str]:

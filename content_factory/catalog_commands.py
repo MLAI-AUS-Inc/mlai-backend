@@ -1,9 +1,9 @@
-"""Durable, bounded catalogue commands for the explicitly admitted owner path.
+"""Durable, bounded catalogue commands for an authorized startup user.
 
 Receipts contain hashes and revisions, never whole requests or old responses.
-The owning view holds the organisation/config/profile/company locks through the
-catalogue change and receipt. Reads and after-commit offer checks remain outside
-this command's effect boundary.
+The view holds the catalogue authorization and configuration locks through the
+change and receipt. Reads and after-commit offer checks remain outside this
+command's effect boundary.
 """
 from copy import deepcopy
 from dataclasses import dataclass
@@ -84,12 +84,17 @@ def _receipts(strategy):
     return value
 
 
-def _require_current_owner(*, organization, context, user_id, strategy):
+def _require_command_actor(*, organization, company, user_id, strategy):
+    """Apply the legacy command restrictions after locked catalogue authorization."""
+    from founder_tools.models import VibeRaisingCompany
+
+    if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+        return
     from django.contrib.auth import get_user_model
     from founder_tools import startup_team
+
     if (type(user_id) is not int or not get_user_model().objects.filter(pk=user_id, is_active=True).exists()
-            or context.organization.pk != organization.pk
-            or context.company.organization_id != organization.pk
+            or company.organization_id != organization.pk
             or startup_team._owner(organization) != user_id):
         raise PermissionError("Only the current active startup owner can change this catalogue.")
     roster = startup_team._roster(SimpleNamespace(pillar_strategy=strategy))
@@ -110,15 +115,15 @@ class CatalogCommand:
         return self.previous is not None
 
 
-def prepare_command(*, strategy, organization, context, user_id, key, body, action):
-    """Bind a keyed v2 owner request, or leave the existing no-key/service path alone.
+def prepare_command(*, strategy, organization, company, user_id, key, body, action):
+    """Bind a keyed v2 request from a locked catalogue actor.
 
     A retained command continues to govern its replay if new admissions are later
     disabled. The namespace is organisation-local; independently authorised
     organisations may use the same raw caller UUID as different intents.
     """
     from .p2_foundation import p2_applies
-    if context is None or user_id is None or key is None:
+    if company is None or user_id is None or key is None:
         return None
     admitted = p2_applies(organization)
     if not isinstance(strategy, dict):
@@ -129,11 +134,11 @@ def prepare_command(*, strategy, organization, context, user_id, key, body, acti
         raise ValueError("A valid catalogue request key is required.")
     if action not in {"edit", "approve", "first_audience"} or not isinstance(body, dict):
         raise ValueError("A catalogue owner command is required.")
-    _require_current_owner(organization=organization, context=context, user_id=user_id, strategy=strategy)
+    _require_command_actor(organization=organization, company=company, user_id=user_id, strategy=strategy)
     records = _receipts(strategy)
     key_sha = hashlib.sha256(key.encode("utf-8")).hexdigest()
     identity = {"schema_version": 1, "organization_id": organization.pk,
-        "company_id": str(context.company.pk), "user_id": user_id, "action": action,
+        "company_id": str(company.pk), "user_id": user_id, "action": action,
         "body_sha256": _digest(body)}
     previous = records.get(key_sha)
     if previous is not None:

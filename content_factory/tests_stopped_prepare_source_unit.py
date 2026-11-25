@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from . import vibe_marketing_views  # noqa: F401 -- decorates with transaction.atomic at import; load before it is patched
@@ -239,7 +239,9 @@ class SourceWakeTests(SimpleTestCase):
         self.assertIsNone(result)
         self.assertNotIn("cancelled", lookups["state__in"])
 
+    @override_settings(ARTICLES_PREPARE_STICKY_STOP_ENABLED=False)
     def test_open_preparation_still_reopens_for_any_push(self):
+        # Without sticky stops (plan B3's kill switch) any push re-opens it.
         self.op.state = "needs_attention"
         result, lookups, values = self.wake()
         self.assertIs(result, self.op)
@@ -269,13 +271,14 @@ class PushWakeTests(SimpleTestCase):
 
     def test_mlai_merge_wakes_preparation_with_its_run(self):
         website, wake = self.push("merged-setup")
-        wake.assert_called_once_with(website.pk, organization_id=4, owned_merge_run_id="merged-setup")
+        wake.assert_called_once_with(website.pk, organization_id=4, owned_merge_run_id="merged-setup",
+            source_sha="b" * 40, carried=False)
         self.assertTrue(website.capabilities["publishingReady"])
         self.assertEqual(website.blockers, [])
 
     def test_customer_push_wakes_preparation_without_one(self):
         website, wake = self.push("")
-        wake.assert_called_once_with(website.pk, organization_id=4, owned_merge_run_id="")
+        wake.assert_called_once_with(website.pk, organization_id=4, owned_merge_run_id="", source_sha="b" * 40, carried=False)
         self.assertFalse(website.capabilities["publishingReady"])
 
 

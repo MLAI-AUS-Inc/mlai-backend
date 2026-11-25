@@ -42,6 +42,19 @@ _SPECS = (
         text_template="system_email/chat_sign_in_code.txt",
         required_context=("verification_code", "expires_minutes"),
     ),
+    *(
+        MessageSpec(
+            key=f"chat_email_change_{kind}", category=AUTH, subject=subject,
+            html_template="system_email/email_change.html",
+            text_template="system_email/email_change.txt",
+            required_context=("new_email_masked",),
+        )
+        for kind, subject in (
+            ("current_code", "Confirm your MLAI sign-in email change"),
+            ("new_code", "Verify your new MLAI sign-in email"),
+            ("receipt", "Your MLAI sign-in email changed"),
+        )
+    ),
     MessageSpec(
         key="magic_link",
         category=AUTH,
@@ -58,10 +71,57 @@ _SPECS = (
         text_template="system_email/password_reset.txt",
         required_context=("reset_link",),
     ),
+    MessageSpec(
+        key="mentor_invite",
+        category=NOTIFICATION,
+        subject="{{ inviter_first_name|default:'MLAI' }} invited you to mentor at MLAI",
+        html_template="system_email/mentor_invite.html",
+        text_template="system_email/mentor_invite.txt",
+        required_context=("accept_url", "explainer_url", "expires_on", "invited_email", "inviter_name", "asset_base"),
+    ),
+    MessageSpec(
+        key="mentor_session_feedback",
+        category=NOTIFICATION,
+        subject="{% autoescape off %}How was your session with {{ mentor_first }}?{% endautoescape %}",
+        html_template="system_email/mentor_session_feedback.html",
+        text_template="system_email/mentor_session_feedback.txt",
+        required_context=(
+            "mentor_name", "mentor_first", "date_long", "time_range", "place",
+            "url_sad", "url_neutral", "url_happy", "url_no_show", "unsubscribe_url", "asset_base",
+        ),
+        unsubscribe=True,
+    ),
+    MessageSpec(
+        key="startup_team_invite",
+        category=NOTIFICATION,
+        subject="{% autoescape off %}{{ inviter_name }} invited you to join {{ startup_name }} on MLAI{% endautoescape %}",
+        html_template="system_email/startup_team_invite_v1.html",
+        text_template="system_email/startup_team_invite_v1.txt",
+        required_context=("startup_name", "inviter_name", "invite_email", "expires_on", "accept_url", "asset_base"),
+    ),
+    MessageSpec(
+        key="arcade_codex_prize",
+        category=NOTIFICATION,
+        subject="You won $50 in Codex credits at MLAI Arcade",
+        html_template="system_email/arcade_codex_prize.html",
+        text_template="system_email/arcade_codex_prize.txt",
+        required_context=("activation_code", "activation_url"),
+    ),
+    MessageSpec(
+        key="event_perk_code",
+        category=NOTIFICATION,
+        subject="Your {{ perk_label|lower }} code for {{ event_name }}",
+        html_template="system_email/event_perk_code.html",
+        text_template="system_email/event_perk_code.txt",
+        required_context=("coupon_code", "checkout_url", "event_name", "perk_label", "points_cost", "expires_display"),
+    ),
     MessageSpec(key="notification_channel_verify", category=AUTH, prerendered=True),
     MessageSpec(key="article_review_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(key="article_content_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(key="article_report_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
+    MessageSpec(key="daily_research_topics", category=NOTIFICATION, prerendered=True, unsubscribe=True),
+    # Plan E3b: "Tell me when this changes" on the not-on-GitHub exit.
+    MessageSpec(key="founder_website_lead_reminder", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(
         key="monthly_update_7d",
         category=NOTIFICATION,

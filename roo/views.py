@@ -28,14 +28,14 @@ from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     CoworkingBookingOperation,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase, PointsRequestDelivery,
 )
 
 from .purchase_tax import inclusive_gst_snapshot, validate_gst_payment
 from .services import (
     PointsService, PointsPurchaseService, CoworkingService, CoworkingBatchBookingError,
     BoostPostAdmissionService, BoostPostPayloadConflictError, InvalidBoostPostError,
-    TaskService, RewardsService,
+    TaskService, RewardsService, record_volunteer_credit,
 )
 from .coworking_snapshot import build_booking_snapshot
 from .coding import roo_decimal_string
@@ -232,7 +232,7 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
                 try:
                     existing_user = assign_direct_slack_identity(
                         existing_user,
-                        slack_user_id,
+                        slack_user_id, matching_email=email,
                     )
                 except ConflictingSlackFounderLinkError:
                     email = f"{slack_user_id}@slack.placeholder.com"
@@ -1657,6 +1657,29 @@ class BoostPostAdmissionView(APIView):
         )
 
 
+class BoostPostMirrorRemovalView(APIView):
+    """Accept Roo's confirmation that a rejected boost's Slack root was removed."""
+
+    permission_classes = [HasStrictRooApiKey]
+
+    @transaction.atomic
+    def post(self, request, admission_id):
+        from integrations.services.community_bridge.store import enqueue_boost_mirror_removal
+
+        admission = get_object_or_404(
+            BoostPostAdmission.objects.select_for_update(),
+            pk=admission_id,
+            submission_key=str(request.data.get("submission_key") or ""),
+            channel_id=settings.ROO_LINK_LOVE_SLACK_CHANNEL_ID,
+        )
+        result = enqueue_boost_mirror_removal(admission)
+        if result["status"] == "not_rejected_boost":
+            return Response(result, status=status.HTTP_409_CONFLICT)
+        if result["status"] not in {"enqueued", "duplicate", "no_active_mirror"}:
+            return Response({"status": "retry"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(result)
+
+
 class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only view of ledger entries."""
     queryset = Ledger.objects.all()
@@ -1685,6 +1708,74 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(kind=kind)
 
         return qs.order_by('-created_at')[:100]
+
+
+def _book_coworking_user(
+    *, user, booking_date, created_by_slack_id, slack_channel_id,
+    operation_id, operation_fingerprint,
+):
+    """Book one account and record the optional idempotent operation receipt."""
+    try:
+        with transaction.atomic():
+            booking, created = CoworkingService.book(
+                user=user,
+                booking_date=booking_date,
+                created_by_slack_id=created_by_slack_id,
+                slack_channel_id=slack_channel_id,
+            )
+            response_data = dict(CoworkingBookingSerializer(booking).data)
+            # Surface whether the monthly-update discount applied so callers
+            # (e.g. Roo) don't have to hardcode the price. The standard cost is
+            # the single source of truth in get_standard_coworking_cost().
+            standard_cost = CoworkingService.get_standard_coworking_cost()
+            response_data["standard_points_cost"] = standard_cost
+            response_data["monthly_update_discount_applied"] = (
+                CoworkingService.monthly_update_discount_applied(booking)
+            )
+            connection_type = founder_tools_connection_type(booking.user)
+            response_data["founder_tools_connection_type"] = connection_type
+            response_data["founder_tools_account_linked"] = (
+                connection_type is not None
+            )
+            response_data["founder_tools_explicitly_linked"] = (
+                connection_type == "explicit"
+            )
+            response_status = (
+                status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            )
+            if not created:
+                response_data["already_booked"] = True
+                response_data["idempotent"] = True
+            if operation_id:
+                receipt, receipt_created = (
+                    CoworkingBookingOperation.objects.get_or_create(
+                        id=operation_id,
+                        defaults={
+                            'kind': 'single',
+                            'request_fingerprint': operation_fingerprint,
+                            'response_payload': _coworking_receipt_payload(
+                                response_data, kind='single'
+                            ),
+                            'http_status': response_status,
+                        },
+                    )
+                )
+                if receipt_created:
+                    receipt.subjects.set([user])
+                if not receipt_created:
+                    if (
+                        receipt.kind != 'single'
+                        or receipt.request_fingerprint != operation_fingerprint
+                    ):
+                        raise ValueError(
+                            'operation_id was already used for a different request'
+                        )
+                    return _coworking_replay_response(receipt)
+        return Response(response_data, status=response_status)
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except InsufficientBalanceError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class CoworkingViewSet(viewsets.ViewSet):
@@ -1800,6 +1891,8 @@ class CoworkingViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'])
     def book(self, request):
         """Book a coworking day. Users can only book for today."""
+        if request.data.get('target_profile_id') not in (None, ''):
+            return self._book_for_profile(request)
         slack_user_id = request.data.get('slack_user_id')
         booking_date_str = request.data.get('date')
         slack_channel_id = request.data.get('slack_channel_id')
@@ -1880,67 +1973,94 @@ class CoworkingViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        return _book_coworking_user(
+            user=user,
+            booking_date=booking_date,
+            created_by_slack_id=slack_user_id,
+            slack_channel_id=slack_channel_id,
+            operation_id=operation_id,
+            operation_fingerprint=operation_fingerprint,
+        )
+
+    def _book_for_profile(self, request):
+        """Admin check-in for an MLAI account that has no linked Slack user.
+
+        The target is the canonical MLAI Chat profile ID from a verified bridge
+        mention. Unlike Slack-ID bookings (gated by Roo), this path checks the
+        requesting Points Admin here because no Slack identity backs the target.
+        """
+        admin_slack_user_id = clean_slack_id(request.data.get('admin_slack_user_id'))
+        raw_profile_id = request.data.get('target_profile_id')
+        booking_date_str = request.data.get('date')
+        slack_channel_id = request.data.get('slack_channel_id')
+        if not admin_slack_user_id or not booking_date_str:
+            return Response(
+                {'error': 'admin_slack_user_id, target_profile_id and date are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
-            with transaction.atomic():
-                booking, created = CoworkingService.book(
-                    user=user,
-                    booking_date=booking_date,
-                    created_by_slack_id=slack_user_id,
-                    slack_channel_id=slack_channel_id,
+            profile_id = UUID(str(raw_profile_id).strip())
+            booking_date = date.fromisoformat(booking_date_str)
+        except (ValueError, TypeError, AttributeError):
+            return Response(
+                {'error': 'Use a valid target_profile_id and a YYYY-MM-DD date'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            operation_id, operation_fingerprint, operation_receipt = (
+                _coworking_operation_receipt(
+                    raw_id=request.data.get('operation_id'),
+                    kind='single',
+                    request_fields={
+                        'admin_slack_user_id': admin_slack_user_id,
+                        'target_profile_id': str(profile_id),
+                        'date': booking_date.isoformat(),
+                    },
                 )
-                response_data = dict(CoworkingBookingSerializer(booking).data)
-                # Surface whether the monthly-update discount applied so callers
-                # (e.g. Roo) don't have to hardcode the price. The standard cost is
-                # the single source of truth in get_standard_coworking_cost().
-                standard_cost = CoworkingService.get_standard_coworking_cost()
-                response_data["standard_points_cost"] = standard_cost
-                response_data["monthly_update_discount_applied"] = (
-                    CoworkingService.monthly_update_discount_applied(booking)
-                )
-                connection_type = founder_tools_connection_type(booking.user)
-                response_data["founder_tools_connection_type"] = connection_type
-                response_data["founder_tools_account_linked"] = (
-                    connection_type is not None
-                )
-                response_data["founder_tools_explicitly_linked"] = (
-                    connection_type == "explicit"
-                )
-                response_status = (
-                    status.HTTP_201_CREATED if created else status.HTTP_200_OK
-                )
-                if not created:
-                    response_data["already_booked"] = True
-                    response_data["idempotent"] = True
-                if operation_id:
-                    receipt, receipt_created = (
-                        CoworkingBookingOperation.objects.get_or_create(
-                            id=operation_id,
-                            defaults={
-                                'kind': 'single',
-                                'request_fingerprint': operation_fingerprint,
-                                'response_payload': _coworking_receipt_payload(
-                                    response_data, kind='single'
-                                ),
-                                'http_status': response_status,
-                            },
-                        )
-                    )
-                    if receipt_created:
-                        receipt.subjects.set([user])
-                    if not receipt_created:
-                        if (
-                            receipt.kind != 'single'
-                            or receipt.request_fingerprint != operation_fingerprint
-                        ):
-                            raise ValueError(
-                                'operation_id was already used for a different request'
-                            )
-                        return _coworking_replay_response(receipt)
-            return Response(response_data, status=response_status)
-        except ValueError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except InsufficientBalanceError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        if not is_points_admin(admin_slack_user_id):
+            return Response(
+                {
+                    'code': 'points_admin_required',
+                    'error': 'Only Roo Points Admins can book coworking for other users',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if operation_receipt:
+            return _coworking_replay_response(operation_receipt)
+
+        today = timezone.now().date()
+        if booking_date < today or booking_date > today + timedelta(days=7):
+            return Response(
+                {
+                    'code': 'booking_date_out_of_range',
+                    'error': 'Coworking can be booked from today up to 7 days ahead',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user = User.objects.filter(
+            community_chat_profile_id=profile_id, is_active=True,
+        ).first()
+        if user is None:
+            return Response(
+                {'code': 'target_profile_unknown', 'error': 'No active MLAI account matches that member'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        response = _book_coworking_user(
+            user=user,
+            booking_date=booking_date,
+            created_by_slack_id=admin_slack_user_id,
+            slack_channel_id=slack_channel_id,
+            operation_id=operation_id,
+            operation_fingerprint=operation_fingerprint,
+        )
+        # Roo can't look this member's balance up by Slack ID, so return it
+        # with a fresh booking. Replays omit it rather than show a stale value.
+        if response.status_code in (200, 201) and not response.data.get('operation_replayed'):
+            response.data['points_balance'] = PointsService.get_balance(user)['balance']
+        return response
 
     @action(detail=False, methods=['post'], url_path='book-many')
     def book_many(self, request):
@@ -2467,7 +2587,7 @@ class PointsRequestViewSet(viewsets.ViewSet):
     @action(detail=True, methods=['patch'], url_path='slack-summary')
     def attach_slack_summary(self, request, pk=None):
         try:
-            points_request = PointsRequest.objects.get(pk=pk)
+            points_request = PointsRequest.objects.get(pk=pk, manual_time_key__isnull=True)
         except PointsRequest.DoesNotExist:
             return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2507,6 +2627,7 @@ class PointsRequestViewSet(viewsets.ViewSet):
         points_request = PointsRequest.objects.filter(
             slack_channel_id=slack_channel_id,
             slack_summary_message_ts=slack_message_ts,
+            manual_time_key__isnull=True,
         ).first()
         if not points_request:
             return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -2524,7 +2645,7 @@ class PointsRequestViewSet(viewsets.ViewSet):
 
         try:
             with transaction.atomic():
-                points_request = PointsRequest.objects.select_for_update().get(pk=pk)
+                points_request = PointsRequest.objects.select_for_update().get(pk=pk, manual_time_key__isnull=True)
                 if points_request.status != 'pending':
                     return Response(
                         {'error': f'Points request is already {points_request.status}'},
@@ -2532,29 +2653,14 @@ class PointsRequestViewSet(viewsets.ViewSet):
                     )
 
                 user = get_or_create_user_for_slack_id(points_request.target_slack_id)
-                ledger, _ = PointsService.award(
-                    user=user,
-                    delta=points_request.points,
-                    source='MANUAL',
-                    description=points_request.reason,
-                    created_by_slack_id=admin_slack_id,
-                    idempotency_key=f"points_request:{points_request.id}:approve",
-                    reference_type='POINTS_REQUEST',
-                    reference_id=str(points_request.id),
-                )
+                from .points_request_workflow import approve_locked_request
 
-                points_request.status = 'approved'
-                points_request.approved_by_slack_id = admin_slack_id
-                points_request.approved_at = timezone.now()
-                points_request.ledger_entry = ledger
-                points_request.save(
-                    update_fields=[
-                        'status',
-                        'approved_by_slack_id',
-                        'approved_at',
-                        'ledger_entry',
-                        'updated_at',
-                    ]
+                ledger = approve_locked_request(
+                    points_request, user, admin_slack_id=admin_slack_id,
+                    recover_slack=(
+                        request.data.get("recover_slack_confirmation") is True
+                        and HasStrictRooApiKey().has_permission(request, self)
+                    ),
                 )
         except PointsRequest.DoesNotExist:
             return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -2570,8 +2676,74 @@ class PointsRequestViewSet(viewsets.ViewSet):
                 **PointsRequestSerializer(points_request).data,
                 'points_awarded': ledger.delta,
                 'new_balance': balance['balance'],
+                'chat_level_up_pending': points_request.deliveries.filter(stage='celebration').exists(),
+                'slack_confirmation_queued': points_request.deliveries.filter(stage='slack_confirmation').exists(),
             }
         )
+
+
+    @action(detail=False, methods=["post"], url_path="claim-slack-confirmation")
+    def claim_slack_confirmation(self, request):
+        from .native_points_requests import bridged_confirmation_link
+        from .points_request_workflow import SLACK_CONFIRMATION, bridge_channel
+
+        if not HasStrictRooApiKey().has_permission(request, self):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+        if not settings.ROO_POINTS_LEVEL_UP_ENABLED:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        with transaction.atomic():
+            now = timezone.now()
+            delivery = (
+                PointsRequestDelivery.objects.select_related("request").select_for_update(skip_locked=True)
+                .filter(stage=SLACK_CONFIRMATION, delivered_at__isnull=True, available_at__lte=now)
+                .order_by("available_at", "pk").first()
+            )
+            if not delivery:
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            source = delivery.request
+            delivery.attempts += 1
+            delivery.available_at = now + timedelta(seconds=min(60 * delivery.attempts, 900))
+            delivery.save(update_fields=["available_at", "attempts"])
+            mapping = bridge_channel(source.slack_channel_id)
+            if not mapping or mapping.destination_channel_id != str(delivery.channel_id):
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            prior = bridged_confirmation_link(delivery)
+            return Response({
+                "request_id": source.pk,
+                "channel_id": source.slack_channel_id,
+                "thread_ts": source.slack_thread_ts or source.slack_summary_message_ts,
+                "text": delivery.content,
+                "attempt": delivery.attempts,
+                "author_id": settings.COMMUNITY_CHAT_ROO_SLACK_USER_ID,
+                "existing_message_id": prior.source_message_id if prior else None,
+            })
+
+    @action(detail=True, methods=["post"], url_path="slack-confirmation")
+    def slack_confirmation(self, request, pk=None):
+        """Record the exact legacy Roo confirmation for the delivery worker."""
+        from .points_request_workflow import CELEBRATION, SLACK_CONFIRMATION
+
+        if not HasStrictRooApiKey().has_permission(request, self):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+        message_id = request.data.get("message_id")
+        channel_id = request.data.get("channel_id")
+        if not isinstance(message_id, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,20}", message_id):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            deliveries = PointsRequestDelivery.objects.select_for_update().filter(
+                request_id=pk, request__slack_channel_id=channel_id,
+                stage__in=(CELEBRATION, SLACK_CONFIRMATION),
+            ).order_by("pk")
+            for delivery in deliveries:
+                if delivery.external_confirmation_id:
+                    continue
+                delivery.external_confirmation_id = message_id
+                fields = ["external_confirmation_id"]
+                if delivery.stage == SLACK_CONFIRMATION:
+                    delivery.delivered_at = timezone.now()
+                    fields.append("delivered_at")
+                delivery.save(update_fields=fields)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class PointsPurchaseViewSet(viewsets.ViewSet):

@@ -25,6 +25,9 @@ IDENTITY_FIELDS = ("website_connection_id", "connection_generation", "repository
     "github_repo", "source_sha", "target_id", "contract_digest", "evidence_digest")
 BOOLEAN_PROOFS = ("content_loading", "listing", "detail", "unknown_slug_404", "canonical", "assets", "browser", "narrow_layout", "wide_layout")
 CHECK_NAME = "MLAI articles native adapter verification"
+# Verifying the current source answers both the source-changed lock and a
+# reset's "scan the current repository" prompt (Tala Thrive, 18 Nov 2026).
+VERIFICATION_CLEARED_BLOCKERS = frozenset({"repository_source_changed", "scan_required"})
 MARKER = re.compile(r"MLAI_ARTICLES_ATTESTATION:([A-Za-z0-9+/=]+)")
 
 
@@ -211,7 +214,7 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
             from .website_goal_scope import record_source_transition
             record_source_transition(website, previous_revision=previous_revision, source_sha=proof["source_sha"])
         website.verified_sha, website.last_verified_at = proof["source_sha"], timezone.now()
-        website.blockers = [row for row in website.blockers if row.get("code") != "repository_source_changed"]
+        website.blockers = [row for row in website.blockers if row.get("code") not in VERIFICATION_CLEARED_BLOCKERS]
         website.capabilities = {**website.capabilities, "publishingReady": website.state == "connected" and not custom_verified,
             "generationReady": website.state == "connected" and not custom_verified, "previewSupported": True}
         website.save(update_fields=["verified_sha", "last_verified_at", "configuration_version", "blockers", "capabilities", "updated_at"])
@@ -360,6 +363,27 @@ def route_requires_marker(kind, path, marker_routes):
     return kind == "listing" or marker_routes is None or (str(path).rstrip("/") or "/") in marker_routes
 
 
+def static_listing_links_to(listing_url, body, detail_path):
+    """Check an actual anchor, resolving HTML base and requiring the selected HTTPS origin."""
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin, urlsplit
+    page = BeautifulSoup(body, "html.parser")
+    base = page.find("base", href=True)
+    try:
+        expected = urlsplit(urljoin(listing_url, detail_path))
+        base_url = urljoin(listing_url, base["href"]) if base else listing_url
+        for anchor in page.find_all("a", href=True):
+            if anchor.find_parent(["template", "noscript"]):
+                continue
+            url = urlsplit(urljoin(base_url, anchor["href"]))
+            if (url.scheme, url.netloc, url.path.rstrip("/")) == (
+                    expected.scheme, expected.netloc, expected.path.rstrip("/")):
+                return True
+    except ValueError:
+        pass
+    return False
+
+
 def verify_live_deployment(config, *, data):
     """Check selected source, provider CI receipt and same-site source marker."""
     from .website_live_fetch import fetch_live_route
@@ -394,19 +418,25 @@ def verify_live_deployment(config, *, data):
     ensure_fingerprint(website, binding)
     marker_routes = kit_marker_routes(website, data["source_sha"], artifact_digest)
     observations = []
+    static = target.contract.get("delivery_adapter") == "static_dropin_v1"
     for kind in ("listing", "detail", "unknown_slug"):
         public_url = f"https://{website.organization.domain}{routes[kind]}"
         expected_status = 404 if kind == "unknown_slug" else 200
         body, headers = fetch_live_route(public_url, website.organization.domain, expected_status=expected_status)
-        if kind == "listing":observe_headers(website, binding, headers)
+        if kind == "listing":
+            observe_headers(website, binding, headers)
+            if static and not static_listing_links_to(public_url, body, routes["detail"]):
+                raise WebsiteAuthorityError("live_route_unavailable", "The public directory must link to the reviewed article.")
         marker = headers.get("x-mlai-artifact-digest") or ""
-        if (expected_status == 200 and route_requires_marker(kind, routes[kind], marker_routes)
+        if (expected_status == 200 and (static or route_requires_marker(kind, routes[kind], marker_routes))
                 and marker != artifact_digest and not re.search(rb'<meta\s+name=["\x27]mlai-artifact-digest["\x27]\s+content=["\x27]' + artifact_digest.encode() + rb'["\x27]', body)):
             raise WebsiteAuthorityError("live_route_unavailable", "The public listing or article detail has not deployed this reviewed integration artifact yet.")
         observations.append({"kind": kind, "path": routes[kind], "status": expected_status})
     receipt = {"status": "passed", "source_sha": data["source_sha"], "connection_generation": website.generation,
         "target_id": data["target_id"], "public_url": url, "checked_at": timezone.now().isoformat(), "ci_evidence_digest": data["evidence_digest"],
         "artifact_digest": artifact_digest, "contract_digest": data["contract_digest"], "verified_routes": observations, "provider_verified": True}
+    if static:
+        receipt["static_directory_link_verified"] = True
     with authority_guard(binding, action="read") as website:
         current_target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
         current_ci = ci_attestation_for(website, data)
@@ -468,13 +498,18 @@ def _live_url_detail(organization, domain):
     return None
 
 
-def verify_live_url_deployment(config, target, *, setup_run_id=""):
+def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
     """Record a new-journey website's live-URL proof (``website_live_verification.verify_live_url``).
 
     Requires the target's own build proof first, so a page that shows the
     kit's marker never certifies a build MLAI did not verify, then the
     reviewed marker on the live listing. The build proof is kept and the live
     proof is written beside it.
+
+    ``renew=False`` (the background live status, ``website_live_status``) only
+    observes: it records the ``deployment-verify`` receipt for the target's
+    current, already verified source and leaves the target, its proof age and
+    the connection's verified source as they are.
     """
     from . import website_live_verification as live
     from .website_live_fetch import fetch_live_route
@@ -482,7 +517,8 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
     from .website_contract import SHA_PATTERN
     website = config.website_connection
     if website is None:
-        raise WebsiteAuthorityError("website_connection_required", "Select and authorize your website repository first.")
+        from .website_connection_codes import not_connected
+        raise not_connected("Select and authorize your website repository first.")
     if target is None or not live.applicable(target) or not live.build_proof(target):
         raise WebsiteAuthorityError("verified_target_required", "Waiting for articles build and render proof.", retryable=True)
     source_sha = str(target.source_sha or "")
@@ -502,6 +538,8 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
         if current_target is None or current_target.contract != target.contract or current_target.source_sha != source_sha:
             raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
         changed_source = current.verified_sha != source_sha
+        if changed_source and not renew:
+            raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
         domain = current.organization.domain
         organization = current.organization
     require_unlocked_remote_call()
@@ -526,6 +564,14 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
         if (target is None or target.contract != current_target.contract or target.source_sha != source_sha
                 or not live.build_proof(target) or not live.applicable(target)):
             raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+        if not renew:
+            if current.verified_sha != source_sha:
+                raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+            operation, _ = WebsiteConnectionOperation.objects.update_or_create(
+                idempotency_key=f"{current.pk}:live-url:{evidence_digest(binding)}", defaults={
+                    "connection": current, "generation": current.generation, "action": "deployment-verify",
+                    "state": "completed", "payload": binding, "receipt": receipt})
+            return {**receipt, "operation_id": str(operation.pk)}
         target.verified_at = now
         target.contract = {**target.contract, live.PROOF_KEY: {"status": "verified", "attestation_origin": live.ORIGIN,
             "observed_at": now.isoformat(), "source_sha": source_sha, "target_id": target.target_key,
@@ -534,7 +580,9 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
         target.capabilities = {**(target.capabilities or {}), "publishingReady": True, "previewSupported": True}
         target.save(update_fields=["verified_at", "contract", "capabilities", "updated_at"])
         from .models import OrganizationContentConfig
-        saved = OrganizationContentConfig.objects.get(website_connection=current)
+        saved = OrganizationContentConfig.objects.select_for_update().get(website_connection=current)
+        if saved.default_publish_target_id and saved.default_publish_target_id != target.target_key:
+            raise WebsiteAuthorityError("website_configuration_changed", "The selected target changed during the live check.")
         if not saved.default_publish_target_id:
             saved.default_publish_target_id = target.target_key
         saved.publish_targets = [row for row in (saved.publish_targets or []) if row.get("target_id") != target.target_key] + [target.contract]
@@ -545,7 +593,7 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
             from .website_goal_scope import record_source_transition
             record_source_transition(current, previous_revision=previous_revision, source_sha=source_sha)
         current.verified_sha, current.last_verified_at = source_sha, now
-        current.blockers = [row for row in current.blockers if row.get("code") != "repository_source_changed"]
+        current.blockers = [row for row in current.blockers if row.get("code") not in VERIFICATION_CLEARED_BLOCKERS]
         connected = current.state == "connected"
         current.capabilities = {**(current.capabilities or {}), "publishingReady": connected,
             "generationReady": connected, "previewSupported": True}
@@ -559,6 +607,46 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
     logger.info("website_live_url_verified org=%s connection=%s target=%s detail=%s", current.organization_id, current.pk,
         target.target_key, "compared" if detail is not None else "none")
     return {**receipt, "operation_id": str(operation.pk)}
+
+
+def renew_build_proof(config, target, *, source_sha):
+    """Renew MLAI's own proof of an unchanged source while the founder's host lags.
+
+    With ``ARTICLES_READY_ON_MERGE_ENABLED`` the founder's host deploying is a
+    background status (``website_live_status``), so the same-source refresh
+    that keeps a proof inside ``VERIFICATION_MAX_AGE`` must not need it. This
+    re-reads GitHub's selected branch, requires it still to be ``source_sha``,
+    requires the target's own build proof at that source and a target that
+    needs no sealed proof, then renews ``verified_at`` on the target and
+    ``last_verified_at`` on the connection. It never moves the verified source,
+    records no live receipt and returns ``None`` when it does not apply.
+    """
+    from . import website_live_verification as live
+    from .website_live_status import enabled as ready_on_merge
+    from .website_sealed_workflow import required as sealed_required
+    from .website_connections import verify_repository_head
+    website = getattr(config, "website_connection", None)
+    if (not ready_on_merge() or website is None or target is None or target.source_sha != source_sha
+            or not live.build_proof(target) or sealed_required(website, target)):
+        return None
+    binding = {**contract_for(website), "source_sha": source_sha, "target_id": target.target_key}
+    with authority_guard(binding, action="read") as current:
+        if current.verified_sha != source_sha:
+            return None
+    require_unlocked_remote_call()
+    verify_repository_head(website, source_sha)
+    now = timezone.now()
+    with authority_guard(binding, action="read") as current:
+        locked = current.targets.filter(generation=current.generation, target_key=target.target_key).first()
+        if (locked is None or locked.contract != target.contract or locked.source_sha != source_sha
+                or current.verified_sha != source_sha or not live.build_proof(locked) or sealed_required(current, locked)):
+            return None
+        locked.verified_at = now
+        locked.save(update_fields=["verified_at", "updated_at"])
+        current.last_verified_at = now
+        current.save(update_fields=["last_verified_at", "updated_at"])
+    logger.info("website_build_proof_renewed connection=%s target=%s source_sha=%s", current.pk, target.target_key, source_sha)
+    return {"status": "verified", "method": "build_proof", "source_sha": source_sha, "renewed_at": now.isoformat()}
 
 
 class WebsiteCiAttestationView(APIView):

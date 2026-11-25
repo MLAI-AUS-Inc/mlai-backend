@@ -1,0 +1,52 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/founder_stuck_alerts.py",
+      "function": "_operation_condition",
+      "field": "code",
+      "expression": "_operation_code(row)",
+      "site_sha256": "2c326e63cca2ca6e2b9d9c0a7932f20ff7b219e2fd9374ac00c3d3db5f921eb7",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.founder_stuck_alerts",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only staff observation of a saved run or website operation failure code, copied into a staff Slack alert and the staff console stuck reason so staff can investigate; never used as new authority or causal emission.",
+      "test": "content_factory.tests_founder_stuck_alerts.FounderStuckAlertTests.test_stopped_setup_alerts_once_with_names_step_reason_duration_and_console_link"
+    },
+    {
+      "path": "content_factory/founder_stuck_alerts.py",
+      "function": "_stopped_runs",
+      "field": "code",
+      "expression": "code",
+      "site_sha256": "f8db1ff8083da021d826ff79123a04169829164170166e91f23b80d606004b23",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.founder_stuck_alerts",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only staff observation of a saved run or website operation failure code, copied into a staff Slack alert and the staff console stuck reason so staff can investigate; never used as new authority or causal emission.",
+      "test": "content_factory.tests_founder_stuck_alerts.FounderStuckAlertTests.test_stopped_setup_alerts_once_with_names_step_reason_duration_and_console_link"
+    },
+    {
+      "path": "content_factory/founder_stuck_alerts.py",
+      "function": "_queue",
+      "field": "code",
+      "expression": "condition.code",
+      "site_sha256": "fb10150049431fba3a19d92f08d62ea08234939e6a7f9f714754098782c31623",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.founder_stuck_alerts",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only staff observation of a saved run or website operation failure code, copied into a staff Slack alert and the staff console stuck reason so staff can investigate; never used as new authority or causal emission.",
+      "test": "content_factory.tests_founder_stuck_alerts.FounderStuckAlertTests.test_stopped_setup_alerts_once_with_names_step_reason_duration_and_console_link"
+    },
+    {
+      "path": "content_factory/founder_stuck_alerts.py",
+      "function": "describe",
+      "field": "code",
+      "expression": "condition.code or None",
+      "site_sha256": "550b656cc70bfe1001cfcbcf855380681fad5afc950e6ced4b54b1016ca68176",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.founder_stuck_alerts",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only staff observation of a saved run or website operation failure code, copied into a staff Slack alert and the staff console stuck reason so staff can investigate; never used as new authority or causal emission.",
+      "test": "content_factory.tests_founder_stuck_alerts.FounderStuckAlertTests.test_stopped_setup_alerts_once_with_names_step_reason_duration_and_console_link"
+    }
+  ]
+}

@@ -253,12 +253,14 @@ class RealMergeRefusalTests(SimpleTestCase):
                     {"head": {"sha": changes.NEW}, "merged": False, "state": "open"}, {"state": "success"})), \
                 patch.object(authority, "validate_setup_merge_source", side_effect=[refused, refused]), \
                 patch.object(authority, "verified_setup_head", return_value=changes.OLD), \
+                patch.object(views, "_record_setup_verification_refusal") as record_refusal, \
                 patch.object(views, "_request_setup_pr_reverification") as reverify:
             result = prepare.maybe_merge_prepared_setup(run, SimpleNamespace(
                 organization=SimpleNamespace(domain="example.test")), config, user=SimpleNamespace(pk=4))
         self.assertEqual(result["status"], "needs_user")
         self.assertEqual(result["user_action"]["id"], "review_setup")
         self.assertEqual(result["user_action"]["run_id"], "setup-1")
+        record_refusal.assert_called_once_with(run, changes.NEW, refused)
         reverify.assert_not_called()
 
 

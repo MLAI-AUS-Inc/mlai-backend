@@ -89,7 +89,7 @@ class NativeSafetyTests(SimpleTestCase):
                 self.assertEqual(module._native_bounded_int("SYNTHETIC_NATIVE_INT", 20, 15, 10080), expected)
         self.assertFalse(settings.AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT)
         self.assertEqual(settings.AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY, "24h")
-        self.assertEqual(settings.MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS, 0)
+        self.assertEqual(settings.MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS, 60)
 
     def test_worker_failure_isolated_with_heartbeat_and_redacted_diagnostics(self):
         stream = io.StringIO()

@@ -24,7 +24,7 @@ boundaries. Subsystem documentation is indexed in
 
 ## Requirements
 
-- Python 3.11
+- Python 3.11.5 or later in the 3.11 series
 - Dependencies declared in `requirements.txt` and `requirements-engine.txt`,
   resolved together in `requirements.lock`
 - Docker only for the multi-service local stack

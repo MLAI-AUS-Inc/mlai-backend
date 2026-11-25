@@ -1,6 +1,7 @@
 """Narrow Chat-session facade; shared founder views own domain mutations."""
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from rest_framework.exceptions import NotFound, ValidationError
@@ -10,6 +11,7 @@ from rest_framework.views import APIView
 
 from community_chat.authentication import CommunityChatAccountAuthentication
 from community_chat.throttles import StartupThrottleMixin
+from founder_tools.membership import companies_for_user
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.serializers import FounderProfileSerializer
 from founder_tools.services import get_or_create_founder_profile
@@ -21,8 +23,8 @@ from startup_updates.monthly_groups import requested_month
 from vibe_raising import views as founder
 from workflow_runs.models import ContentFactoryRun
 from .presentation import update_payload
-from .publication import approved_updates
-from .lifecycle import delete_update, source_capabilities, validate_generation_sources
+from .publication import approved_updates, community_feed_order
+from .lifecycle import delete_update, pulse_source_visible, source_capabilities, validate_generation_sources
 from .source_preferences import source_preferences
 from vibe_raising.financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
 
@@ -48,16 +50,21 @@ class ChatStartupAccess(StartupThrottleMixin):
                 raise ValidationError({"companyId": "Choose a startup."})
             try:
                 self.company = get_object_or_404(
-                    VibeRaisingCompany.objects.select_related("organization"),
-                    pk=raw, profile__user=request.user,
+                    companies_for_user(request.user), pk=raw,
                 )
             except (ValueError, TypeError, DjangoValidationError):
                 raise NotFound("Startup not found.")
             run_id = kwargs.get("run_id")
             if run_id:
-                get_object_or_404(ContentFactoryRun, run_id=run_id,
-                    workflow=founder.STARTUP_UPDATE_WORKFLOW,
-                    domain=self.company.organization.domain if self.company.organization else "")
+                runs = ContentFactoryRun.objects.filter(workflow=founder.STARTUP_UPDATE_WORKFLOW)
+                if self.company.organization_id:
+                    runs = runs.filter(
+                        Q(organization_id=self.company.organization_id)
+                        | Q(organization_id__isnull=True, domain=self.company.organization.domain)
+                    )
+                else:
+                    runs = runs.none()
+                get_object_or_404(runs, run_id=run_id)
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
@@ -75,7 +82,7 @@ class BootstrapView(ChatStartupAccess, APIView):
                         "delete": True, "draftReadyPush": False}
         if getattr(settings, 'MY_STARTUP_TEAM_ENABLED', False):
             from founder_tools.startup_team import member_companies
-            capabilities['hasStartupWorkspace'] = bool(profile.companies.exists() or member_companies(request.user))
+            capabilities['hasStartupWorkspace'] = bool(companies_for_user(request.user).exists() or member_companies(request.user))
         return Response({
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
@@ -171,7 +178,7 @@ class CommunityView(ChatStartupAccess, APIView):
         except (TypeError, ValueError):
             raise ValidationError({"offset": "Use a nonnegative integer."})
         # Approval must still refer to the same hash and audience as the publication.
-        rows = approved_updates("community", "public").order_by("-published_at", "-id")
+        rows = community_feed_order(approved_updates("community", "public"))
         page = list(rows[offset:offset + 51])
         return Response({"updates": [update_payload(row, published=True, community=True) for row in page[:50]],
             "nextOffset": offset + 50 if len(page) > 50 else None})
@@ -186,7 +193,8 @@ class SourcesView(ChatStartupAccess, ConnectorSourcesStatusView):
         response = super().get(request)
         if response.status_code == 200:
             preferences = source_preferences(self.company)
-            sources = [source_capabilities(source, preferences=preferences) for source in response.data.get("sources", [])]
+            sources = [source_capabilities(source, preferences=preferences)
+                for source in response.data.get("sources", []) if pulse_source_visible(source)]
             from .website_connections import website_connection_sources
             sources.extend(website_connection_sources(request.user, self.company))
             from crm.access import crm_access

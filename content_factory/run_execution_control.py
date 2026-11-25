@@ -5,6 +5,7 @@ not approve publication, create a charge or permit changed drafting inputs.
 """
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
+import logging
 import re
 
 from django.conf import settings
@@ -16,6 +17,8 @@ from .run_ownership import (
     require_admission_identity, require_event_execution, wire_identity,
 )
 from .website_contract import evidence_digest
+
+logger = logging.getLogger(__name__)
 
 CONTROL_KEY = "run_owner_control_v1"
 BUDGET_KEY = "backend_run_budget_v1"
@@ -65,7 +68,18 @@ def initial_control_budget(workflow):
         return None
     value = {"schema_version": 1, "runtime": "maintained_sdk" if setup else "article",
              "max_model_usd": usd, "max_model_tokens": tokens}
-    return value if valid_control_budget(value) else None
+    if valid_control_budget(value):
+        return value
+    if setup:
+        # B14: SDK control is on but the allowance cannot be issued. The run
+        # would reach Content Factory with no backend ceiling; Content Factory
+        # then stops before any model call with RUN_BUDGET_NOT_CONFIGURED,
+        # unless another ceiling source exists. Name what is missing for staff.
+        missing = [name for name, ok in (
+            ("ARTICLES_RUN_CONTROL_MODEL_USD", _decimal(usd, positive=True) is not None),
+            ("ARTICLES_RUN_CONTROL_MODEL_TOKENS", type(tokens) is int and 0 < tokens <= 20_000_000)) if not ok]
+        logger.error("articles_run_control_budget_not_configured workflow=%s missing=%s", workflow, ",".join(missing))
+    return None
 
 
 def current_execution_request(run):

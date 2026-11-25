@@ -15,7 +15,7 @@ NEXT_ACTION_LABELS = {"verify-access": "Check GitHub access", "scan": "Scan repo
     "ci-attestation": "Recheck verification", "verify": "Verify website", "prepare": "Check website again"}
 # Cleanup, re-verification and dispatch follow-ups run in the background and can
 # stay queued for days. None of them is the owner's current website operation.
-BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup")
+BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup", "live-status")
 # While the server re-checks a website's source, the proof that check renews is
 # reported as running instead of as an action for the owner to take.
 SOURCE_CHECK_FACTS = {"inventory": "scan", "verification": "preview", "deployment": "activation"}
@@ -27,18 +27,29 @@ SOURCE_RECHECK_REASON = "Checking your website again."
 LIVE_URL_SKIPPED_REQUIREMENTS = frozenset({"workflows_permission", "ci_artifact_digest"})
 
 
+def live_status_projection(*, deployed, ready, watch=None):
+    """The owner's ``liveStatus`` (``website_live_status.project``); never a gate."""
+    from .website_live_status import project
+    return project(deployed=deployed, ready=ready, watch=watch)
+
+
 def fact(complete=False, *, code="", reason="", status=None, verified_at=None, operation=None):
     """Expose a finite state; a saved credential is never an active check."""
     return {"status": status or ("complete" if complete else "needs_action"), "reasonCode": "" if complete else code,
         "reason": "" if complete else reason, "verifiedAt": verified_at, "operationId": operation}
 
 
-def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None, source_check=None):
+def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None, source_check=None, live_watch=None, owner_view=False):
     """Project verified facts without interpreting legacy completion ticks.
 
     ``source_check`` names the server's own re-check of the current source,
     still in flight, for the owner's view only: preparation keeps acting on the
     unmasked facts.
+
+    With ``proof["readyOnMerge"]`` (ARTICLES_READY_ON_MERGE_ENABLED), MLAI's own
+    proof of the merged source completes the live route step and allows
+    publishing; whether the founder's host serves it is ``liveStatus`` only,
+    built from ``live_watch`` (``website_live_status.summary``).
     """
     website, capabilities, target = mapping(website), mapping(capabilities), mapping(target)
     setup_pr = mapping(setup_pull_request)
@@ -50,6 +61,15 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     verified = bool(capabilities.get("canGenerateArticle") and authoring_supported)
     access = bool(capabilities.get("repositoryAccessVerified"))
     account_access = bool(capabilities.get("accountAccessVerified", access))
+    # A read that made no GitHub check (bootstrap never probes; a verified
+    # check is cached for 15 minutes) leaves saved access unknown. The owner
+    # sees the saved connection as connected rather than as a step to redo;
+    # every write still probes GitHub before it runs.
+    # article_capabilities reports that unknown as "github_verification_required".
+    # Only owner reads mask it: preparation still sees the unchecked account and
+    # runs its own forced verify-access step before choosing work.
+    saved_access = bool(owner_view and not access and capabilities.get("reasonCode") == "github_verification_required"
+        and website.get("status") == "connected" and website.get("repositoryId"))
     write_access = bool(capabilities.get("repositoryWriteVerified", access))
     connected = website.get("status") == "connected"
     policy = mapping(website.get("writePolicy"))
@@ -58,8 +78,10 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     deployed = bool(deployment.get("status") == "passed" and deployment.get("source_sha") == website.get("verifiedSha")
         and deployment.get("connection_generation") == website.get("connectionGeneration") and deployment.get("target_id") == target.get("key")
         and deployment.get("public_url") and deployment.get("checked_at"))
+    # MLAI's own proof stands in for the host's deployment (plan step 8).
+    publishable = deployed or (proof.get("readyOnMerge") is True and verified)
     live_ready = can_publish_article(integration_verified=verified,
-        write_verified=capabilities.get("repositoryWriteVerified") is True and write_allowed,deployment_verified=deployed)
+        write_verified=capabilities.get("repositoryWriteVerified") is True and write_allowed,deployment_verified=publishable)
     reason_code = capabilities.get("reasonCode") or "integration_required"
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
     if not authoring_supported:
@@ -104,8 +126,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "Approve Workflows: write to install or update .github/workflows/mlai-articles-verification.yml." if workflow_missing
         else f"Approve {' and '.join(missing_ci)} to read the current in-repository CI result.")
     prerequisites = {
-        "account": fact(account_access, code="github_access_required", reason="Check saved GitHub access."),
-        "repository": fact(access and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),
+        "account": fact(account_access or saved_access, code="github_access_required", reason="Check saved GitHub access."),
+        "repository": fact((access or saved_access) and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),
         "inventory": fact(bool(discovery.get("complete")) and not inventory_stale,
             code="scan_stale" if inventory_stale else "scan_required", reason="Scan the current repository.", status="stale" if inventory_stale else None),
         "permissions": fact(permissions_ready, code=permission_code, reason=permission_reason),
@@ -116,7 +138,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             reason="Authenticate native CI proof for this exact target and operation." if ci_attestation_needed else
                 "Your website's publishing verification is out of date." if verification_stale else reason,
             status="stale" if verification_stale else None, verified_at=capabilities.get("verifiedAt")),
-        "deployment": fact(deployed, code="deployment_verification_required", reason="Verify the deployed public articles route.", verified_at=deployment.get("checked_at")),
+        "deployment": fact(publishable, code="deployment_verification_required", reason="Verify the deployed public articles route.", verified_at=deployment.get("checked_at")),
     }
     step_facts = [("startup", "Startup details", fact(bool(company_id))), ("github", "GitHub access", prerequisites["account"]),
         ("repository", "Website repository", prerequisites["repository"]), ("scan", "Repository inventory", prerequisites["inventory"]),
@@ -214,6 +236,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
         "allowedActions": list(dict.fromkeys(allowed)), "actions": actions, "nextAction": next_action,
         "setupPullRequest": setup_pr or None,
+        "liveStatus": live_status_projection(deployed=deployed, ready=live_ready, watch=live_watch),
         "discovery": discovery, "githubPermissions": grants, "operation": operation, "sourceRuns": source_runs or [], "ciSourceRuns": ci_source_runs or source_runs or [],
         "support": {"native": {"available": native_certified or native_path.get("status") == "available", "certified": native_certified,
                 "reasonCode": "" if native_certified else "native_verification_required" if native_path.get("status") == "available" else "adapter_required",
@@ -374,6 +397,7 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
     connection = config.website_connection
     discovery, target, operation, epoch, proof, source_runs, ci_source_runs = None, None, None, 0, {}, [], []
     source_check = None
+    live_watch = None
     if connection:
         website["hasMutationHistory"] = connection.repository_mutations.exists()
         from django.db.models import Q
@@ -407,10 +431,20 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
         # target that needs sealed execution proof keeps the CI requirements.
         live_selected = live_url_selected(getattr(context, "organization", None)) and (
             selected is None or live_url_applicable(selected))
+        # MLAI's own build and render proof is enough for every cohort: the
+        # founder's CI and host are not asked to prove it again.
+        # A target that needs sealed execution proof keeps asking for it.
+        from .website_live_status import enabled as ready_on_merge_enabled
+        from .website_sealed_workflow import required as sealed_required
+        ready_on_merge = ready_on_merge_enabled() and not (selected is not None and sealed_required(connection, selected))
         proof = {"integrationVerified": prepared, "buildVerified": fresh, "verificationStale": prepared and not fresh,
             "verifiedAdapter": preview_target.adapter if fresh else None,
-            "ciAttestationRequired": bool(not live_selected and fresh
+            "ciAttestationRequired": bool(not live_selected and not ready_on_merge and fresh
                 and current_ci_attestation(connection, selected, capabilities=capabilities) is None)}
+        if ready_on_merge:
+            proof["readyOnMerge"] = True
+            from .website_live_status import summary as live_summary, watch_for
+            live_watch = live_summary(watch_for(connection))
         if live_selected:
             proof["liveVerificationSelected"] = True
         cleanup = connection.operations.filter(generation=connection.generation, action="cleanup", state="awaiting_deployment").order_by("-created_at").first()
@@ -468,7 +502,7 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
                 "savedSetup": (pending.get("setup_run_id") or pending.get("setupRunId")) == run.run_id}
     journey = project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
         capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
-        setup_pull_request=setup_pull_request, source_check=source_check)
+        setup_pull_request=setup_pull_request, source_check=source_check, live_watch=live_watch, owner_view=owner_view)
     if config.website_connection_id:
         journey["historicalCleanup"] = cleanup_history_for_connection(config.website_connection, latest)
         journey["revision"] = evidence_digest({"current": journey["revision"], "cleanup": journey["historicalCleanup"]})

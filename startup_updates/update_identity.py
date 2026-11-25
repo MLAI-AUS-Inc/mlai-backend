@@ -53,6 +53,12 @@ def monthly_identity(draft):
     return {"monthSequence": sequence, "updateTitle": monthly_update_title(draft.month, sequence)}
 
 
+def custom_update_title(memo):
+    """A founder-chosen title saved with a revision, or None for the default."""
+    value = (memo or {}).get("custom_title")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def memo_with_month_identity(draft, memo):
     """Overwrite input metadata with the server-owned update identity."""
     return {**(memo or {}), "_month_sequence": monthly_identity(draft)["monthSequence"]}
@@ -192,7 +198,10 @@ def identity_payload(draft, memo=None):
     value = memo.get("update_date", draft.update_date.isoformat() if draft.update_date else None)
     if provided_memo and draft.published_at and not draft.published_revision_id and "update_date" not in memo:
         value = None  # A legacy publication has month precision until a dated revision is approved.
-    return {**monthly_identity(draft), "updateId": draft.pk, "creationKey": str(draft.creation_key) if draft.creation_key else None,
+    identity = monthly_identity(draft)
+    if title := custom_update_title(memo):
+        identity["updateTitle"] = title
+    return {**identity, "customTitle": custom_update_title(memo), "updateId": draft.pk, "creationKey": str(draft.creation_key) if draft.creation_key else None,
             "updateDate": value, "datePrecision": "day" if value else "month",
             "firstPublishedAt": draft.first_published_at.isoformat() if draft.first_published_at else None,
             "narrativePeriod": memo.get("narrative_period")}

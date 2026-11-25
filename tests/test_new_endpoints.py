@@ -297,7 +297,7 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data["code"], "website_connection_required")
+        self.assertEqual(response.data["code"], "website_not_connected")  # B12: nothing is connected
         create_token.assert_not_called()
         config.refresh_from_db()
         self.assertEqual(config.github_installation_id, "145611291")
@@ -327,7 +327,7 @@ class EndpointTests(ContentFactoryTestDataMixin, TestCase):
             )
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data["code"], "website_connection_required")
+        self.assertEqual(response.data["code"], "website_not_connected")  # B12: nothing is connected
         create_token.assert_not_called()
 
     def test_content_factory_token_does_not_rebind_config_for_one_off_requested_repo(self):

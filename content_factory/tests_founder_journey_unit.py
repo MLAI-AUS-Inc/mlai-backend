@@ -165,6 +165,22 @@ class ContractFixtureTests(JourneyFixture, TestCase):
                                                                 "actionId": None, "url": None}}
         self.assertStep(self.journey(), "first_article", None, next_kind="write_first_article")
 
+    def test_06b_page_choice_under_pick_consent_is_asked_on_home(self):
+        # Plan A9 follow-up: the founder's consent says they choose the page, so
+        # Home shows the ask instead of retiring it as Working on it.
+        self.connection(verified=False)
+        operation = {"state": "needs_user", "failureClass": "needs_user", "actionId": "choose_articles_page",
+                     "url": None, "pagePolicy": "pick"}
+        self.website_facts = {**NO_WEBSITE_FACTS, "operation": operation}
+        body = self.journey()
+        self.assertStep(body, "setup", "your_turn", ask="choose_articles_page")
+        self.assertEqual((body["headline"], body["action"]["label"]), ("Choose your articles page", "Choose a page"))
+        for policy in (None, "auto", "explicit"):
+            with self.subTest(policy=policy):
+                self.website_facts = {**NO_WEBSITE_FACTS, "operation": {**operation, "pagePolicy": policy}}
+                body = self.journey()
+                self.assertNotEqual((body["action"] or {}).get("id"), "choose_articles_page")
+
     def test_07_verified_site_without_an_article_keeps_the_free_first_article(self):
         self.connection()
         body = self.journey()
@@ -237,7 +253,8 @@ class ContractFixtureTests(JourneyFixture, TestCase):
         make_run(self.org, status="failed", step="write_article",
                  request={"delivery_mode": "content_only", "client_request_id": key,
                           "roo_points_billing_status": "charged"},
-                 result={"failure_class": "permanent", "failure_fingerprint": "fp-terminal-1"})
+                 result={"failure_class": "permanent", "failure_fingerprint": "fp-terminal-1",
+                         "error_code": "EDITORIAL_REJECTED"})
         Ledger.objects.create(user=self.owner, delta=-12, kind="SPEND", source="CONTENT_FACTORY",
                               idempotency_key=f"content_factory:charge:{key}")
         Ledger.objects.create(user=self.owner, delta=12, kind="REFUND", source="CONTENT_FACTORY",
@@ -274,6 +291,24 @@ class NoDescriptionTests(JourneyFixture, TestCase):
 
 
 class ExtraCaseTests(JourneyFixture, TestCase):
+    def test_a_staff_fixing_quality_hold_is_not_the_founders_turn(self):
+        """Plan A20: an exhausted hold on an MLAI-generated artefact is ours to fix."""
+        quality = {"status": "blocking_findings", "self_heal_exhausted": True, "escalation": "quality_review",
+                   "hold_owner": "staff"}
+        run = make_run(self.org, status="approval_required", step="deliver", request={"delivery_mode": "review_draft"},
+                       result={"delivery_mode": "review_draft", "article_preview_quality": quality})
+        with self.settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=True):
+            body = self.journey()
+        self.assertStep(body, "review", "working", next_kind="view_progress")
+        self.assertEqual((body["runId"], body["holdingReason"]), (run.run_id, "slow"))
+        # Without staff alerts nobody would fix it: the founder keeps their review.
+        with self.settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertStep(self.journey(), "review", "your_turn", ask="review_draft")
+        # A finding about the founder's own content is still their review.
+        run.result = {**run.result, "article_preview_quality": {**quality, "hold_owner": "founder"}}
+        run.save(update_fields=["result"])
+        self.assertStep(self.journey(), "review", "your_turn", ask="review_draft")
+
     def test_an_invalid_org_with_a_description_never_asks_for_the_customer(self):
         self.org.domain = f"banksia-{uuid4().hex[:6]}.invalid"
         self.org.save(update_fields=["domain"])
@@ -378,7 +413,8 @@ class ExtraCaseTests(JourneyFixture, TestCase):
     def test_a_failed_free_article_whose_entitlement_is_back_offers_it_again(self):
         request = entitled(self.org, self.owner, company=self.company.pk)
         run = make_run(self.org, status="failed", step="write_article", request=request,
-                       result={"failure_class": "permanent", "failure_occurrence_id": "occ-1"})
+                       result={"failure_class": "permanent", "failure_occurrence_id": "occ-1",
+                               "error_code": "EDITORIAL_REJECTED"})
         first_article.release_entitlement(organization=self.org, run=run, reason="failed")
         body = self.journey()
         self.assertStep(body, "first_article", None, next_kind="write_first_article")
@@ -387,7 +423,8 @@ class ExtraCaseTests(JourneyFixture, TestCase):
 
     def test_a_charged_run_whose_refund_is_pending(self):
         key = f"paid-{uuid4().hex[:8]}"
-        make_run(self.org, status="failed", request={"client_request_id": key}, result={"failure_class": "transient"})
+        make_run(self.org, status="failed", request={"client_request_id": key},
+                 result={"failure_class": "transient", "error_code": "EDITORIAL_REJECTED"})
         Ledger.objects.create(user=self.owner, delta=-12, kind="SPEND", source="CONTENT_FACTORY",
                               idempotency_key=f"content_factory:charge:{key}")
         body = self.journey()
@@ -397,7 +434,8 @@ class ExtraCaseTests(JourneyFixture, TestCase):
     def test_a_free_run_that_failed_with_attempts_exhausted_has_no_free_line(self):
         for attempt in (1, 2):
             request = entitled(self.org, self.owner, attempt=attempt, company=self.company.pk)
-            run = make_run(self.org, status="failed", request=request, result={"failure_class": "permanent"},
+            run = make_run(self.org, status="failed", request=request,
+                           result={"failure_class": "permanent", "error_code": "EDITORIAL_REJECTED"},
                            created_at=timezone.now() - timedelta(minutes=10 - attempt))
             first_article.release_entitlement(organization=self.org, run=run, reason="failed")
         body = self.journey()
@@ -486,7 +524,9 @@ class ExtraCaseTests(JourneyFixture, TestCase):
         self.assertFalse(body["switchTopicAvailable"])
 
     def test_every_retired_registry_action_shows_working(self):
-        for action in sorted(journeys.RETIRED_ACTIONS):
+        # With the deploy link on (plan C14) deploy_site is a founder ask, not retired.
+        self.assertNotIn("deploy_site", journeys.retired_actions())
+        for action in sorted(journeys.retired_actions()):
             with self.subTest(action=action):
                 ContentFactoryRun.objects.filter(organization=self.org).delete()
                 make_run(self.org, status="blocked",
@@ -671,7 +711,13 @@ class HelperTests(TestCase):
         self.assertFalse(journeys.matches_if_none_match("", "abc"))
 
     def test_registry_mapping_covers_only_the_eight_asks(self):
-        self.assertEqual(len(journeys.FOUNDER_ASKS), 8)
+        # Plan E13 added the owner wait and its repository-picker fallback; onboarding v3 adds the
+        # opt-in confirm_profile ask (?onboarding=3) on top.
+        self.assertEqual(len(set(journeys.FOUNDER_ASKS) - journeys.ONBOARDING_ASKS), 13)
+        self.assertEqual(journeys.ONBOARDING_ASKS, {"confirm_profile"})
+        self.assertFalse(set(journeys.REGISTRY_ASKS.values()) & journeys.ONBOARDING_ASKS)
+        # Plan E8: send_pr_to_reviewer is the journey's own ask; no registry row maps to it.
+        self.assertNotIn("send_pr_to_reviewer", journeys.REGISTRY_ASKS.values())
         self.assertTrue(set(journeys.REGISTRY_ASKS.values()) <= set(journeys.FOUNDER_ASKS))
         self.assertIsNone(journeys.founder_ask("choose_articles_page"))
 
@@ -689,3 +735,43 @@ class HelperTests(TestCase):
         built = make_new_journey_org()
         body = journeys.project_founder_journey(built.organization, user=built.owner, company=built.company)
         self.assertEqual(body["stage"], "legacy")
+
+
+class FounderAskRegistryTests(TestCase):
+    """Plan E14: the clients' ask registry covers every ask the server sends.
+
+    The desktop, web and mobile fallback tests iterate the desktop
+    ``FOUNDER_ASKS`` and the failure registry's actions and aliases (from the
+    generated contract snapshot). Each ask the journey can emit must be in one
+    of those, so a client test over them covers the server's asks.
+    """
+
+    def _registry(self):
+        import json
+        from pathlib import Path
+        from django.conf import settings
+        path = Path(settings.BASE_DIR) / "contracts" / "failure-codes.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_every_emitted_ask_is_in_the_client_registry(self):
+        from . import founder_journey_p2 as p2
+        registry = self._registry()
+        client_asks = set(journeys.FOUNDER_ASKS) | set(registry["actions"]) | set(registry.get("action_aliases", {}))
+        emitted = set(journeys.FOUNDER_ASKS) | set(journeys.REGISTRY_ASKS.values())
+        emitted |= set(registry.get("action_aliases", {}).values())
+        for copy_id in registry["founder_copy_ids"]:
+            if not copy_id.startswith("ask_"):
+                continue
+            action = p2.line(copy_id, count=1, expected=3)["action"]
+            with self.subTest(copy_id=copy_id):
+                self.assertIsNotNone(action)
+                emitted.add(action["id"])
+        self.assertTrue(emitted, "no asks found")
+        self.assertEqual(emitted - client_asks, set())
+
+    def test_registry_actions_alias_onto_asks_the_clients_know(self):
+        registry = self._registry()
+        known = set(journeys.FOUNDER_ASKS) | set(registry["actions"])
+        for alias, target in registry.get("action_aliases", {}).items():
+            with self.subTest(alias=alias):
+                self.assertIn(target, known)

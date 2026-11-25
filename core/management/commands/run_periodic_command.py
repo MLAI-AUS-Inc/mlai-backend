@@ -16,7 +16,8 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "command_name", choices=("run_scheduled_discovery", "schedule_memory_work", "reconcile_event_discounts")
+            "command_name", choices=("run_scheduled_discovery", "schedule_memory_work", "reconcile_event_discounts",
+                                     "send_startup_invitation_batch", "run_managed_channel_tick")
         )
         parser.add_argument("--poll-seconds", type=int, default=60)
         parser.add_argument("--health-file")

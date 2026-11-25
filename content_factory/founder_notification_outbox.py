@@ -215,10 +215,8 @@ def enqueue_ready_drafts(now=None) -> dict:
 
 
 def _founder_company(user, organization):
-    from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
-    return (VibeRaisingCompany.objects.filter(organization_id=organization.pk, profile__user=user,
-                                              profile__role=VibeRaisingProfile.ROLE_FOUNDER)
-            .order_by("created_at").first())
+    from founder_tools.membership import companies_for_user
+    return companies_for_user(user).filter(organization=organization).first()
 
 
 def recipient(run, organization):

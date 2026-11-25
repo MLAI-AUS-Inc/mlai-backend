@@ -16,7 +16,9 @@ from uuid import uuid4
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db.models import Case, IntegerField, OuterRef, Q, Subquery, TextField, Value, When
+from django.db.models.fields.json import KT
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from workflow_runs.models import ContentFactoryRun
@@ -27,6 +29,84 @@ from .website_goal import mapping, stamp
 logger = logging.getLogger(__name__)
 ACTIONS = frozenset({'retry', 'resume', 're_pin', 'rescan', 'advance_rung', 'switch_channel'})
 WORKFLOWS = ('article_generation', 'article_revision', 'confirmed_topic', 'direct_generate', 'article_system_setup', 'repo_scan', 'auto_discovery', 'island_refresh')
+# Changing website strategy or delivery channel only means something for work
+# that writes to a website: articles, setup and scans (A2). Research and
+# discovery runs never spend the org's strategy budget or switch channel.
+STRATEGY_ACTIONS = frozenset({'advance_rung', 'switch_channel'})
+STRATEGY_WORKFLOWS = frozenset({'article_generation', 'article_revision', 'confirmed_topic', 'content_factory_article',
+                                'direct_generate', 'article_system_setup', 'repo_scan'})
+
+
+# A founder ask is re-checked once a day while the founder has not acted, so a
+# needs_user run never hogs the bounded sweep batch (B1).
+AWAIT_OWNER_RECHECK = timedelta(hours=24)
+
+
+def class_before_wall_enabled() -> bool:
+    """``ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED`` (B1, default on)."""
+    return bool(getattr(settings, 'ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED', True))
+
+
+def preserve_code_enabled() -> bool:
+    """``ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED`` (B2, default on)."""
+    return bool(getattr(settings, 'ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED', True))
+
+
+def run_failed_at(run):
+    """When the run itself failed: its latest failed or blocked step's end, else its last update (B1).
+
+    Self-heal's own writes never move ``updated_at``, so the wall is counted from
+    the failure and not from the first sweep that noticed it.
+    """
+    ended = getattr(run, '_failed_step_at', _UNREAD)
+    if ended is _UNREAD:
+        ended = run_failed_step_at(run)
+    return ended or getattr(run, 'updated_at', None)
+
+
+def run_failed_step_at(run):
+    """The end of the run's latest failed or blocked step, or None (one query)."""
+    if getattr(run, 'pk', None) is None:
+        return None
+    return _failed_step_at().filter(run=run).values_list('completed_at', flat=True).first()
+
+
+_UNREAD = object()
+
+
+def _failed_step_at():
+    """A run's failed or blocked steps that ended, latest first (the candidate query reads it in SQL)."""
+    from workflow_runs.models import ContentFactoryRunStep, ContentFactoryStepStatus
+    return (ContentFactoryRunStep.objects.filter(status__in=[ContentFactoryStepStatus.FAILED, ContentFactoryStepStatus.BLOCKED],
+                                                 completed_at__isnull=False).order_by('-completed_at'))
+
+
+def _failed_at(subject):
+    if isinstance(subject, ContentFactoryRun):
+        return run_failed_at(subject)
+    operation = mapping(subject).get('_operation')
+    return getattr(operation, 'updated_at', None)
+
+
+def settled_without_delivery(run) -> bool:
+    """D16: the run's points were refunded or its free article released, so it never continues.
+
+    The founder's ask on such a run offers "start again"; neither self-heal nor a
+    founder resume may run it on unpaid points.
+    """
+    from .no_delivery_refunds import points_receipt
+    return points_receipt(run).get('state') in {'refunded', 'released'}
+
+
+def strategy_allowed(subject) -> bool:
+    """Whether ``advance_rung`` and ``switch_channel`` may apply to this run or website operation.
+
+    A website prepare operation (the setup and scan path) always may; a run only
+    when its workflow is in ``STRATEGY_WORKFLOWS``.
+    """
+    if isinstance(subject, ContentFactoryRun) or hasattr(subject, 'workflow'):
+        return getattr(subject, 'workflow', None) in STRATEGY_WORKFLOWS
+    return mapping(subject).get('_operation') is not None
 
 
 @dataclass(frozen=True)
@@ -141,12 +221,32 @@ def _decide(subject, *, now=None, prospective=False):
     code = _code(result)
     entry = registry_policy.report_entry(code) if prospective else registry_policy.effective_entry(code, organization)
     limits = registry_policy.limits()
-    first = min(stamp(receipt.get('first_failed_at')) or stamp(result.get('first_failed_at')) or now, now)
+    first = min(stamp(receipt.get('first_failed_at')) or stamp(result.get('first_failed_at'))
+                or _failed_at(subject) or now, now)
     started = min(stamp(receipt.get('last_action_at')) or first, now)
+    strategy_ok = strategy_allowed(subject)
+    class_first = class_before_wall_enabled()
+
+    def finish(action, at, reason, cap):
+        if action in STRATEGY_ACTIONS and not strategy_ok:
+            # A research or discovery run has no website strategy or channel to change.
+            action, at = 'stop', None
+            reason = 'cap' if cap else 'terminal'
+        if mode == 'observe' and not prospective:
+            return Decision(action, at, 'legacy_observe', attempt, cap, mode)
+        if not _executor(action, organization):
+            return Decision('observe', None, 'executor_off', attempt, cap, mode)
+        return Decision(action, at, reason, attempt, cap, mode)
+
     if _delivered(subject, result):
         return Decision('none', None, 'delivered', attempt, None, mode)
     if getattr(subject, 'status', None) in {'cancelled', 'denied'}:
         return Decision('none', None, 'terminal', attempt, None, mode)
+    if class_first and isinstance(subject, ContentFactoryRun) and settled_without_delivery(subject):
+        # D16: refunded or released points end the run; its ask offers "start again".
+        return Decision('none', None, 'terminal', attempt, None, mode)
+    if mapping(receipt.get('pending_action')).get('state') == 'reconciliation_required':
+        return Decision('none', None, 'reconciliation_required', attempt, None, mode)
     if receipt.get('last_action') == 'stop':
         return Decision('none', None, 'terminal', attempt, None, mode)
     if isinstance(subject, ContentFactoryRun) and (request.get('first_article_goal_operation_id') or request.get('strategy_goal_id')):
@@ -157,20 +257,32 @@ def _decide(subject, *, now=None, prospective=False):
         return Decision('none', None, 'waiting', attempt, None, mode)
     if receipt.get('code') == 'pull_request_daily_cap' and (stamp(receipt.get('next_at')) or now) > now:
         return Decision('wait', stamp(receipt['next_at']), 'waiting', attempt, 'pull_request_day', mode)
+    in_flight = mapping(receipt.get('pending_action')).get('state') in {'reserved', 'uncertain'}
+    if class_first and not in_flight:
+        # Class before wall (B1): the wall only bounds work the engine retries or
+        # repairs. A founder ask waits for the founder; a code no automatic path
+        # can fix (unsupported) or that the registry does not know stops now.
+        # An action still in flight is the engine's own work: it settles first.
+        classification = entry.get('failure_class') if entry else None
+        if classification == 'needs_user':
+            return finish('await_owner', None, 'owner', None)
+        if entry is None or classification == 'unsupported':
+            return finish('stop', None, 'terminal', None)
     # An uncertain effect retains financial proof, but never extends the
     # recovery executor beyond the item wall indefinitely.
     if now - first >= timedelta(hours=limits['wall_hours']):
-        action = 'switch_channel' if _draft(result) else 'stop'
+        action = 'switch_channel' if _draft(result) and strategy_ok else 'stop'
         if mode == 'policy' and not _executor(action, organization):
             return Decision('observe', None, 'executor_off', attempt, 'wall', mode)
         return Decision(action, None, 'wall' if mode == 'policy' or prospective else 'legacy_observe', attempt, 'wall', mode)
     if entry and entry.get('retry_policy') == 'retry_same_step' and now - first >= timedelta(hours=limits['max_elapsed_hours']):
-        action = 'switch_channel' if _draft(result) else 'stop'
+        action = 'switch_channel' if _draft(result) and strategy_ok else 'stop'
         if mode == 'policy' and not _executor(action, organization):
             return Decision('observe', None, 'executor_off', attempt, 'transient_elapsed', mode)
         return Decision(action, None, 'cap' if mode == 'policy' or prospective else 'legacy_observe', attempt, 'transient_elapsed', mode)
     pending = mapping(receipt.get('pending_action'))
-    if pending.get('state') in {'reserved', 'uncertain'} and pending.get('action') in ACTIONS:
+    if (pending.get('state') in {'reserved', 'uncertain'} and pending.get('action') in ACTIONS
+            and (strategy_ok or pending.get('action') not in STRATEGY_ACTIONS)):
         action = pending['action']
         if mode == 'policy' and not _executor(action, organization):
             return Decision('observe', None, 'executor_off', _count(pending.get('attempt')), None, mode)
@@ -180,9 +292,9 @@ def _decide(subject, *, now=None, prospective=False):
         policy = entry['retry_policy']
         classification = entry['failure_class']
         if policy == 'retry_same_step' and now - first >= timedelta(hours=limits['max_elapsed_hours']):
-            action, reason, cap = ('switch_channel' if _draft(result) else 'stop'), 'cap', 'transient_elapsed'
+            action, reason, cap = ('switch_channel' if _draft(result) and strategy_ok else 'stop'), 'cap', 'transient_elapsed'
         elif policy == 'repair_owned_candidate' and attempts >= limits['repairable_max_attempts']:
-            action, reason, cap = ('switch_channel' if _draft(result) else 'stop'), 'cap', 'repairable_max_attempts'
+            action, reason, cap = ('switch_channel' if _draft(result) and strategy_ok else 'stop'), 'cap', 'repairable_max_attempts'
         elif policy == 're_pin' and _count(mapping(result.get('re_pin_v1')).get('count')) >= limits['source_repins_per_run']:
             action, reason, cap = 'switch_channel', 'cap', 'repairable_max_attempts'
         elif policy in {'retry_same_step', 'repair_owned_candidate', 're_pin'}:
@@ -211,11 +323,7 @@ def _decide(subject, *, now=None, prospective=False):
             action, reason = 'await_owner', 'owner'
         elif classification == 'waiting':
             action, reason = 'observe', 'waiting'
-    if mode == 'observe' and not prospective:
-        return Decision(action, at, 'legacy_observe', attempt, cap, mode)
-    if not _executor(action, organization):
-        return Decision('observe', None, 'executor_off', attempt, cap, mode)
-    return Decision(action, at, reason, attempt, cap, mode)
+    return finish(action, at, reason, cap)
 
 
 def _event_owner(subject):
@@ -304,6 +412,17 @@ def claim_pull_request_slot(organization, *, key, now=None):
     return allowed
 
 
+def pull_request_cap_reached(organization, *, now=None) -> bool:
+    """Read-only twin of ``claim_pull_request_slot``: no automatic PR slot is left today."""
+    if organization is None or policy_mode(organization) != 'policy':
+        return False
+    day = _daily(_config(organization), now or timezone.now())
+    slots = list(day.get('pull_request_slots') or [])
+    completed = set(day.get('pull_request_slot_completions') or [])
+    return (_count(day.get('pull_requests')) + sum(slot not in completed for slot in slots)
+            >= registry_policy.limits()['pull_requests_per_org_per_day'])
+
+
 def record_pull_request(organization, *, pr_url, run=None, now=None):
     """Count actual PRs, including founder clicks, once per URL and UTC day."""
     if not isinstance(pr_url, str) or not pr_url or len(pr_url) > 1024:
@@ -363,11 +482,21 @@ def _execute_run(run, decision, *, now):
         return switch_to_copy_ready(run=run, reason=_code(mapping(run.result)) or decision.cap or decision.reason, now=now)
     if decision.action == 'stop':
         if decision.cap:
+            # The engine's own stop code; recorded beside the original (B2), never over it.
             code = 'SELF_HEAL_DEADLINE_REACHED' if decision.cap == 'wall' else 'SELF_HEAL_ATTEMPTS_EXHAUSTED'
             with transaction.atomic():
                 current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-                ContentFactoryRun.objects.filter(pk=run.pk).update(result={**mapping(current.result), 'error_code': code})
-            _alert(run.organization, 'self_heal_capped', run=run, details={'cap': decision.cap})
+                saved = mapping(current.result)
+                original = _code(saved)
+                if preserve_code_enabled():
+                    # B2: the original cause is never overwritten; the stop sits beside it.
+                    heal = {**mapping(saved.get('self_heal_v1')),
+                            'stop': {'code': code, 'cap': decision.cap, 'at': now.isoformat()}}
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(result={**saved, 'self_heal_v1': heal})
+                else:
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(result={**saved, 'error_code': code})
+            _alert(run.organization, 'self_heal_capped', run=run,
+                   details=_stop_details(run.organization, original, decision.cap, code))
         else:
             _alert(run.organization, 'codeless_terminal' if _code(mapping(run.result)) == 'TERMINAL_CODE_MISSING' else 'our_team_item', run=run)
         from .no_delivery_refunds import refund_decision, apply_refund_decision
@@ -431,6 +560,13 @@ def _execute_run(run, decision, *, now):
     return {}
 
 
+def _stop_details(organization, original, cap, code):
+    """Alert details for an engine stop: the original code, its class, the cap and the stop code (B2)."""
+    entry = registry_policy.effective_entry(original, organization) if original else None
+    return {'cap': cap, 'stop_code': code, 'original_code': original or 'none',
+            'failure_class': mapping(entry).get('failure_class') or 'unregistered'}
+
+
 def apply(subject, decision, *, now=None):
     """Record a decision and perform its due action once per reserved attempt."""
     now = now or timezone.now()
@@ -466,6 +602,10 @@ def apply(subject, decision, *, now=None):
             return {'status': 'refused', 'detail': 'The startup changed.'}
         request = mapping(current.run_request)
         current.organization._state.fields_cache['content_config'] = config
+        # The candidate query already read the run's failure time; reuse it so
+        # decide() and the receipt below do not query the steps again (B1).
+        known = getattr(subject, '_failed_step_at', _UNREAD)
+        current._failed_step_at = known if known is not _UNREAD else run_failed_step_at(current)
         old = mapping(mapping(current.result).get('self_heal_v1'))
         pending = mapping(old.get('pending_action'))
         retransmit = (pending.get('state') in {'reserved', 'uncertain'} and pending.get('attempt') == decision.attempt
@@ -476,9 +616,10 @@ def apply(subject, decision, *, now=None):
         fresh = decide(current, now=now)
         if (fresh.action, fresh.attempt, fresh.cap) != (decision.action, decision.attempt, decision.cap):
             return old
+        failed_at = min(run_failed_at(current) or now, now)
         receipt = {**old, 'version': 1, 'mode': 'policy', 'code': _code(mapping(current.result)),
             'policy': mapping(registry_policy.effective_entry(_code(mapping(current.result)), organization)).get('retry_policy'),
-            'attempts': _count(old.get('attempts')), 'first_failed_at': old.get('first_failed_at') or now.isoformat(),
+            'attempts': _count(old.get('attempts')), 'first_failed_at': old.get('first_failed_at') or failed_at.isoformat(),
             'next_at': decision.at.isoformat() if decision.at else None, 'capped': bool(decision.cap),
             'rung': _rung(mapping(current.result), request),
             'source_sha': old.get('source_sha') or request.get('expected_source_sha'), 'history': list(old.get('history') or [])[-10:]}
@@ -488,7 +629,11 @@ def apply(subject, decision, *, now=None):
         if decision.action in {'observe', 'await_owner', 'none', 'wait'}:
             receipt.update(last_action=decision.action, next_at=(now + timedelta(hours=1)).isoformat()
                            if decision.action == 'observe' and decision.reason == 'waiting' else None)
-            if decision.action == 'await_owner':
+            if decision.action == 'await_owner' and class_before_wall_enabled():
+                # No wall on a founder ask (B1): look again tomorrow; the refund
+                # sweep keeps its own 48-hour clock from the run's creation.
+                receipt['next_at'] = (now + AWAIT_OWNER_RECHECK).isoformat()
+            elif decision.action == 'await_owner':
                 receipt['next_at'] = ((stamp(receipt['first_failed_at']) or now)
                                       + timedelta(hours=registry_policy.limits()['wall_hours'])).isoformat()
             _write_locked_run(current, receipt)
@@ -528,6 +673,7 @@ def apply(subject, decision, *, now=None):
                 receipt.pop('pending_action', None)
                 _write_locked_run(locked, receipt)
             return receipt
+    outcome = {}
     try:
         outcome = _execute_run(current, decision, now=now)
         uncertain = isinstance(outcome, dict) and (outcome.get('content_factory_transport_error')
@@ -543,6 +689,13 @@ def apply(subject, decision, *, now=None):
             pending = mapping(receipt.get('pending_action'))
             if pending.get('attempt') == decision.attempt and pending.get('claim') == lease_claim:
                 receipt['pending_action'] = {**pending, 'state': 'uncertain' if uncertain else 'accepted'}
+                if (uncertain and mapping(outcome).get('reconciliation_required') is True
+                        and outcome.get('reason') == 'policy_resume_dispatch_uncertain'):
+                    due = now + timedelta(hours=24)
+                    receipt['pending_action'].update(state='reconciliation_required', owner='staff',
+                                                     reconcile_by=due.isoformat())
+                    receipt.update(last_action='none', next_at=None)
+                    transaction.on_commit(lambda: _alert(organization, 'resume_reconciliation_required', run=locked))
                 _write_locked_run(locked, receipt)
     return receipt
 
@@ -569,8 +722,9 @@ def _apply_unowned_operation(subject, decision, *, now):
     old = mapping(operation.receipt.get('self_heal_v1'))
     if _count(old.get('attempts')) >= decision.attempt:
         return old
+    failed_at = min(_failed_at(subject) or now, now)
     receipt = {**old, 'version': 1, 'mode': 'policy', 'code': _code(subject),
-               'attempts': _count(old.get('attempts')), 'first_failed_at': old.get('first_failed_at') or now.isoformat(),
+               'attempts': _count(old.get('attempts')), 'first_failed_at': old.get('first_failed_at') or failed_at.isoformat(),
                'next_at': decision.at.isoformat() if decision.at else None, 'capped': bool(decision.cap)}
     operation.receipt['self_heal_v1'] = receipt
     if decision.at and decision.at > now:
@@ -617,11 +771,20 @@ def _apply_unowned_operation(subject, decision, *, now):
         receipt.update(attempts=decision.attempt, last_action=decision.action, last_action_at=now.isoformat())
     elif decision.action == 'await_owner':
         operation.state, operation.next_attempt_at = 'needs_user', None
+        if class_before_wall_enabled():
+            # The sweep leaves a parked founder ask alone until its state changes (B1).
+            receipt['last_action'] = 'await_owner'
     elif decision.action == 'stop':
         operation.state, operation.next_attempt_at = 'needs_attention', None
         operation.receipt.update(status='stopped', user_action=None)
         receipt.update(attempts=decision.attempt, last_action='stop', last_action_at=now.isoformat())
-        _alert(operation.connection.organization, 'self_heal_capped' if decision.cap else 'our_team_item', slot=f'operation-{operation.pk}')
+        details = None
+        if decision.cap:
+            code = 'SELF_HEAL_DEADLINE_REACHED' if decision.cap == 'wall' else 'SELF_HEAL_ATTEMPTS_EXHAUSTED'
+            receipt['stop'] = {'code': code, 'cap': decision.cap, 'at': now.isoformat()}
+            details = _stop_details(operation.connection.organization, _code(subject), decision.cap, code)
+        _alert(operation.connection.organization, 'self_heal_capped' if decision.cap else 'our_team_item',
+               slot=f'operation-{operation.pk}', details=details)
     operation.receipt['self_heal_v1'] = receipt
     return receipt
 
@@ -686,14 +849,28 @@ def _candidates(now, limit, organization_id=None):
             new &= ~Q(organization__domain__in=list(disabled))
         preferred |= new
     from .run_reconciliation import legacy_event_rows
-    query = ContentFactoryRun.objects.filter(legacy_event_rows(), workflow__in=WORKFLOWS, organization__isnull=False,
+    from .founder_journey_alerts import FounderJourneyAlertConfigError, alerts_since, founder_run_q
+    try:
+        # The alerts' history horizon: older failures are history, never swept (B1).
+        since = alerts_since()
+    except FounderJourneyAlertConfigError:
+        logger.warning('self_heal_candidates_skipped reason=alerts_since_invalid')
+        return []
+    # Scheduler runs are background work: never self-healed, alerted or charged (A2).
+    query = ContentFactoryRun.objects.filter(legacy_event_rows(), founder_run_q(), workflow__in=WORKFLOWS, organization__isnull=False,
+        created_at__gte=since,
         status__in=['failed', 'blocked', 'precondition_failed', 'preview_failed']).select_related('organization__content_config')
     if organization_id is not None:
         query = query.filter(organization_id=organization_id)
+    # A marked test organisation (F1) is MLAI's own test traffic: never self-healed,
+    # charged a strategy budget or alerted, so a red fixture stays red.
+    from .founder_test_orgs import exclude_test_orgs
+    query = exclude_test_orgs(query)
     return list(query
         .filter(Q(result__self_heal_v1__next_at__isnull=True) | Q(result__self_heal_v1__next_at__lte=now.isoformat()))
         .filter(Q(result__self_heal_v1__last_action__isnull=True) | ~Q(result__self_heal_v1__last_action__in=['stop', 'none']))
-        .annotate(_policy_priority=Case(When(preferred, then=Value(0)), default=Value(1), output_field=IntegerField()))
+        .annotate(_policy_priority=Case(When(preferred, then=Value(0)), default=Value(1), output_field=IntegerField()),
+                  _failed_step_at=Subquery(_failed_step_at().filter(run=OuterRef('pk')).values('completed_at')[:1]))
         .order_by('_policy_priority', 'updated_at', 'pk')[:limit])
 
 
@@ -712,9 +889,16 @@ def run_policy_sweep(now=None, limit=None):
             summary['errors'] += 1
             logger.warning('self_heal_candidate_failed run_id=%s', run.run_id, exc_info=True)
     from .website_models import WebsiteConnectionOperation
-    operations = list(WebsiteConnectionOperation.objects.filter(action='prepare', state__in=['pending', 'needs_attention', 'needs_user'],
+    operations = WebsiteConnectionOperation.objects.filter(action='prepare', state__in=['pending', 'needs_attention', 'needs_user'],
         receipt__failure_occurrence_id__isnull=False).filter(Q(receipt__self_heal_v1__next_at__isnull=True)
-            | Q(receipt__self_heal_v1__next_at__lte=now.isoformat())).select_related('connection__organization__content_config').order_by('updated_at')[:limit])
+            | Q(receipt__self_heal_v1__next_at__lte=now.isoformat()))
+    if class_before_wall_enabled():
+        # A founder ask the engine already parked waits for the founder (B1).
+        # Coalesce keeps rows without a receipt (NULL never drops them on Postgres).
+        operations = operations.annotate(_heal_action=Coalesce(KT('receipt__self_heal_v1__last_action'), Value(''),
+                                                               output_field=TextField())).exclude(
+            state='needs_user', _heal_action='await_owner')
+    operations = list(operations.select_related('connection__organization__content_config').order_by('updated_at')[:limit])
     summary['goals_checked'] = len(operations)
     for operation in operations:
         try:

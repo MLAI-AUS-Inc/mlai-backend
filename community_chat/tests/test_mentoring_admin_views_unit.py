@@ -13,6 +13,8 @@ ADMIN_VIEWS = (
     (views.MentoringAdminMembersView, 'get', {}),
     (views.MentoringAdminInvitesView, 'get', {}),
     (views.MentoringAdminInvitesView, 'post', {}),
+    (views.MentoringAdminInvitePreviewView, 'post', {}),
+    (views.MentoringAdminInviteResendView, 'post', {'invite_id': 1}),
     (views.MentoringAdminInviteRevokeView, 'post', {'invite_id': 1}),
     (views.MentoringAdminApplicationsView, 'get', {}),
     (views.MentoringAdminApplicationView, 'get', {'profile_id': 1}),
@@ -81,12 +83,16 @@ class AdminViewTests(unittest.TestCase):
 
     @override_settings(MENTOR_BOOKING_ENABLED=True)
     def test_access_endpoint_answers_every_member(self):
-        response = self.call(views.MentoringAdminAccessView, user=make_user())
-        self.assertEqual((response.status_code, response.data), (200, {'is_admin': False}))
-        response = self.call(views.MentoringAdminAccessView, user=make_user(is_staff=True))
-        self.assertEqual(response.data, {'is_admin': True})
-        self.role.return_value = 'admin'
-        self.assertEqual(self.call(views.MentoringAdminAccessView, user=make_user()).data, {'is_admin': True})
+        off = {'invite_email': False}
+        with patch.object(views.invite_email, 'available', return_value=True):
+            response = self.call(views.MentoringAdminAccessView, user=make_user())
+            self.assertEqual((response.status_code, response.data), (200, {'is_admin': False, 'features': off}))
+            response = self.call(views.MentoringAdminAccessView, user=make_user(is_staff=True))
+            self.assertEqual(response.data, {'is_admin': True, 'features': {'invite_email': True}})
+        with patch.object(views.invite_email, 'available', return_value=False):
+            self.role.return_value = 'admin'
+            self.assertEqual(self.call(views.MentoringAdminAccessView, user=make_user()).data,
+                             {'is_admin': True, 'features': off})
 
     @override_settings(MENTOR_BOOKING_ENABLED=True)
     def test_staff_calls_pass_the_session_user_and_ids_from_the_url(self):
@@ -94,7 +100,22 @@ class AdminViewTests(unittest.TestCase):
         self.service.create_invite.return_value = {'id': 1, 'link': 'L'}
         response = self.call(views.MentoringAdminInvitesView, 'post', user=staff, data={'user_id': 5, 'created_by': 99})
         self.assertEqual(response.status_code, 201)
-        self.service.create_invite.assert_called_once_with(staff, 5)
+        self.service.create_invite.assert_called_once_with(staff, user_id=5, email=None, send_email=False, note=None)
+        self.service.create_invite.reset_mock()
+        self.call(views.MentoringAdminInvitesView, 'post', user=staff,
+                  data={'email': 'new@example.com', 'send_email': True, 'note': 'Hi'})
+        self.service.create_invite.assert_called_once_with(
+            staff, user_id=None, email='new@example.com', send_email=True, note='Hi')
+        self.service.create_invite.reset_mock()
+        # Only a real JSON true sends an email.
+        self.call(views.MentoringAdminInvitesView, 'post', user=staff, data={'user_id': 5, 'send_email': 'yes'})
+        self.assertFalse(self.service.create_invite.call_args.kwargs['send_email'])
+        self.service.preview_invite.return_value = {'subject': 'S'}
+        self.call(views.MentoringAdminInvitePreviewView, 'post', user=staff, data={'user_id': 5, 'note': 'n'})
+        self.service.preview_invite.assert_called_once_with(staff, user_id=5, email=None, note='n')
+        self.service.resend_invite.return_value = {}
+        self.call(views.MentoringAdminInviteResendView, 'post', user=staff, invite_id=7, data={'note': 'again'})
+        self.service.resend_invite.assert_called_once_with(staff, 7, note='again')
         self.service.revoke_invite.return_value = {}
         self.call(views.MentoringAdminInviteRevokeView, 'post', user=staff, invite_id=7)
         self.service.revoke_invite.assert_called_once_with(staff, 7)

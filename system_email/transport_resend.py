@@ -58,6 +58,7 @@ def build_payload(
     entity_ref: str,
     unsubscribe: bool = False,
     unsubscribe_url: str = "",
+    reply_to: str = "",
 ) -> dict[str, Any]:
     """The whole Resend request body for one message.
 
@@ -85,7 +86,8 @@ def build_payload(
     }
     if rendered.html:
         payload["html"] = rendered.html
-    reply_to = str(getattr(settings, "SYSTEM_EMAIL_REPLY_TO", "") or "").strip()
+    # A caller's reply-to (a real person, for a personal invite) wins over the shared inbox.
+    reply_to = str(reply_to or getattr(settings, "SYSTEM_EMAIL_REPLY_TO", "") or "").strip()
     if reply_to:
         payload["reply_to"] = reply_to
     return payload

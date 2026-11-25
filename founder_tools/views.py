@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 
 from integrations.models import ExternalServiceConnection
 
+from . import membership
 from .models import VibeRaisingCompany, VibeRaisingProfile
 from .serializers import (
     FounderActiveCompanySerializer,
@@ -129,11 +130,16 @@ class FounderToolsProfileView(APIView):
         return Response(FounderProfileSerializer(profile).data, status=status.HTTP_200_OK)
 
 
+CONFIRM_OWNER_ONLY = {"detail": "Only the startup owner can confirm these details.", "reason": "owner_only"}
+CONFIRM_DESCRIPTION_REQUIRED = {"detail": "Add a sentence about what you do.", "reason": "description_required",
+                                "field": "shortDescription"}
+
+
 class FounderToolsCompanyView(APIView):
     def get(self, request):
         from .profile_fields import visible_companies
-        profile = get_or_create_founder_profile(request.user)
-        companies = visible_companies(profile.companies.select_related("organization").all())
+
+        companies = visible_companies(membership.companies_for_user(request.user))
         return Response(FounderCompanySerializer(companies, many=True).data, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -156,7 +162,10 @@ class FounderToolsCompanyView(APIView):
         from content_factory.startup_first_profile import record_create, seed_no_website_keywords
         from . import one_field_start
 
-        body, error, derived_name = one_field_start.prepare_body(request.data)
+        error, preflight = one_field_start.check_website(request.data)
+        if error is not None:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+        body, error, derived_name = one_field_start.prepare_body(request.data, preflight=preflight)
         if error is not None:
             return Response(error, status=status.HTTP_400_BAD_REQUEST)
         key_sha = one_field_start.create_key_sha256(request)
@@ -179,6 +188,13 @@ class FounderToolsCompanyView(APIView):
                     existing = one_field_start.find_created_company(profile, request.user.pk, key_sha)
                     if existing is not None:
                         return self._one_field_response(existing, status_code=status.HTTP_200_OK)
+                # Plan E5: the caller's own profile only. Another account's
+                # startup is never named here (the exact-domain claim below
+                # stays the only cross-account answer).
+                from .website_preflight import already_added_body, own_duplicate
+                duplicate, match = own_duplicate(profile, name=body.get("name"), domain=body.get("domain"))
+                if duplicate is not None and not (match == "name" and one_field_start.add_anyway(request.data)):
+                    return Response(already_added_body(duplicate, match), status=status.HTTP_409_CONFLICT)
                 response = self._save_company(request, data=body)
                 if response.status_code != status.HTTP_200_OK:
                     return response
@@ -188,6 +204,10 @@ class FounderToolsCompanyView(APIView):
                     record_create(company.organization, derived_name=derived_name)
                     seed_no_website_keywords(company.organization, name=company.name,
                                              description=body.get("shortDescription"))
+                    from content_factory import startup_onboarding
+                    if startup_onboarding.enabled() and not body.get("domain") and body.get("shortDescription"):
+                        # Nothing to read: what the founder typed is already confirmed.
+                        startup_onboarding.confirm(company.organization)
                 if key_sha and (read_marker(company.organization) or {}).get("createKeySha256") != key_sha:
                     # No marker holds this key (the create bound to an older,
                     # legacy organisation), so remember it for the replay. A
@@ -212,29 +232,36 @@ class FounderToolsCompanyView(APIView):
 
     def _save_company(self, request, data=None):
         profile = get_or_create_founder_profile(request.user)
-        profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
-        if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
-            profile.role = VibeRaisingProfile.ROLE_FOUNDER
-            profile.organization_name = None
-            profile.save(update_fields=["role", "organization_name", "updated_at"])
-
         serializer = FounderCompanyUpsertSerializer(data=request.data if data is None else data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
         create_new = bool(data.pop("createNew", False))
         confirm_domain_change = bool(data.pop("confirmDomainChange", False))
+        from content_factory import startup_onboarding
+        confirm_profile = bool(data.pop("confirmProfile", False)) and startup_onboarding.enabled()
         plain_fields = {
             key: data[key]
             for key in ("name", "domain", "location")
             if key in data
         }
 
+        if not company_id:
+            profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
+            if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
+                profile.role = VibeRaisingProfile.ROLE_FOUNDER
+                profile.organization_name = None
+                profile.save(update_fields=["role", "organization_name", "updated_at"])
+
         # A new company, or the first save of an unsaved research workspace.
         first_save = False
         try:
             if company_id:
-                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+                from .profile_fields import is_research_workspace
+
+                company = get_object_or_404(membership.companies_for_user(request.user), pk=company_id)
+                company = membership.lock_company_edit(request.user, company)
+                first_save = is_research_workspace(company)
             elif create_new:
                 from .profile_fields import is_research_workspace
                 from .services import find_company_with_domain
@@ -243,7 +270,7 @@ class FounderToolsCompanyView(APIView):
                 company = provisional if reuse else VibeRaisingCompany(profile=profile)
                 first_save = True
             else:
-                company = profile.companies.filter(name__iexact=data["name"]).first()
+                company = membership.companies_for_user(request.user).filter(profile=profile, name__iexact=data["name"]).first()
                 first_save = company is None
                 company = company or VibeRaisingCompany(profile=profile)
 
@@ -251,6 +278,11 @@ class FounderToolsCompanyView(APIView):
             # whose organisation belongs to another founder.
             if company.organization_id and not user_may_use_organization(request.user, company.organization):
                 raise CompanyDomainClaimedError(company.organization)
+            if confirm_profile and company.organization_id and not first_save:
+                from .services import organization_owner_user_id
+                if organization_owner_user_id(company.organization) != request.user.pk:
+                    transaction.set_rollback(True)
+                    return Response(CONFIRM_OWNER_ONLY, status=status.HTTP_403_FORBIDDEN)
 
             if "domain" in plain_fields:
                 assert_company_domain_available(
@@ -261,6 +293,7 @@ class FounderToolsCompanyView(APIView):
                 # company endpoint).
                 if (
                     plain_fields["domain"]
+                    and plain_fields["domain"] != company.domain
                     and not domain_is_available_to(request.user, plain_fields["domain"])
                 ):
                     raise CompanyDomainClaimedError(claimed_organization(plain_fields["domain"]))
@@ -315,27 +348,51 @@ class FounderToolsCompanyView(APIView):
         apply_shared_startup_details(user=request.user, company=company, data=data)
         if first_save:
             seed_new_company_founder_and_author(user=request.user, company=company)
-        if profile.active_company_id is None:
+            membership.activate_new_company(company, request.user)
+        if first_save and profile.active_company_id is None:
             set_active_company(profile, company)
+        if confirm_profile:
+            from content_factory.founder_journey import _one_liner
+            if len(_one_liner(company.organization)) < 3:
+                transaction.set_rollback(True)
+                return Response(CONFIRM_DESCRIPTION_REQUIRED, status=status.HTTP_400_BAD_REQUEST)
+            startup_onboarding.confirm(company.organization)
         company.refresh_from_db()
 
         return Response(FounderCompanySerializer(company).data, status=status.HTTP_200_OK)
 
 
-class FounderToolsCompanyDetailView(APIView):
-    def delete(self, request, company_id):
-        """Offboard a company: revoke its integrations, purge its data, remove it.
+def _company_ids(request):
+    return {str(source.get(key)) for source in (request.query_params, request.data)
+            for key in ("companyId", "company_id") if source.get(key)}
 
-        Ownership is enforced via ``profile.companies`` (a company belonging to
-        another founder 404s). Returns the offboarding summary plus the refreshed
-        profile so the client can re-render the company list and active company.
-        """
+
+class FounderToolsCompanyDetailView(APIView):
+    @transaction.atomic
+    def delete(self, request, company_id):
+        """Offboard a legacy company or explicitly close a shared startup."""
         profile = get_or_create_founder_profile(request.user)
-        company = get_object_or_404(
-            profile.companies.select_related("organization"),
-            pk=company_id,
-        )
-        summary = offboard_company(company)
+        company = get_object_or_404(membership.companies_for_user(request.user), pk=company_id)
+        company = membership.lock_company_edit(request.user, company)
+        if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+            from .startup_team import TeamError
+
+            identifiers = _company_ids(request)
+            if identifiers and identifiers != {str(company.pk)}:
+                return Response({"detail": "Startup selections do not match."}, status=400)
+
+            if request.data.get("confirmCloseForEveryone") is not True:
+                return Response({
+                    "detail": "Confirm that you want to close this startup for everyone.",
+                    "reason": "confirm_close_for_everyone",
+                }, status=409)
+            try:
+                membership.close(company, request.user)
+            except TeamError as exc:
+                return Response({"detail": exc.detail, "reason": exc.reason}, status=exc.status)
+            summary = {"companyId": str(company.pk), "closed": True}
+        else:
+            summary = offboard_company(company)
         profile.refresh_from_db()
         return Response(
             {"offboarding": summary, "profile": FounderProfileSerializer(profile).data},
@@ -350,9 +407,8 @@ class FounderToolsActiveCompanyView(APIView):
         serializer = FounderActiveCompanySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         company = get_object_or_404(
-            VibeRaisingCompany,
+            membership.companies_for_user(request.user),
             pk=serializer.validated_data["companyId"],
-            profile=profile,
         )
         set_active_company(profile, company)
         return Response(FounderProfileSerializer(profile).data, status=status.HTTP_200_OK)
@@ -372,7 +428,7 @@ class FounderToolsCompanyMonthlyUpdatesView(APIView):
     def post(self, request, company_id):
         profile = get_or_create_founder_profile(request.user)
         company = get_object_or_404(
-            profile.companies.select_related("organization"),
+            membership.companies_for_user(request.user),
             pk=company_id,
         )
         if not company.organization_id:
@@ -386,6 +442,11 @@ class FounderToolsCompanyMonthlyUpdatesView(APIView):
 
         from startup_updates.models import UserStartupBinding
 
+        if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+            company = membership.lock_company_edit(request.user, company)
+            UserStartupBinding.objects.filter(
+                organization=company.organization, monthly_updates_enabled=True,
+            ).exclude(user=request.user).update(monthly_updates_enabled=False)
         binding, _created = UserStartupBinding.objects.get_or_create(
             user=request.user,
             organization=company.organization,

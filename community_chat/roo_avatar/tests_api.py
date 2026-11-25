@@ -1,0 +1,476 @@
+"""Account/rank/storage regressions; run only after exact migration approval."""
+
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from threading import Barrier
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from django.contrib.auth import get_user_model
+from django.core.cache.backends.locmem import LocMemCache
+from django.db import close_old_connections, connection
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.test import APIClient
+
+from community_chat.account_sessions import issue_account_session
+from community_chat.models import CommunityChatAccountSession
+from community_chat.roo_avatar.models import CommunityRooAvatar
+from community_chat.roo_avatar.policy import RooAvatarError, empty_outfit
+from community_chat.roo_avatar.services import read_avatar, update_avatar
+from community_chat.throttles import CommunityChatScopedThrottle
+from community_chat.volunteer.ladder import threshold
+from community_chat.volunteer.models import VolunteerMemberState, VolunteerSourceReceipt
+from community_chat.volunteer.policy import MICROROO
+from community_chat.volunteer.profile_progression import profile_progressions
+from community_chat.volunteer.services import journey
+from roo.models import Ledger, PointsAccount
+
+ORIGIN = "https://chat.example.test"
+COMMUNITY = "roo-avatar-tests"
+SETTINGS = {
+    "COMMUNITY_CHAT_ALLOWED_ORIGINS": [ORIGIN, "mlaichat://callback"],
+    "COMMUNITY_CHAT_RELAY_URL": "wss://chat.example.test",
+    "COMMUNITY_CHAT_VOLUNTEER_COMMUNITY": COMMUNITY,
+    "COMMUNITY_CHAT_SIGNUP_ENABLED": False,
+}
+
+
+def credentials_for(user, *, web=False):
+    """Mint only a synthetic, owner-bound account credential."""
+    return issue_account_session(
+        user,
+        SimpleNamespace(
+            client_id="mlai-chat-web" if web else "mlai-chat-ios",
+            installation_id=uuid.uuid4(),
+            origin=ORIGIN if web else "mlaichat://callback",
+            platform="web" if web else "ios",
+            device_name="Roo avatar test",
+            public_key="a" * 64,
+        ),
+    )
+
+
+@override_settings(**SETTINGS)
+class RooAvatarApiTests(TestCase):
+    def setUp(self):
+        # SQLite can reuse rolled-back account IDs across test cases.
+        throttle_cache = LocMemCache(self.id(), {})
+        self.addCleanup(throttle_cache.clear)
+        self.enterContext(
+            patch.object(CommunityChatScopedThrottle, "cache", throttle_cache)
+        )
+        self.user = get_user_model().objects.create_user(
+            email="avatar@example.test",
+            first_name="Alex",
+            avatar_url="https://example.test/photo.png",
+        )
+        self.credentials = credentials_for(self.user)
+        self.client = APIClient()
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {self.credentials.access_token}"
+        )
+        self.url = reverse("community_chat_roo_avatar")
+        self.state = VolunteerMemberState.objects.create(
+            user=self.user,
+            community=COMMUNITY,
+            historical_microroo=0,
+            reconciled_at=timezone.now(),
+        )
+
+    def set_level(self, level):
+        self.state.historical_microroo = (
+            threshold(level) * MICROROO if level is not None else None
+        )
+        self.state.save()
+
+    def fund(self, points=25):
+        return PointsAccount.objects.create(
+            user=self.user, balance=points, earned_balance=points
+        )
+
+    def patch(self, outfit, version=0, **extra):
+        return self.client.patch(
+            self.url, {"version": version, "outfit": outfit, **extra}, format="json"
+        )
+
+    def test_default_owner_scope_starter_catalog_and_no_wallet_awards(self):
+        before = Ledger.objects.count()
+        result = self.client.get(self.url)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(
+            result.data["account_id"], str(self.user.community_chat_profile_id)
+        )
+        self.assertNotEqual(result.data["account_id"], str(self.user.pk))
+        self.assertEqual(result.data["community_id"], COMMUNITY)
+        self.assertEqual(result.data["relay_url"], "wss://chat.example.test")
+        self.assertEqual(result.data["version"], 0)
+        self.assertEqual(result.data["current_level"], 0)
+        self.assertEqual(result.data["outfit"], empty_outfit())
+        self.assertEqual(result["Cache-Control"], "private, no-store")
+        self.assertFalse(CommunityRooAvatar.objects.exists())
+        self.assertEqual(Ledger.objects.count(), before)
+
+    def test_saved_outfit_is_shared_across_devices_but_not_accounts(self):
+        self.fund()
+        self.set_level(3)
+        selected = {**empty_outfit(), "hair": "honey_tuft", "glasses": "classic_black"}
+        saved = self.patch(selected, purchase_points=3)
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.data["version"], 1)
+        second = credentials_for(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {second.access_token}")
+        self.assertEqual(self.client.get(self.url).data["outfit"], selected)
+        other = get_user_model().objects.create_user(email="other-avatar@example.test")
+        other_token = credentials_for(other)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {other_token.access_token}")
+        self.assertEqual(self.client.get(self.url).data["outfit"], empty_outfit())
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.avatar_url, "https://example.test/photo.png")
+
+    def test_stale_version_and_forged_locked_item_do_not_change_saved_outfit(self):
+        self.assertEqual(self.patch(empty_outfit()).status_code, 200)
+        stale = self.patch({**empty_outfit(), "hair": "honey_tuft"})
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.data["error"], "roo_avatar_version_conflict")
+        locked = self.patch({**empty_outfit(), "hair": "mint_mohawk"}, 1)
+        self.assertEqual(locked.status_code, 403)
+        self.assertEqual(locked.data["slots"], ["hair"])
+        row = CommunityRooAvatar.objects.get(user=self.user)
+        self.assertEqual(row.version, 1)
+        self.assertIsNone(row.hair)
+
+    def test_wardrobe_matches_profile_and_charges_at_exact_jacket_threshold(self):
+        self.fund(40)
+        selected = {**empty_outfit(), "jacket": "lilac_puffer"}
+        for level in [None, 0, 6, 35, 36, 181, 200]:
+            self.set_level(level)
+            profile_rank = journey(self.user)["profile_rank"]
+            wardrobe = self.client.get(self.url).data
+            self.assertEqual(wardrobe["current_level"], level)
+            self.assertEqual(
+                wardrobe["current_level"],
+                profile_rank["level"] if profile_rank else None,
+            )
+            self.assertEqual(
+                wardrobe["rank_name"],
+                profile_rank["rank"]["name"] if profile_rank else None,
+            )
+            self.assertEqual(
+                wardrobe["catalog"]["jacket"][-1]["unlocked"],
+                level is not None and level >= 36,
+            )
+        self.set_level(35)
+        self.assertEqual(self.patch(selected, purchase_points=40).status_code, 403)
+        self.set_level(36)
+        self.assertEqual(self.patch(selected, purchase_points=4).status_code, 409)
+        bought = self.patch(selected, purchase_points=40)
+        self.assertEqual(bought.status_code, 200)
+        self.assertEqual(
+            (bought.data["current_level"], bought.data["available_points"]), (36, 0)
+        )
+        for level in [0, None]:
+            self.set_level(level)
+            result = self.client.get(self.url).data
+            self.assertEqual(result["effective_outfit"], selected)
+            self.assertTrue(result["catalog"]["jacket"][-1]["owned"])
+            self.assertTrue(result["catalog"]["jacket"][-1]["unlocked"])
+        self.assertEqual(self.patch(empty_outfit(), 1).status_code, 200)
+        self.assertEqual(self.patch(selected, 2).status_code, 200)
+        self.assertEqual(
+            Ledger.objects.get(reference_type="ROO_WARDROBE").delta_microroo,
+            -40 * MICROROO,
+        )
+
+    @override_settings(
+        COMMUNITY_CHAT_VOLUNTEER_ENABLED=True,
+        COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED=True,
+        COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED=True,
+    )
+    def test_publication_does_not_change_the_members_private_level(self):
+        self.set_level(181)
+        users = {self.user.pk: self.user}
+        self.assertEqual(profile_progressions(users), {})
+        private_rank = journey(self.user)["profile_rank"]
+        self.assertEqual(private_rank["level"], 181)
+        self.assertEqual(private_rank["rank"]["name"], "National Treasure")
+        VolunteerSourceReceipt.objects.create(
+            community=COMMUNITY,
+            actor=self.user,
+            source_key="test-publication",
+            origin="volunteer_badges",
+            kind="profile_publication",
+            status="published",
+            occurred_at=timezone.now(),
+        )
+        published = profile_progressions(users)[self.user.pk]["rank"]
+        self.assertEqual(published, private_rank)
+        wardrobe = self.client.get(self.url).data
+        self.assertEqual(
+            (wardrobe["current_level"], wardrobe["rank_name"]),
+            (published["level"], published["rank"]["name"]),
+        )
+
+    def test_pending_history_allows_defaults_and_blocks_new_purchases(self):
+        self.set_level(None)
+        self.fund()
+        result = self.client.get(self.url).data
+        self.assertIsNone(result["current_level"])
+        self.assertFalse(result["history_reconciled"])
+        for items in result["catalog"].values():
+            self.assertTrue(all(not item["unlocked"] for item in items))
+        self.assertEqual(
+            self.patch(
+                {**empty_outfit(), "fur": "golden_sand"}, purchase_points=1
+            ).status_code,
+            403,
+        )
+        self.assertEqual(self.patch(empty_outfit()).status_code, 200)
+
+    def test_four_slot_outfit_from_an_earlier_client_keeps_the_saved_fur(self):
+        self.fund()
+        self.set_level(9)
+        earlier = {
+            "hair": "honey_tuft",
+            "glasses": None,
+            "jacket": None,
+            "shoes": "red_sneakers",
+        }
+        first = self.patch(earlier, purchase_points=3)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.data["version"], 1)
+        self.assertEqual(first.data["outfit"], {"fur": None, **earlier})
+        self.assertIsNone(CommunityRooAvatar.objects.get(user=self.user).fur)
+        chosen = self.patch({**empty_outfit(), "fur": "ironbark"}, 1, purchase_points=6)
+        self.assertEqual(chosen.status_code, 200)
+        kept = self.patch({**earlier, "glasses": "classic_black"}, 2, purchase_points=2)
+        self.assertEqual(kept.status_code, 200)
+        self.assertEqual(kept.data["version"], 3)
+        self.assertEqual(
+            kept.data["outfit"],
+            {"fur": "ironbark", **earlier, "glasses": "classic_black"},
+        )
+        self.assertEqual(kept.data["effective_outfit"], kept.data["outfit"])
+        row = CommunityRooAvatar.objects.get(user=self.user)
+        self.assertEqual(
+            (row.fur, row.glasses, row.version), ("ironbark", "classic_black", 3)
+        )
+
+    def test_unknown_fur_is_rejected_without_changing_the_saved_outfit(self):
+        self.set_level(1)
+        self.fund()
+        self.assertEqual(
+            self.patch(
+                {**empty_outfit(), "fur": "golden_sand"}, purchase_points=1
+            ).status_code,
+            200,
+        )
+        for fur in ["outback_red", "honey_tuft", 7]:
+            result = self.patch({**empty_outfit(), "fur": fur}, 1)
+            self.assertEqual(result.status_code, 400)
+            self.assertEqual(result.data["error"], "invalid_roo_avatar")
+            self.assertEqual(result.data["slots"], ["fur"])
+        row = CommunityRooAvatar.objects.get(user=self.user)
+        self.assertEqual((row.fur, row.version), ("golden_sand", 1))
+
+    def test_quote_purchase_and_re_equip(self):
+        self.set_level(9)
+        self.fund(6)
+        selected = {**empty_outfit(), "fur": "ironbark"}
+        for extra in [{}, {"purchase_points": 1}, {"purchase_points": 3}]:
+            self.assertEqual(self.patch(selected, **extra).status_code, 409)
+        self.assertFalse(CommunityRooAvatar.objects.exists())
+        bought = self.patch(selected, purchase_points=6)
+        self.assertEqual(bought.status_code, 200)
+        self.assertEqual(bought.data["available_points"], 0)
+        self.assertEqual(bought.data["current_level"], 9)
+        self.assertTrue(
+            next(x for x in bought.data["catalog"]["fur"] if x["id"] == "ironbark")[
+                "owned"
+            ]
+        )
+        self.assertEqual(self.patch(selected, purchase_points=6).status_code, 409)
+        self.assertEqual(self.patch(empty_outfit(), 1).status_code, 200)
+        self.assertEqual(self.patch(selected, 2).status_code, 200)
+        ledger = Ledger.objects.get(user=self.user, reference_type="ROO_WARDROBE")
+        self.assertEqual(ledger.delta_microroo, -6 * MICROROO)
+
+    def test_multiple_items_rollback_if_short_and_keep_legacy_equipment(self):
+        self.set_level(3)
+        self.fund(1)
+        CommunityRooAvatar.objects.create(
+            user=self.user, community=COMMUNITY, fur="snow_gum"
+        )
+        self.assertEqual(self.patch(empty_outfit(), 1).status_code, 200)
+        self.assertEqual(
+            self.patch({**empty_outfit(), "fur": "snow_gum"}, 2).status_code, 200
+        )
+        result = self.patch(
+            {**empty_outfit(), "hair": "honey_tuft", "glasses": "classic_black"},
+            3,
+            purchase_points=3,
+        )
+        self.assertEqual(result.status_code, 402)
+        saved = self.client.get(self.url).data
+        self.assertEqual(
+            (saved["version"], saved["available_points"], saved["outfit"]["fur"]),
+            (3, 1, "snow_gum"),
+        )
+        self.assertFalse(saved["catalog"]["hair"][0]["owned"])
+        self.assertFalse(Ledger.objects.filter(reference_type="ROO_WARDROBE").exists())
+
+    def test_large_spendable_balance_is_not_contribution_rank(self):
+        PointsAccount.objects.create(
+            user=self.user,
+            purchased_topup_balance_microroo=500_000 * MICROROO,
+            balance_microroo=500_000 * MICROROO,
+        )
+        result = self.client.get(self.url).data
+        self.assertEqual(result["current_level"], 0)
+        self.assertFalse(result["catalog"]["hair"][-1]["unlocked"])
+
+    def test_invalid_fields_categories_and_body_identity_are_rejected(self):
+        for extra in [
+            {"account_id": "other"},
+            {"community_id": "forged"},
+            {"current_level": 6},
+        ]:
+            self.assertEqual(self.patch(empty_outfit(), **extra).status_code, 400)
+        self.assertEqual(
+            self.patch({**empty_outfit(), "hair": "classic_black"}).status_code, 400
+        )
+        self.assertEqual(self.patch({"hair": None}).status_code, 400)
+        self.assertFalse(CommunityRooAvatar.objects.exists())
+
+    def test_community_scope_is_server_owned_and_preferences_do_not_cross_it(self):
+        self.set_level(2)
+        self.fund()
+        self.assertEqual(
+            self.patch(
+                {**empty_outfit(), "hair": "honey_tuft"}, purchase_points=1
+            ).status_code,
+            200,
+        )
+        with override_settings(COMMUNITY_CHAT_VOLUNTEER_COMMUNITY="other-community"):
+            result = self.client.get(self.url).data
+        self.assertEqual(result["community_id"], "other-community")
+        self.assertEqual(result["outfit"], empty_outfit())
+        self.assertEqual(CommunityRooAvatar.objects.count(), 1)
+
+    def test_non_account_credentials_cannot_read_or_save(self):
+        for token in [
+            "mlai_chat_bootstrap-only",
+            "mlai_usage_reporter-only",
+            "invalid",
+        ]:
+            self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+            self.assertEqual(self.client.get(self.url).status_code, 401)
+            self.assertEqual(self.patch(empty_outfit()).status_code, 401)
+
+    def test_cookie_writes_require_the_exact_bound_origin(self):
+        from community_chat.account_cookies import ACCESS_COOKIE
+
+        web = credentials_for(self.user, web=True)
+        self.client.credentials()
+        self.client.cookies[ACCESS_COOKIE] = web.access_token
+        body = {"version": 0, "outfit": empty_outfit()}
+        self.assertEqual(
+            self.client.patch(self.url, body, format="json").status_code, 401
+        )
+        self.assertEqual(
+            self.client.patch(
+                self.url, body, format="json", HTTP_ORIGIN="https://wrong.example.test"
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.patch(
+                self.url, body, format="json", HTTP_ORIGIN=ORIGIN
+            ).status_code,
+            200,
+        )
+
+    def test_revocation_rotation_and_account_deactivation_are_rechecked_in_service(
+        self,
+    ):
+        old_session = self.credentials.session
+        CommunityChatAccountSession.objects.filter(pk=old_session.pk).update(
+            revoked_at=timezone.now()
+        )
+        with self.assertRaises(AuthenticationFailed):
+            update_avatar(
+                authenticated_session=old_session,
+                values={"version": 0, "outfit": empty_outfit()},
+            )
+        self.assertFalse(CommunityRooAvatar.objects.exists())
+        fresh = credentials_for(self.user)
+        CommunityChatAccountSession.objects.filter(pk=fresh.session.pk).update(
+            access_token_hash="f" * 64
+        )
+        with self.assertRaises(AuthenticationFailed):
+            read_avatar(authenticated_session=fresh.session)
+        fresh = credentials_for(self.user)
+        get_user_model().objects.filter(pk=self.user.pk).update(is_active=False)
+        with self.assertRaises(AuthenticationFailed):
+            update_avatar(
+                authenticated_session=fresh.session,
+                values={"version": 0, "outfit": empty_outfit()},
+            )
+
+    def test_expired_session_is_rechecked_under_lock(self):
+        CommunityChatAccountSession.objects.filter(
+            pk=self.credentials.session.pk
+        ).update(access_expires_at=timezone.now() - timedelta(seconds=1))
+        with self.assertRaises(AuthenticationFailed):
+            update_avatar(
+                authenticated_session=self.credentials.session,
+                values={"version": 0, "outfit": empty_outfit()},
+            )
+
+
+@override_settings(**SETTINGS)
+class RooAvatarConcurrencyTests(TransactionTestCase):
+    def test_two_devices_cannot_silently_overwrite_the_same_version(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("Row-lock concurrency requires PostgreSQL")
+        user = get_user_model().objects.create_user(
+            email="concurrent-avatar@example.test"
+        )
+        creds = [credentials_for(user), credentials_for(user)]
+        VolunteerMemberState.objects.create(
+            user=user, community=COMMUNITY, historical_microroo=threshold(2) * MICROROO
+        )
+        PointsAccount.objects.create(user=user, balance=1, earned_balance=1)
+        barrier = Barrier(2)
+
+        def save(index):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=10)
+                result = update_avatar(
+                    authenticated_session=creds[index].session,
+                    values={
+                        "version": 0,
+                        "purchase_points": 1,
+                        "outfit": {
+                            **empty_outfit(),
+                            "hair": "honey_tuft",
+                        },
+                    },
+                )
+                return result["version"]
+            except RooAvatarError as exc:
+                return exc.code
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(save, range(2)))
+        self.assertCountEqual(results, [1, "roo_avatar_version_conflict"])
+        self.assertEqual(
+            Ledger.objects.filter(user=user, reference_type="ROO_WARDROBE").count(), 1
+        )
+        self.assertEqual(CommunityRooAvatar.objects.filter(user=user).count(), 1)

@@ -25,10 +25,15 @@ UI.
    signer is not a human member key.
 2. Confirm `MLAI_BRIDGE_PUBKEY` is the public half of that signer in all client
    artifacts. Run the MLAI Chat release and client-boundary contract scripts.
-3. Create the mapping with `upsert_community_bridge_channel`; inspect it in the
-   admin and confirm edit, delete, and reply synchronization are enabled.
-4. Verify one human identity link and leave the second Slack user deliberately
-   unlinked. Record only the link row/audit reference.
+3. Enable message sync and the staging Slack owner inventory. Restrict
+   `SLACK_MEMBER_CHANNEL_ALLOWED_IDS` to the dedicated staging Slack channel.
+   Connect a test member who has joined the channel using the staging Slack
+   OAuth app. The member must authorize reading channel history.
+4. In the staging Django admin, find the discovered channel and select
+   **Mirror selected public channels into MLAI Chat**. Wait for the bridge
+   worker to register the destination. Confirm its audience and edit, delete,
+   and reply settings. Verify the test member's identity link and leave a
+   second test Slack user unlinked. Record only the link row/audit reference.
 5. Start structured-log capture for receipt key, delivery ID, attempts, source
    and destination IDs, outcome, and latency. Message text must not appear.
 
@@ -56,6 +61,17 @@ For Slack-origin events, confirm linked-user messages expose the verified
 linked public key and unlinked-user messages do not. In both cases the event
 signer must remain the dedicated bridge key; the UI must never imply that the
 human signed it.
+
+For voice acceptance, use a linked staging channel with a posting identity
+authorized for `files:write`. Add only that channel to
+`SLACK_VOICE_UPLOAD_CHANNELS`. For a member-token test, enable the Slack user
+scope in the staging Slack app, add it to the staging `SLACK_OAUTH_USER_SCOPES`,
+and reconnect the test account. For a bot-token test, use a staging bot grant
+with the Slack bot scope. Record a synthetic spoken clip in Chat and verify
+that Slack opens and plays its hosted audio, including after reload. Record a
+different clip in Slack and verify that Chat plays it through the Slack
+attachment player. Repeat in a thread and confirm one destination file, one
+message and no reverse echo for each create.
 
 ## Retry, dead-letter, echo, and mapping controls
 

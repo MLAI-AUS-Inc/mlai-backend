@@ -137,6 +137,13 @@ def add_p2_fields(result, op, *, organization):
     if state == "done":
         return result
     receipt = goals.mapping(op.receipt)
+    if (state == "needs_you" and goals.mapping(result.get("action")).get("id") == "choose_articles_page"
+            and goals.mapping(receipt.get("user_action")).get("id") == "choose_articles_page"):
+        # The page ask is parked only when the founder's consent says they
+        # choose (or a legacy card renders it). The registry's P2 view files
+        # it as strategy with no action, which would hide it as Working on it
+        # (plan A9): it stays the one needs-you action, with no copy id.
+        return result
     code = receipt.get("reason_code")
     registered = registry_policy.is_registered(code)
     action = result.get("action")
@@ -162,6 +169,11 @@ def add_p2_fields(result, op, *, organization):
             result["action"] = None
     copy_id = registry_policy.copy_id_for(code, organization=organization, terminal=state == "stopped",
                                           self_heal=goals.mapping(receipt.get("self_heal_v1")) or None)
+    if copy_id == "fixing" and not code:
+        # B10 applies to a stop that names a generic or unknown code. A website
+        # operation that ended without one (cancelled) keeps the stop; Chat
+        # already shows a setup stop as "We're fixing this".
+        copy_id = "stopped"
     if not registered and state == "needs_you" and ask and ask != "approve_setup":
         candidate = f"ask_{ask}"
         if candidate in _founder_copy_ids() and policy_v2_applies(organization):

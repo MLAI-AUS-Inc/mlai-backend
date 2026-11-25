@@ -54,6 +54,7 @@ MARKETING_VIEWS = frozenset(
         "VibeMarketingArticleReviewView",
         "FounderDraftCopiedView",
         "FounderDraftDownloadView",
+        "FounderReviewedArticlePRView",
         "FounderDraftPostedLinkView",
         "ArticlePreviewLeaseView",
         "VibeMarketingRunCommentDetailView",
@@ -87,6 +88,8 @@ FOUNDER_VIEWS = frozenset(
         "FounderToolsCompanyView",
         "FounderToolsCompanyDetailView",
         "FounderToolsActiveCompanyView",
+        "FounderWebsiteLeadView",
+        "FounderWebsitePreflightView",
     }
 )
 POINTS_VIEWS = frozenset(

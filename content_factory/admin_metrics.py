@@ -163,10 +163,48 @@ def _article_user_ids(
     return user_ids
 
 
-def _points_metrics(start: datetime | None, end: datetime) -> dict[str, int]:
-    rows = _apply_created_period(
-        Ledger.objects.filter(source="CONTENT_FACTORY"), start, end
-    ).values_list("kind", "delta")
+def _test_traffic() -> dict[str, Any]:
+    """Plan F1: what belongs to marked test organisations, so no revenue number counts it.
+
+    The test organisations, the accounts whose every startup is one (test
+    accounts), and the points-ledger rows their runs recorded as their charge.
+    Reads stay scalar and are bounded by the (few) test organisations.
+    """
+    from founder_tools.models import VibeRaisingCompany
+
+    from .founder_test_orgs import test_only_user_ids, test_organization_ids
+
+    ids = test_organization_ids()
+    if not ids:
+        return {"organizations": frozenset(), "users": frozenset(), "ledgers": frozenset()}
+    owners = set(
+        VibeRaisingCompany.objects.filter(organization_id__in=sorted(ids))
+        .exclude(profile__user_id__isnull=True)
+        .values_list("profile__user_id", flat=True)
+    )
+    ledgers = set()
+    for value in ContentFactoryRun.objects.filter(organization_id__in=sorted(ids)).values_list(
+        "run_request__roo_points_ledger_id", flat=True
+    ):
+        text = str(value or "").strip()
+        if text.isdecimal() and len(text) <= 19:
+            ledgers.add(int(text))
+    return {
+        "organizations": ids,
+        "users": test_only_user_ids(owners, ids=ids),
+        "ledgers": frozenset(ledgers),
+    }
+
+
+def _points_metrics(
+    start: datetime | None, end: datetime, test: dict[str, Any] | None = None
+) -> dict[str, int]:
+    ledger = Ledger.objects.filter(source="CONTENT_FACTORY")
+    if test and (test["users"] or test["ledgers"]):
+        ledger = ledger.exclude(user_id__in=sorted(test["users"])).exclude(
+            pk__in=sorted(test["ledgers"])
+        ).exclude(refund_of_id__in=sorted(test["ledgers"]))
+    rows = _apply_created_period(ledger, start, end).values_list("kind", "delta")
     gross_spent = 0
     refunded = 0
     for kind, delta in rows:
@@ -183,9 +221,13 @@ def _points_metrics(start: datetime | None, end: datetime) -> dict[str, int]:
 
 
 def _summary_for_period(start: datetime | None, end: datetime) -> tuple[dict, dict]:
+    test = _test_traffic()
+    test_orgs = sorted(test["organizations"])
     runs = list(
         _apply_created_period(
-            ContentFactoryRun.objects.filter(workflow__in=VIBE_MARKETING_WORKFLOWS),
+            ContentFactoryRun.objects.filter(workflow__in=VIBE_MARKETING_WORKFLOWS).exclude(
+                organization_id__in=test_orgs
+            ),
             start,
             end,
         ).values(
@@ -209,7 +251,9 @@ def _summary_for_period(start: datetime | None, end: datetime) -> tuple[dict, di
     }
 
     articles = list(
-        _apply_created_period(WrittenArticle.objects.all(), start, end).values(
+        _apply_created_period(
+            WrittenArticle.objects.exclude(organization_id__in=test_orgs), start, end
+        ).values(
             "source_run_id", "organization_id", "publish_status"
         )
     )
@@ -233,7 +277,7 @@ def _summary_for_period(start: datetime | None, end: datetime) -> tuple[dict, di
         PointsPurchase.objects.filter(
             status="paid",
             currency__iexact="aud",
-            user_id__in=active_user_ids,
+            user_id__in=active_user_ids - test["users"],
         ),
         start,
         end,
@@ -241,7 +285,7 @@ def _summary_for_period(start: datetime | None, end: datetime) -> tuple[dict, di
     purchase_rows = list(
         purchases.values_list("user_id", "points_amount", "amount_cents")
     )
-    points = _points_metrics(start, end)
+    points = _points_metrics(start, end, test)
     summary = {
         "activeUsers": len(active_user_ids),
         "activeStartups": len(active_startups),

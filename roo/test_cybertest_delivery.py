@@ -51,6 +51,14 @@ class DeliveryPolicyTests(unittest.TestCase):
         self.assertEqual(result, fixture['expected'])
         self.assertRegex(digest, r'^[a-f0-9]{64}$')
 
+    def test_basic_price_follows_the_number_of_source_batches(self):
+        def sized(batches):
+            checks = [{'id': f'basic:source:{i+1}', 'kind': 'source_batch', 'required': True} for i in range(batches)]
+            return {**basic(), 'checks': checks + basic()['checks'][1:]}
+        for batches, points in [(1, 24), (64, 24), (65, 48), (128, 48), (129, 72), (910, 360)]:
+            with self.subTest(batches=batches):
+                self.assertEqual(phase_price(sized(batches)), {'totalPoints': points, 'duePoints': points})
+
     def test_phase_prices_are_incremental(self):
         self.assertTrue(callable(phase_price), 'phase policy is not implemented')
         self.assertEqual(phase_price(basic()), {'totalPoints': 24, 'duePoints': 24})
@@ -90,6 +98,21 @@ class DeliveryPolicyTests(unittest.TestCase):
         for costs in [None, {**usage(), 'pendingCalls': 1}, {**usage(), 'auditId': PARENT}]:
             with self.subTest(costs=costs), self.assertRaises(ValueError):
                 delivery_settlement(basic(), value, AUDIT, PRICING, costs)
+
+    def test_interrupted_sponsored_basic_settles_without_provider_usage(self):
+        value = {**evidence(), 'checks': [], 'report': {'persisted': False}}
+        pricing = {**PRICING, 'sponsored': True}
+        settled = delivery_settlement(basic(), value, AUDIT, pricing, None)
+        self.assertEqual(settled['basis'], 'sponsored_not_delivered')
+        self.assertEqual(settled['charge_microroo'], 0)
+        self.assertEqual(settled['refund_microroo'], 0)
+        self.assertFalse(settled['delivery']['minimumMet'])
+        self.assertNotIn('model_cost_usd', settled)
+        self.assertEqual(delivery_settlement(basic(), value, AUDIT, pricing, usage(), existing=settled), settled)
+        legacy = delivery_settlement(basic(), value, AUDIT, PRICING, usage())
+        self.assertEqual(delivery_settlement(basic(), value, AUDIT, pricing, usage(), existing=legacy), legacy)
+        with self.assertRaises(ValueError):
+            delivery_settlement(basic(), {**value, 'auditId': PARENT}, AUDIT, pricing, None)
 
     def test_settlement_replay_is_idempotent_and_changed_evidence_is_rejected(self):
         result = delivery_settlement(basic(), evidence(), AUDIT, PRICING, None)

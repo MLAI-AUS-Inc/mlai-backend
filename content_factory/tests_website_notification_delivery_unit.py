@@ -127,14 +127,14 @@ class OutboxTests(SimpleTestCase):
 
     def boundaries(self,job,*,devices=(RECIPIENT,)):
         from django.contrib.auth import get_user_model
-        from founder_tools.models import VibeRaisingCompany
+        from founder_tools import membership
         from community_chat.models import CommunityChatDevice
         from .models import NotificationChannel
         stack=ExitStack()
         def operation(**kwargs):return rows(self.goal if kwargs.get("action")=="prepare" else job)
         self.operations=stack.enter_context(patch.object(WebsiteConnectionOperation.objects,"filter",side_effect=operation))
         stack.enter_context(patch.object(get_user_model().objects,"filter",return_value=rows(self.user)))
-        self.ownership=stack.enter_context(patch.object(VibeRaisingCompany.objects,"filter",return_value=rows()))
+        self.ownership=stack.enter_context(patch.object(membership,"companies_for_user",return_value=rows()))
         self.devices=stack.enter_context(patch.object(CommunityChatDevice.objects,"filter",return_value=rows(values=devices)))
         self.email=SimpleNamespace(pk=uuid4(),route_id=self.user.email)
         stack.enter_context(patch.object(NotificationChannel.objects,"filter",return_value=rows(self.email)))

@@ -1,5 +1,6 @@
 from django.test import TestCase
 
+from startup_updates.founder_messages import GENERIC_FAILURE
 from vibe_raising.views import _run_failure_message
 from workflow_runs.models import (
     ContentFactoryRun,
@@ -28,10 +29,8 @@ class RunFailureMessageTests(TestCase):
     def test_uses_run_error_when_present(self):
         run = self._create_run(error="Startup 16 data is deleted; refusing to process run.")
 
-        self.assertEqual(
-            _run_failure_message(run),
-            "Startup 16 data is deleted; refusing to process run.",
-        )
+        # Internal worker errors stay in the run; founders see a plain sentence.
+        self.assertEqual(_run_failure_message(run), GENERIC_FAILURE)
 
     def test_falls_back_to_failed_step_error(self):
         run = self._create_run(error="")
@@ -42,10 +41,12 @@ class RunFailureMessageTests(TestCase):
             error="Run is missing required startup context: google_connection_id",
         )
 
-        self.assertEqual(
-            _run_failure_message(run),
-            "Run is missing required startup context: google_connection_id",
-        )
+        self.assertEqual(_run_failure_message(run), GENERIC_FAILURE)
+
+    def test_keeps_founder_sentences_from_the_run(self):
+        run = self._create_run(error="Connect Gmail and Slack before continuing.")
+
+        self.assertEqual(_run_failure_message(run), "Connect Gmail and Slack before continuing.")
 
     def test_generic_fallback_when_no_error_recorded(self):
         run = self._create_run(error="")

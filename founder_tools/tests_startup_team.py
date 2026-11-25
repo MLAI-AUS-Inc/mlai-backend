@@ -466,8 +466,9 @@ class TeamTests(TransactionTestCase):
     def prove_mailbox(self, user, email):
         from community_chat.email_codes import email_digest
         from community_chat.models import CommunityChatEmailCodeChallenge
-        user.email, user.email_verified_at = email, timezone.now()
-        user.save(update_fields=['email', 'email_verified_at', 'updated_at'])
+        now = timezone.now()
+        User.objects.filter(pk=user.pk).update(email=email, email_verified_at=now, updated_at=now)
+        user.refresh_from_db()
         CommunityChatEmailCodeChallenge.objects.create(user=user, email_digest=email_digest(email), code_digest='a' * 64,
             client_id='synthetic-team', installation_id=uuid4(), origin='https://chat.synthetic.test', platform='web',
             public_key='c' * 64, expires_at=timezone.now() + timedelta(minutes=10), consumed_at=timezone.now())
@@ -493,10 +494,9 @@ class TeamTests(TransactionTestCase):
         domain = f'acme-{uuid4().hex[:12]}.com.au'
         self.org.domain = domain
         self.org.save(update_fields=['domain'])
-        self.owner.email = 'owner@' + domain
-        self.owner.save(update_fields=['email', 'updated_at'])
-        self.member.email = 'member@' + domain
-        self.member.save(update_fields=['email', 'updated_at'])
+        for user, name in ((self.owner, 'owner'), (self.member, 'member')):
+            User.objects.filter(pk=user.pk).update(email=f'{name}@{domain}', updated_at=timezone.now())
+            user.refresh_from_db()
         nonce = teams.issue_join_reference(user=self.member, organization=self.org)
         with override_settings(MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED=True):
             result = teams.request_join(user=self.member, join_reference=nonce)

@@ -26,6 +26,37 @@ the shared operation attempt. Missing or changed approval, unrelated children,
 portable drafts and cancelled or failed source operations retain the terminal
 gate.
 
+## Sparse article profile
+
+An owner can request the first-article card with `profile_intake=1`. Its optional
+`profileIntake.missingFields` names the missing startup description, target
+audience or reader objective. The existing card route without the query
+retains its original response. The company-scoped
+`POST /api/v1/my-startup/first-article/profile-intake/` accepts the listed
+fields as `oneLiner`, `targetAudience` and `readerTask`. Each supplied answer
+is 3–280 characters after whitespace normalization. The response is the
+refreshed card.
+
+Saving records the founder and timestamp for each supplied fact. Once the
+facts are complete, an eligible fresh catalog can retain a draft audience
+and a no-offer reader objective. Starting the article still requires its
+ordinary confirmation. Repeating the same save retains the original facts,
+and a conflicting change to an existing value requires refreshing the card.
+
+## Approved article files download
+
+The existing owner-scoped `runs/:runId/article/download` ZIP retains its
+root Markdown, HTML and images. With the setup ladder enabled on both services,
+the worker can also supply the files for a website under
+`mlai-content-files/<slug>/`. The directory contains Markdown with front matter,
+Article and applicable FAQ structured data, and the approved image files. Its
+parent directory includes the wiring instructions. The backend verifies the
+run, revision, body digest and each downloaded image before returning the ZIP.
+When an approved image is unavailable or changed, the standard ZIP remains
+downloadable. Its image notes explain the omission and how to retry. Older reviews without this
+manifest retain their existing ZIP. Downloading writes no website files,
+publication receipt or points transaction.
+
 ## Component review updates (8 October 2026)
 
 Next.js private previews route `/_next/` stylesheet, script, image-optimizer and
@@ -248,16 +279,16 @@ prove real SQL locking or authenticated live persistence.
 
 ### Legacy explicit approval API
 
-`GET/PUT /api/v1/vibe-marketing/editorial-catalog/` and `POST /api/v1/vibe-marketing/editorial-catalog/approve/` inherit the product's authenticated JWT and cookie-Origin rules and require a founder-owned **explicit `company_id`**. Both trailing-slash forms are routed. A service API key is not a human approval identity. Domain or actor fields cannot select the approval tenant or approver.
+`GET/PUT /api/v1/vibe-marketing/editorial-catalog/` and `POST /api/v1/vibe-marketing/editorial-catalog/approve/` inherit the product's authenticated JWT and cookie-Origin rules and require an **explicit `company_id`**. The caller must be an active member of a shared startup or the founder-owner of a legacy startup. Both trailing-slash forms are routed. A service API key is not a human approval identity. Domain or actor fields cannot select the approval tenant or approver.
 
 1. GET with `?company_id=…`. Read the full audience/offer entries, their status and `editorial_catalog_version`. `review_entries` supplies each entry's `kind` (`audience` or `offer`), `id`, `version` and `content_sha256`.
 2. PUT draft edits using that expected catalogue revision. Lists supplied are full replacements for that kind; omit the other list to preserve it. Existing changed entries need higher versions and cleared approval fields. Include dependent offer invalidation when changing an approved audience.
 3. GET/review the saved content. POST only `expected_editorial_catalog_version` and an `entries` array containing the exact selected `review_entries` objects. Do not send an approver or timestamp. Audiences and offers may be approved together, regardless of selection order.
-4. After the initial explicit-company lookup, the server locks the organisation, then the founder profile and company, inside the catalogue transaction. It rereads the authenticated user's profile identity/role and company ownership/organisation link before reading policy. A missing or no-longer-founder profile returns 403; a missing/transferred company returns 404; a changed organisation link or domain returns 409 and requires reload. Locks remain held through the write. It then verifies selected versions/hashes and offer dependencies/markets, and records `user:<authenticated-user-pk>` with an aware UTC server timestamp. Each receipt binds exact content/version; offer receipts also bind approved audience content. Approval history preserves the approved record snapshots and provenance. A stale selection returns 409; retired entries must be revised before approval.
+4. After the initial company lookup, the server locks the organisation inside the catalogue transaction. For shared startups it checks the canonical workspace and active membership using the same lock as removal and closure. A removed member, closed workspace or different company returns 404. For legacy startups it also locks the founder profile and company and checks their current role and ownership. A missing or no-longer-founder legacy profile returns 403, and a missing or transferred legacy company returns 404. A changed organisation link or domain requires a reload and returns 409. Locks remain held through the write. The server verifies selected versions/hashes and offer dependencies/markets, then records `user:<authenticated-user-pk>` and an aware UTC timestamp. Each receipt binds exact content/version and offer receipts also bind approved audience content. Approval history preserves snapshots and provenance. A stale selection returns 409 and retired entries need revision before approval.
 
 An exact retry with the **current** catalogue revision is a no-op and does not rewrite the original approver or timestamp. An old revision is rejected even if the caller believes it is retrying the same operation. Existing approval history and receipts survive scans and draft edits.
 
-The same locked ownership checks apply to draft saves and exact no-op retries. Service catalogue edits remain an independently authenticated draft-only path; the shared helper cannot approve without an owner context. These are catalogue-write guards, not automatic retirement of approvals previously granted by a person whose role later changes. Earlier approval history remains intact; retiring or revising an offer is an explicit policy mutation. GET retains the existing product-context resolution, and this change does not make all onboarding/offboarding operations atomic with catalogue mutations.
+The same locked access checks apply to draft saves and replays. A keyed receipt can only be replayed by the user who started it. Service catalogue edits remain an independently authenticated draft-only path. Retiring or revising an offer is an explicit policy mutation, and approvals retain the actor and history recorded at the time of the write.
 
 ### Legacy entries without receipts
 
@@ -485,7 +516,13 @@ Hosted quality repair is owned by Content Factory. While its bounded repair runs
 `article_preview_quality.status=self_healing` locks publishing, clears an older
 approval blocker during status merge, and explains that the preview is being fixed
 automatically. A terminal block uses the worker's specific `founder_message`.
-Exhausted safety checks show a staff-review message without raw safety findings.
+The current hosted preview may expose a bounded `safety_check` with checked
+sentences and official source passages, or with the sentences that still need
+verification. It also exposes `preview_inputs_invalid` when the technical
+preview check could not get its inputs. A safety check covers the displayed
+sentences. It supplies no approval, and technical and editorial gates still apply.
+`safety_review_status` reflects a delivered or acknowledged staff alert for the
+current hold. Raw alerts and staff audit fields stay internal.
 After a successful current-owner status observation, an after-commit hook reloads
 the Run and verifies its hosted review identity, generation and inputs, honoring
 any current owner stop intent before queuing `article_safety_review_required` or

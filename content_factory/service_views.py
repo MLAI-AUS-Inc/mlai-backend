@@ -299,7 +299,9 @@ def _worker_article_admission_response(request):
         expected = connection_contract(data)
         if expected or (not portable and config.website_connection_id):
             if not expected:
-                raise WebsiteAuthorityError('website_connection_required', 'The reviewed connection identity is required.')
+                # B12: Content Factory sent no identity for a connected site:
+                # a protocol fault, never "Reconnect this website".
+                raise WebsiteAuthorityError('callback_contract_missing', 'The reviewed connection identity is required.')
             current = config.website_connection
             if current is None or any(connection_contract(contract_for(current)).get(key) != value for key, value in expected.items() if key != 'connection_target_id'):
                 raise WebsiteAuthorityError('website_connection_changed', 'The reviewed website connection changed.')
@@ -587,9 +589,19 @@ class ContentFactoryOrgConfigView(APIView):
             ]
 
         if config and config.website_connection_id:
+            from .website_setup_merge_proof import worker_publish_targets
+
             website = config.website_connection
+            response_data["publish_targets"] = worker_publish_targets(config)
             response_data["website_connection"] = {**contract_for(website), "state": website.state, "capabilities": website.capabilities}
             response_data.update(contract_for(website))
+            merge_sha = request.query_params.get("static_setup_source_sha")
+            if (merge_sha and domain and github_repo and self._normalize_domain(domain) == org.domain
+                    and github_repo.casefold() == website.github_repo.casefold()):
+                from .website_static_setup_review import current_review
+                review = current_review(website, merge_sha)
+                if review:
+                    response_data["static_setup_review"] = review
             latest_inventory = website.scan_snapshots.filter(generation=website.generation, evidence__has_key="repository_inventory").order_by("-created_at").first()
             response_data["repository_inventory"] = (latest_inventory.evidence or {}).get("repository_inventory") if latest_inventory else None
         return Response(response_data, status=status.HTTP_200_OK)
@@ -2315,7 +2327,8 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     workflow = str(data.get("workflow") or "direct_generate").strip() or "direct_generate"
     error_message = str(data.get("error") or data.get("error_message") or "").strip()
     failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
-    error_code = str(data.get("error_code") or failure.get("code") or ("UNCLASSIFIED" if run_status in {"failed", "blocked"} else "")).strip()
+    from .no_generic_stop import uncoded_failure_code
+    error_code = str(data.get("error_code") or failure.get("code") or (uncoded_failure_code() if run_status in {"failed", "blocked"} else "")).strip()
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
     if not data.get("_execution_version_validated") and _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
@@ -2411,8 +2424,15 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
                 "artifacts": data.get("failure_artifacts") or [],
             },
         )
+    _alert_generic_stop(run)
     _settle_p2_run(run)
     return run
+
+
+def _alert_generic_stop(run):
+    """B10: staff hear about a generic stop when it arrives, not on the next sweep."""
+    from .no_generic_stop import alert_generic_stop
+    alert_generic_stop(run)
 
 
 def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Optional[ContentFactoryRun]:
@@ -2832,6 +2852,13 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             existing_generation,
         )
         return existing_run
+    # Retain the worker rung across sparse preview/merge callbacks. A merge of a
+    # wiring-only PR or an unverified static section cannot mint a ready website.
+    incoming_ladder = setup_payload.get("setup_ladder") or data.get("setup_ladder")
+    if isinstance(incoming_ladder, dict):
+        result["setup_ladder"] = incoming_ladder
+    if data.get("setup_cache_approved") is False or setup_payload.get("setup_cache_approved") is False:
+        result["setup_cache_approved"] = False
     common_fields = _article_system_setup_common_callback_fields(data=data, setup_payload=setup_payload, result=result)
     preview_url_value = str(data.get("preview_url") or setup_payload.get("preview_url") or "").strip()
     fallback_preview_url_value = str(
@@ -3597,7 +3624,9 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         codeReviewReason=result.get("code_review_reason"),
         code_review_reason=result.get("code_review_reason"),
     )
-    if event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged":
+    from .website_content_files import requires_independent_verification
+    if (event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged"
+            and not requires_independent_verification(result)):
         _mark_article_system_setup_generation_ready_for_domain(
             result["domain"],
             pr_url=result.get("pr_url") or setup_payload.get("pr_url") or "",
@@ -3918,7 +3947,7 @@ class ContentFactoryCallbackView(APIView):
         # Order before *any* handler can mutate state, refund or notify. Use the
         # existing run JSON and row lock; no schema migration is required.
         run_id = str(data.get("run_id") or job_id)
-        if event_type in {"topic_selection", "discovery_progress"}:
+        if event_type in {"topic_selection", "discovery_progress", "research_empty"}:
             from .research_workspace import accepts_research_write, research_config
             organization = Organization.objects.filter(domain=data.get("domain") or "").first()
             if organization and not accepts_research_write(research_config(organization), run_id):
@@ -4021,6 +4050,8 @@ class ContentFactoryCallbackView(APIView):
             return self._handle_article_review_preview_event(data, event_type)
         elif event_type == 'discovery_progress':
             return self._handle_discovery_progress(data)
+        elif event_type == 'research_empty':
+            return self._handle_research_empty(data)
         elif event_type == 'article_progress':
             return self._handle_article_progress(data)
         elif event_type == 'scan_progress':
@@ -6192,7 +6223,8 @@ class ContentFactoryCallbackView(APIView):
         run_id = data.get('run_id') or job_id
         workflow = data.get('workflow') or 'unknown'
         error_message = data.get('error', data.get('error_message', 'Unknown error'))
-        error_code = data.get('error_code') or (data.get('failure') or {}).get('code') or 'UNCLASSIFIED'
+        from .no_generic_stop import uncoded_failure_code
+        error_code = data.get('error_code') or (data.get('failure') or {}).get('code') or uncoded_failure_code()
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         diagnostics = _normalize_discovery_diagnostics(data.get('diagnostics'))
@@ -6395,7 +6427,10 @@ class ContentFactoryCallbackView(APIView):
         Three events cover the hosted review preview after generation:
         - article_review_preview_fallback_ready: the exact build failed but a
           fallback render is reviewable; comments work, publish stays gated on
-          the exact preview (policy enforced by content-factory's approve API).
+          the exact preview (policy enforced by content-factory's approve API),
+          unless the callback carries ``approval_basis`` (``stand_in_preview``
+          or ``article_text``): then the run is approvable and the founder's CI
+          on the publish PR builds the site.
         - article_review_preview_failed: no preview at all; the run is blocked
           with a classified reason (failure kind, failing file, attribution).
         - article_review_preview_not_available: the run cannot produce a
@@ -6417,9 +6452,15 @@ class ContentFactoryCallbackView(APIView):
         title = str(data.get('title') or '').strip()
         article_label = f' for "{title}"' if title else ''
 
+        approval_basis = str(data.get('approval_basis') or '').strip()
         if event_type == 'article_review_preview_fallback_ready':
             job_status = 'needs_review'
-            summary_text = 'Fallback preview ready for review; publish requires the exact build.'
+            if approval_basis == 'stand_in_preview':
+                summary_text = 'Stand-in preview ready for approval. The website\'s own checks build the real page.'
+            elif approval_basis == 'article_text':
+                summary_text = 'Article text ready for approval. The website\'s own checks build the real page.'
+            else:
+                summary_text = 'Fallback preview ready for review; publish requires the exact build.'
             stored_error = ''
         elif event_type == 'article_review_preview_not_available':
             job_status = 'blocked'
@@ -6455,7 +6496,18 @@ class ContentFactoryCallbackView(APIView):
                 exc,
             )
 
-        if event_type == 'article_review_preview_fallback_ready':
+        if event_type == 'article_review_preview_fallback_ready' and approval_basis in {
+            'stand_in_preview', 'article_text',
+        }:
+            surface = 'stand-in preview' if approval_basis == 'stand_in_preview' else 'article text'
+            text = (
+                f":mag: *Ready for approval from the {surface}{article_label}* ({domain})\n"
+                "The website's own preview build did not finish. Approve it and we will open a pull "
+                "request; the website's own checks then build the real page."
+            )
+            if fallback_preview_url:
+                text += f"\nPreview: {fallback_preview_url}"
+        elif event_type == 'article_review_preview_fallback_ready':
             text = (
                 f":mag: *Fallback preview ready for review{article_label}* ({domain})\n"
                 "The exact site build is unavailable, so this preview uses a fallback render. "
@@ -7324,6 +7376,44 @@ class ContentFactoryCallbackView(APIView):
             'message': 'Article complete callback processed',
             'job_id': job_id,
         }, status=status.HTTP_200_OK)
+
+    def _handle_research_empty(self, data):
+        """A scheduled research night that found nothing new (B23).
+
+        Content Factory completed the run empty. The paid slot gets its points
+        back, the automation run completes, and no failure or alert is raised.
+        Only a run the backend scheduled can arrive here; a founder-started run
+        still fails as their ask.
+        """
+        from content_factory.run_backend_facts import save_job_facts
+        from content_factory.models import ContentFactoryJob
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+        from integrations.services.notification_adapters import (
+            research_empty_applies, resolve_automation_run, send_research_empty)
+        from integrations.utils import normalize_domain
+
+        job_id = str(data.get('job_id') or data.get('run_id') or '')
+        run = resolve_automation_run(data.get('notification_context'))
+        # Check before refunding: a late empty callback for a night that already
+        # delivered topics, or for another job, must not credit anything back.
+        if (not research_empty_applies(run, data)
+                or normalize_domain(run.automation.organization.domain) != normalize_domain(data.get('domain') or '')):
+            return Response({'status': 'ignored', 'reason': 'no_scheduled_automation_run', 'job_id': job_id})
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first() if job_id else None
+        refunded, refund_points = False, 0
+        if job is not None:
+            refunded, refund_points = maybe_auto_refund_terminal_failure(
+                job, error_code='NO_OPPORTUNITIES',
+                error_message='Research found nothing new.', refundable=True)
+            job.status = 'completed'
+            job.error_message = ''
+            save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
+        deliveries = send_research_empty(data)
+        logger.info('research_empty job=%s automation_run=%s reason=%s refunded=%s',
+                    job_id, run.id, data.get('empty_reason'), refunded)
+        return Response({'status': 'received', 'job_id': job_id, 'outcome': 'empty',
+                         'refunded_points': refund_points if refunded else 0,
+                         'notified': bool(deliveries)}, status=status.HTTP_200_OK)
 
     def _handle_error(self, data):
         """Handle error event from content-factory."""
@@ -9235,6 +9325,11 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 if key in (existing_run.result or {}):
                     result[key] = existing_run.result[key]
             data["result"] = result
+            if data.get("status") == "blocked" and result.get("review_required"):
+                # A saved draft waiting for the founder's factual review is
+                # finished work, not an open run that blocks the next draft.
+                data["status"], data["resume_available"] = "completed", False
+                active_snapshot = False
         if active_snapshot:
             # Clean after the Django-owned merge as a final invariant: no local
             # augmentation may reintroduce a blocker into an active snapshot.
@@ -9308,6 +9403,8 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
 
     from .island_research import refund_empty_or_failed_research
     refund_empty_or_failed_research(run)
+    from .no_generic_stop import alert_generic_stop
+    alert_generic_stop(run)  # B10: staff hear about a generic stop at once.
     if (getattr(settings, "ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
             or getattr(settings, "ARTICLES_SELF_HEAL_REPORT_ENABLED", False)):
         _record_p2_pull_request(run, previous_pr_url)
@@ -9605,8 +9702,9 @@ class ContentFactoryRunValleyJobView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
-        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
         if not run:
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 

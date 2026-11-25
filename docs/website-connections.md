@@ -29,7 +29,7 @@ The separate `action=portable` validates the current reviewed tuple and any supp
 
 The token endpoint's closed `permission_profile` is `repository` by default. `workflow_files` adds only `workflows:write` and requires explicit write mode plus a real setup, approved cleanup or restoration operation; read, publication and merge cannot request it. App and installation grants are read outside authority locks, then the original connection and operation are checked again. The profile and immutable repository ID isolate credential caches. `preflight=1` with this profile checks grants and fences without minting a token or creating credential references. It returns actual grant permissions with `permissions_source=installation_grant`; an issued token returns its actual narrowed permissions. Missing Workflows approval returns nonretryable HTTP 409 `github_workflow_permission_required`, with `required_permission=workflows:write`. The App owner must review Workflows read/write and the repository owner must approve the installation update; this API never changes either grant or falls back to OAuth/PAT access. Workflow-producing setup must run this preflight before model work or branch writes. A pending or missing native CI contract never certifies publication readiness.
 
-Inventory is saved through config PUT as `repository_inventory` with an exact `source_sha`, `discovery_complete`, and evidence. Inventory-only updates preserve targets/templates and never create publishing readiness. Target verification requires `verification.status=passed|verified` and `verification.source_sha` equal to the evidence source SHA. Detection metadata alone is insufficient. The worker is responsible for build/render verification and exact source identity.
+Inventory is saved through config PUT as `repository_inventory` with an exact `source_sha`, `discovery_complete`, and evidence. Inventory-only updates preserve targets/templates and never create publishing readiness. Target verification requires `verification.status=passed|verified` and `verification.source_sha` equal to the evidence source SHA. Detection metadata alone is insufficient. For older inventories, the journey also reads the framework from `repository_inventory.tech_stack.framework` when the explicit framework fields are absent. Setup uses that hint only for a matching source revision. The worker is responsible for build/render verification and exact source identity.
 
 Once a target has accepted verification at the current source, worker scan/config
 writes may replay that exact stored contract but cannot change its publishing
@@ -88,9 +88,37 @@ summaries include up to twenty operation IDs, actions and outcomes.
 
 Preparation uses the scan's listing route (`existing` mode), or creates `/articles`
 in `none` mode only when inventory confirms no listing. A saved owner route takes
-precedence. Several ambiguous routes return `needs_user` with
-`user_action.id=choose_articles_page`; unchanged facts after a successful step stop
-with `prepare_no_progress`. Deterministic child failures link to the failed run,
+precedence. Several ambiguous routes never park a founder on an ask their journey
+does not show (decision D3): MLAI picks the scan's preferred listing, else the first
+ranked candidate, and records `receipt.article_page_choice` (`{version:1,
+chosen_by:"mlai", mode, route, alternatives, reason, changeable:true}`). The
+founder chooses instead (`needs_user` with `user_action={id:choose_articles_page,
+candidates}`, projected by website status v1 with `candidates`, `repository` and
+`operationId`) only when their recorded setup consent says `page_policy=pick`, or
+for a legacy-cohort site while `ARTICLES_AUTO_PAGE_ENABLED` is off. Any website
+operation resting in `needs_user` on an action the new journey retired
+(`founder_journey.RETIRED_ACTIONS`) raises one `founder_stuck` staff alert of kind
+`operation_retired_ask`. Unchanged facts after a successful step stop
+with `prepare_no_progress`.
+
+While `ARTICLES_LIVE_URL_VERIFICATION_ENABLED` is on, `deploy_site` is no longer
+retired (plan C14). The ready-on-merge live-status watch proves the deploy link at
+setup: one hour after the merge without the marker, website status v1 shows
+`liveStatus.action={id:deploy_site,label,url}` with copy for the host class
+(Lovable, Vercel, Netlify, Cloudflare, GitHub Pages or unknown, from the Content
+Factory site fingerprint, the domain or the deployment provider). A served marker
+records `deploy_link=proven` on the watch receipt. After every article merge the
+scheduled `article_live_checks` runner (throttled to ten minutes, fourteen-day
+window) fetches the article's canonical URL through the same SSRF guard. An
+article counts as published only when its live check passes. A merged article
+that still 404s or serves other content one hour after the merge raises one
+`founder_stuck` alert of kind `article_not_live` per merge commit, shows
+`articleLive.state=not_live`, and Home asks `deploy_site` in the publishing
+stage. The founder is told "our team has been told" (`articleLive.staffAlerted`)
+only once that alert is queued, so never with `ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED`
+off. The runner re-checks the least recently checked articles first. Drafts in review and articles being written are never blocked by the
+live check. With the flag off, merged articles still count as published and
+`deploy_site` stays retired. Deterministic child failures link to the failed run,
 while explicitly retryable worker failures retain bounded retries. Owners may cancel
 an active or waiting prepare operation and explicitly reopen it with another Prepare
 click; cancelling fences its child and queues the ordinary run cancellation path.
@@ -100,6 +128,27 @@ route and original connection tuple must match; its own workflow operation remai
 unchanged. A callback that wakes preparation before the handoff is saved adopts the
 same saved child, and bounded waiting while dispatch is in flight prevents a second
 setup request. A directly blocked child retains its actual failure prompt.
+
+Repository selection (plan E8). `GET /github/repos` ranks the founder's
+repositories (homepage equals the domain, the domain in `CNAME` or the wrangler,
+Vercel or Netlify config, a name that matches the brand, a web framework
+manifest, a recent push; archived repositories and forks rank last) and returns
+`suggestion={repo,reasons,looksLikeWebsite,warning,nothingVisible,ranked}`. A
+clear winner is only preselected as `selectedRepo`; saving the choice is still
+what binds it. File probes mint a read-only token per candidate inside the
+founder's own installation, read at most the root listing and three host-config
+files of the top five, and are cached for ten minutes. Binding a different
+repository reads the installation's existing grants first: no contents (or pull
+request) access refuses with `github_access_required` and
+`fieldErrors[0].reason=contents_permission_missing` (or
+`pull_requests_permission_missing`, `installation_suspended`). After binding,
+the deploy branch's rules and protection and the founder's own repository
+permission are stored in `WebsiteConnection.capabilities.mergeAbility` for that
+generation and branch. When the founder cannot merge alone (a required review,
+code owners or read-only access), or GitHub refused a merge for a required
+review, the journey's `approve_on_github` ask becomes `send_pr_to_reviewer` with
+the pull request as the share link. Only the ask changes: every merge still
+re-reads the live branch policy and merges the exact validated head.
 
 The `permissions` prerequisite sits between inventory and integration. Read-only
 App JWT grant checks for `workflow_files` and `ci_evidence` cache results for sixty
@@ -340,7 +389,19 @@ merge (`merge_sha`, `merged_at`, `merge_response.source=github_owner_merge`),
 unless the run changed or already records a merge commit. Setup settlement and
 CI lineage accept that merge as they accept MLAI's Publish; without a
 `publish_merge_intent` it is never a goal `backend_merge`. Other pushes report
-`repository_source_changed` and additionally queue a fresh inventory scan. The
+`repository_source_changed` and additionally queue a fresh inventory scan, except
+on a connection whose current generation was never verified (no verified commit,
+no publishing-ready capability, no verified target): that push records the
+observed head and wakes preparation, and sets no blocker, drops no capability and
+queues no source check. Either verification path (CI attestation or live URL)
+clears `scan_required` with `repository_source_changed`. Preparation that sees the
+head move (`website_source_changed`, `SOURCE_CHANGED`) restarts from a scan of the
+current head by itself, at most three times, and "Try again" always restarts from
+a fresh scan. After a setup-merge Ready, a carried push keeps the worker's
+projected proof (`website_setup_merge_proof.worker_publish_targets`) only for a
+carriable target, along source-reverify carries this backend recorded back to the
+reviewed merge, with the live proof and its deployment receipt at the current
+head; sealed and custom targets keep exact-commit proof. The
 reconciler authenticates current-source provider CI and observes listing/detail/
 unknown-slug deployment routes before enabling the new source. A failed or
 missing proof remains pending with its typed reason; inventory timestamps cannot
@@ -546,3 +607,21 @@ that article work stopped or delivered no value. The existing worker receipt
 guard still protects run state and original payment evidence; typed unknown
 stops retain reconciliation obligations after PR cleanup. Setup-only typed stops
 can finish cancellation without closing the website's setup PR.
+
+## Baseline build probes and portable article starts
+
+With `ARTICLES_REPO_HEALTH_ENABLED`, a website bind and every selected-branch push queue a free baseline build. The scheduler also enrolls a bounded number of existing connections updated since the configured founder alert history horizon. Set ARTICLES_REPO_HEALTH_SHADOW_ENABLED to count eligible connections and due probes without dispatching or gating starts. Content Factory accepts the service-authenticated `POST /api/repo-health/probes`. Django issues a probe ID and random dispatch nonce bound to the organisation/domain, website connection and generation, GitHub installation and immutable repository, selected branch, application root and commit. A lost acknowledgment reuses the same identity. The builder returns the same tuple to `POST /api/content-factory/repo-health/authorize` before reading the repository and to `POST /api/content-factory/repo-health/result` with the `repo_health_build_probe.v1` result. Both accept the existing internal service key. Successful receipts are idempotent. Stale or revoked bindings return 409, unavailable source verification returns 503 and disabled endpoints return 404.
+
+The result stores its classification and commit. Build output stays out of the database. A result can arrive after the six-hour reconciliation deadline, provided its identity and source are still current. Staff can look up a stalled probe by operation ID. Qualify the Content Factory worker on an owned site before turning on the backend flag because it gates a connected article charge. A missing probe never grants publication authority.
+
+`ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED` enables explicit private draft starts before website setup for both founder cohorts. The first-article card creates a content-only request. For other starts send `delivery_mode=content_only` and `delivery_mode_confirmed=true`. Starting this way grants no repository, merge or publication rights. Clients can opt in to private draft review annotations on the article-review GET or POST using `?draft_review_findings=1`. These annotations carry no preview or publication identity.
+
+A Content Factory rescan can request `static_setup_review` from the authenticated `GET /api/content-factory/org/config` by supplying the selected `domain`, `github_repo` and exact `static_setup_source_sha`. Django returns the approved run, PR number, branch and source, reviewed and merged commits only for the current connection generation. For a manual GitHub merge it checks the PR's repository, branch, head, merged commit and matching source trees. The scan submits the same reviewed candidate as provisional. Its build can be checked independently. Publishing remains gated on the deployed directory linking the verified detail and on the missing route returning 404. A later commit needs its own evidence.
+
+### Reopen a saved article preview
+
+Founders can opt into the saved-preview projection on their existing article-review GET or POST with `preview_recovery=1`. The top-level `previewRecovery` carries the saved draft revision, effective preview type and revision, state, reason, permitted actions, owned job and deadline, and `pollAfterMs`. A null poll interval means the preview work has settled. Existing canonical review envelopes retain their closed schema. A denied historical article can retain privately downloadable Markdown, HTML and media. Its old failure, approval, charge and publication state are preserved.
+
+`ARTICLES_SAVED_PREVIEW_RECOVERY_ENABLED` controls dispatch and service credentials. It defaults to false. The separate comma-separated `ARTICLES_SAVED_PREVIEW_RECOVERY_DOMAINS` admits exact startup domains and defaults to `mlai.au`. A new reservation also requires an affirmative builder-capability response from the negotiated Content Factory read and conclusive evidence that the deployment is gone. An unknown preview receives a bounded read-only probe first. For a scoped returning founder, opening the draft reserves one recovery only if Backend can compare an immutable scan from before admission against the currently selected, verified target and build contract. A version number or matching target key alone is insufficient. A still-authorized founder whose historical target recipe is missing can receive a `destinationOffer` naming the repository, branch and directory. Explicitly selecting it sends `{"action":"confirmPreviewDestination","expectedRevision":"…","offerId":"…"}` to the same review endpoint. A current automatically provable destination also accepts `{"action":"recoverPreview","expectedRevision":"…"}`. Both commands preserve draft and billing identity. A source, principal, repository, connection, deletion, target or credential change invalidates the grant.
+
+The per-revision operation uses the existing on-commit executor and due-operation sweep, an immutable scope, and a 20-minute deadline. Content Factory reauthorizes at the source and deployment steps. Its separate token endpoint can mint a read-only credential for the exact repository. The builder receives no write authority. A ready callback schedules readback of the current review revision and authenticated artifact. The browser uses the original founder-scoped preview lease and proxy. A missing or expired proof hides the frame. Expiry of a previously proven deployment can produce one successor, capped at three operations in 24 hours for the revision. An old callback can affect only its own operation. Turning dispatch off leaves the saved draft available for review.

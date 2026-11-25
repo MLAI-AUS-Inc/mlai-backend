@@ -132,6 +132,97 @@ class NotificationTests(TransactionTestCase):
         transitions.drain(self.now + timedelta(hours=73))
         self.assertEqual(len(self.sent), 1)
 
+    def observe_at(self, run, at, *, budget=None, ask="review_draft"):
+        with transaction.atomic():
+            config = OrganizationContentConfig.objects.select_for_update().get(pk=self.fixture.config.pk)
+            config.organization = self.org
+            state = {"state": "your_turn", "ask": ask, "run_id": run.run_id, "run": run}
+            return transitions.observe(config, "article:" + run.run_id, state, now=at, budget=budget)
+
+    def old_ready(self, days=10):
+        from workflow_runs.models import ContentFactoryRun
+        run = self.ready()
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=self.now - timedelta(days=days))
+        run.refresh_from_db()
+        return run
+
+    def queued_items(self):
+        outbox = transitions.mapping(transitions.mapping(OrganizationContentConfig.objects.get(
+            pk=self.fixture.config.pk).pillar_strategy.get("founder_notices")).get("outbox"))
+        return outbox.values()
+
+    def test_turning_reminders_on_for_a_cohort_of_old_asks_sends_at_most_the_cap(self):
+        runs = [self.old_ready() for _ in range(transitions.FIRST_RUN_SEND_CAP + 3)]
+        budget = transitions.first_run_budget()
+        for run in runs:
+            self.observe_at(run, self.now, budget=budget)
+        items = {notice["item"] for notice in self.queued_items()}
+        self.assertEqual(len(items), transitions.FIRST_RUN_SEND_CAP)
+        self.assertEqual(budget["deferred"], 3)
+        # The next sweep's allowance picks up the rest; nothing is sent twice.
+        later = transitions.first_run_budget()
+        for run in runs:
+            self.observe_at(run, self.now + timedelta(minutes=5), budget=later)
+        self.assertEqual(len({notice["item"] for notice in self.queued_items()}), len(runs))
+        self.assertEqual(len(self.queued_items()), 2 * len(runs))
+
+    def test_a_backlog_ask_gets_one_follow_up_only(self):
+        run = self.old_ready()
+        self.assertEqual(self.observe_at(run, self.now, budget=transitions.first_run_budget()), 2)
+        self.assertEqual(self.observe_at(run, self.now + timedelta(hours=24)), 2)
+        self.assertEqual(self.observe_at(run, self.now + timedelta(hours=72)), 0)
+        self.assertEqual(sorted(notice["event"] for notice in self.queued_items()),
+            ["your_turn", "your_turn", "your_turn_reminder_24h", "your_turn_reminder_24h"])
+
+    def test_reminders_switched_on_late_send_one_catch_up_within_the_cap(self):
+        fresh = [self.ready() for _ in range(transitions.FIRST_RUN_SEND_CAP + 2)]
+        with self.settings(MY_STARTUP_TURN_REMINDERS_ENABLED=False):
+            for run in fresh:
+                self.observe_at(run, self.now)
+        budget = transitions.first_run_budget()
+        late = self.now + timedelta(hours=100)
+        for run in fresh:
+            self.observe_at(run, late, budget=budget)
+        reminders = [notice for notice in self.queued_items() if notice["event"].startswith("your_turn_reminder")]
+        # The 24 h rung was overtaken: only the 72 h rung, once per ask, within the cap.
+        self.assertEqual({notice["event"] for notice in reminders}, {"your_turn_reminder_72h"})
+        self.assertEqual(len({notice["item"] for notice in reminders}), transitions.FIRST_RUN_SEND_CAP)
+        self.assertEqual(budget["deferred"], 2)
+        for run in fresh:
+            self.observe_at(run, late + timedelta(hours=200), budget=transitions.first_run_budget())
+        reminders = [notice for notice in self.queued_items() if notice["event"].startswith("your_turn_reminder")]
+        self.assertEqual(len({notice["item"] for notice in reminders}), len(fresh))
+        self.assertEqual(len(reminders), 2 * len(fresh))
+
+    def test_a_new_ask_on_the_same_item_gets_its_own_reminder(self):
+        run = self.ready()
+        self.observe_at(run, self.now)
+        self.assertEqual(self.observe_at(run, self.now + timedelta(hours=24)), 2)
+        later = self.now + timedelta(hours=30)
+        self.observe_at(run, later, ask="approve_on_github")
+        self.assertEqual(self.observe_at(run, later + timedelta(hours=24), ask="approve_on_github"), 2)
+        reminders = [(notice["event"], notice["ask"]) for notice in self.queued_items()
+                     if notice["event"].startswith("your_turn_reminder")]
+        self.assertIn(("your_turn_reminder_24h", "approve_on_github"), reminders)
+
+    def test_first_notices_of_old_live_articles_spend_the_cap(self):
+        from workflow_runs.models import ContentFactoryRun
+        runs = []
+        for _ in range(transitions.FIRST_RUN_SEND_CAP + 2):
+            run = self.make_run({"deploy_v1": {"url": "https://synthetic.example/post"}}, status="completed")
+            ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=self.now - timedelta(days=30))
+            run.refresh_from_db()
+            runs.append(run)
+        budget = transitions.first_run_budget()
+        for run in runs:
+            with transaction.atomic():
+                config = OrganizationContentConfig.objects.select_for_update().get(pk=self.fixture.config.pk)
+                config.organization = self.org
+                transitions.observe(config, "article:" + run.run_id, {"state": "done", "ask": None,
+                    "run_id": run.run_id, "run": run}, now=self.now, budget=budget)
+        self.assertEqual(budget["deferred"], 2)
+        self.assertLessEqual(len({notice["item"] for notice in self.queued_items()}), transitions.FIRST_RUN_SEND_CAP)
+
     def test_lost_provider_ack_retries_exact_frozen_payload_and_key(self):
         run = self.ready()
         self.reserve(run)
@@ -185,21 +276,23 @@ class NotificationTests(TransactionTestCase):
         self.reserve(run)
         with patch.object(transport, "post_email", side_effect=transport.NotificationTransportError("email_response_unavailable")):
             transitions.drain(self.now)
-        self.owner.email = "changed@synthetic.example"
-        self.owner.save(update_fields=["email"])
+        User.objects.filter(pk=self.owner.pk).update(email="changed@synthetic.example")
         transitions.drain(self.now + timedelta(minutes=3))
         self.assertEqual(self.sent, [])
 
     def test_journey_precedence_rules_a_to_j_and_completed_channel_evidence(self):
         cases = [
-            ({"error_code": "UNREGISTERED_EXAMPLE"}, "failed", "working"),
+            # B10: an unregistered terminal code is never a generic stop; it reads "fixing".
+            ({"error_code": "UNREGISTERED_EXAMPLE"}, "failed", "fixing"),
             ({"strict_pass_v1": {"claims": 1}}, "running", "ask_check_highlighted"),
             ({"draft_ready_v1": {"version": 1, "at": self.now.isoformat(), "revision": "r1"}}, "running", "ask_review_draft"),
             ({"error_code": "SITE_TEST_CHANGE_REQUIRED"}, "blocked", "ask_approve_on_github_site_test"),
             ({"error_code": "BRANCH_PROTECTION_APPROVAL_REQUIRED"}, "blocked", "ask_approve_on_github_protected"),
             ({"error_code": "DEPLOYMENT_NOT_DETECTED"}, "completed", "working_website_update"),
             ({"publish_pr_v1": {"kind": "article"}}, "completed", "working_publishing"),
-            ({"error_code": "VALIDATION_ERROR", "self_heal_v1": {"capped": True}, "points_v1": {"state": "refunded", "points": 12}}, "failed", "stopped"),
+            ({"error_code": "SYNC_FAILED", "self_heal_v1": {"capped": True}, "points_v1": {"state": "refunded", "points": 12}}, "failed", "stopped"),
+            # B23: VALIDATION_ERROR is the founder's add-seed-topics ask now, refunded or not.
+            ({"error_code": "VALIDATION_ERROR", "self_heal_v1": {"capped": True}, "points_v1": {"state": "refunded", "points": 12}}, "failed", "ask_add_seed_topics"),
         ]
         for result, status, copy_id in cases:
             run = self.make_run(result, status=status)
@@ -251,7 +344,9 @@ class NotificationTests(TransactionTestCase):
                 before = journeys.project_founder_journey(legacy.organization, user=legacy.owner, company=legacy.company)
             after = journeys.project_founder_journey(legacy.organization, user=legacy.owner, company=legacy.company)
             self.assertEqual(before, after)
-            self.assertFalse(transitions.owns_notifications(legacy.organization))
+            # Plan E7 (D14, D15): the ladder owns every cohort's sends, so the
+            # goal notifier stands down for legacy startups too.
+            self.assertTrue(transitions.owns_notifications(legacy.organization))
 
     def test_flagoff_and_two_actual_claims_cannot_send_twice(self):
         with override_settings(MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED=False):

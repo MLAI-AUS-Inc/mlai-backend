@@ -42,6 +42,7 @@ FLAG_KEYS = (
     "COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED",
     "MY_STARTUP_ONE_FIELD_START_ENABLED",
     "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED",
+    "MY_STARTUP_ONBOARDING_V3_ENABLED",
     "ARTICLES_FIRST_ARTICLE_CARD_ENABLED",
     "ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED",
     "ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED",
@@ -55,6 +56,115 @@ FLAG_KEYS = (
     # existing founder journey alerts (founder_journey_alerts._ack_due_applies).
     # Empty keeps the host value; only an explicit operator true/false installs.
     "MY_STARTUP_STAFF_CONSOLE_ENABLED",
+    # Every other founder Articles, My startup and Content Factory switch, so a
+    # release can set any of them and none can only be changed by hand on the
+    # host. Empty keeps the host value; no default changes. The stuck-founder
+    # alert, the three GitHub linking kill switches below it, the stand-in
+    # preview approval switch, the ready-on-merge and no-workflow kill
+    # switches, ARTICLES_SOURCE_FOLLOW_ENABLED,
+    # ARTICLES_PROOF_CARRY_FORWARD_ENABLED,
+    # ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED,
+    # ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED,
+    # ARTICLES_PREPARE_STICKY_STOP_ENABLED,
+    # ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED,
+    # CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK,
+    # ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED and
+    # ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED are on by default.
+    "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
+    "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
+    "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
+    "ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED",
+    "ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED",
+    "ARTICLES_READY_ON_MERGE_ENABLED",
+    # Cross-repo dependency: with ARTICLES_LIVE_URL_VERIFICATION_ENABLED on,
+    # this switch sends verification_mode=hosted for every cohort, which needs
+    # Content Factory's CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED=true
+    # (check with CF's articles_rollout_inspection before a release). This repo
+    # cannot read CF's value, so turn this off if CF's is false.
+    "ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED",
+    "ARTICLES_STAFF_ALERT_RULES_ENABLED",
+    "ARTICLES_STAFF_ESCALATION_LADDER_ENABLED",
+    "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",
+    "ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED",
+    "ARTICLES_FAILURE_POLICY_V2_ENABLED",
+    "ARTICLES_SELF_HEAL_POLICY_ENABLED",
+    "ARTICLES_SELF_HEAL_REPORT_ENABLED",
+    "ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED",
+    "ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED",
+    "ARTICLES_DISPATCH_RELIABILITY_ENABLED",
+    "ARTICLES_NO_CODELESS_TERMINAL_ENABLED",
+    "ARTICLES_NO_GENERIC_STOP_ENABLED",
+    "ARTICLES_REGISTRY_REFUNDS_ENABLED",
+    "ARTICLES_CHANNEL_SWITCH_ENABLED",
+    "ARTICLES_SOURCE_REPIN_ENABLED",
+    "ARTICLES_SOURCE_FOLLOW_ENABLED",
+    "ARTICLES_PROOF_CARRY_FORWARD_ENABLED",
+    "ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED",
+    "ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED",
+    "ARTICLES_PREPARE_STICKY_STOP_ENABLED",
+    "ARTICLES_SOURCE_SYNC_ENABLED",
+    "ARTICLES_SETUP_LADDER_ENABLED",
+    "ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED",
+    "MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED",
+    "ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED",
+    "CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK",
+    "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED",
+    "ARTICLES_MERGE_WORKER_ENABLED",
+    "ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED",
+    "ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED",
+    "ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED",
+    "ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED",
+    "MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED",
+    "MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED",
+    "MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED",
+    "MY_STARTUP_TURN_REMINDERS_ENABLED",
+    "MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED",
+    "MY_STARTUP_TEAM_ENABLED",
+    "MY_STARTUP_SHARED_ACCESS_ENABLED",
+    "MY_STARTUP_EMAIL_INVITES_ENABLED",
+    "MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED",
+    "MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED",
+    "MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED",
+    "MY_STARTUP_DELIVERY_LINKS_ENABLED",
+    "ARTICLES_RUN_OWNERSHIP_ENABLED",
+    "ARTICLES_RUN_FACT_AUTHORITY_ENABLED",
+    "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED",
+    "ARTICLES_RUN_SDK_CONTROL_ENABLED",
+    "ARTICLES_SAVED_PREVIEW_RECOVERY_ENABLED",
+    "ARTICLES_ARTICLE_RECOVERY_ENABLED",
+    "ARTICLES_HOSTED_VERIFICATION_ENABLED",
+    "ARTICLES_HOSTED_ENVIRONMENT_RECOVERY_ENABLED",
+    "ARTICLES_HOSTED_ATTESTATION_ENABLED",
+    "ARTICLES_PUBLISHING_INPUTS_V3_ENABLED",
+    "ARTICLES_DEPLOYMENT_DETECTION_ENABLED",
+    "ARTICLES_SITE_FINGERPRINT_ENABLED",
+    "ARTICLES_EXISTING_INVENTORY_DISPLAY_ENABLED",
+    "ARTICLES_GOAL_NOTIFICATIONS_ENABLED",
+    "ARTICLES_SETUP_CONSENT_ENABLED",
+    "ARTICLES_AUTO_PAGE_ENABLED",
+    "ARTICLES_WEBSITE_STRATEGY_ENABLED",
+    "ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED",
+    "ARTICLES_COST_ACCOUNTING_ENABLED",
+    "ARTICLES_OPERATIONAL_ALERTS_ENABLED",
+    "ARTICLES_WEBSITE_EVENT_WAKES_ENABLED",
+    "ARTICLES_WEBSITE_DOCTOR_ENABLED",
+    "ARTICLES_WEBSITE_STATUS_V1_ENABLED",
+    "ARTICLES_WEBSITE_CONSISTENCY_ENABLED",
+    "ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED",
+    "ARTICLES_FAILURE_TAXONOMY_OBSERVE_ENABLED",
+    "ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED",
+    "CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED",
+    "CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED",
+    "CONTENT_FACTORY_SETUP_DELIVERY_RECONCILIATION_ENABLED",
+    "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED",
+    "WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED",
+    "ARTICLES_REPO_HEALTH_SHADOW_ENABLED",
+    "ARTICLES_REPO_HEALTH_ENABLED",
+    "ARTICLES_REPO_HEALTH_FIX_PR_ENABLED",
+    "ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED",
+    "ARTICLES_STAFF_HOLD_ALERTS_ENABLED",
+    "ARTICLES_AUTHOR_BIO_CHECK_ENABLED",
+    "ARTICLES_HONEST_RETRY_STATUS_ENABLED",
 )
 # 0 means "no cap", "off" or, for the queue slots, "no ETA".
 COUNT_KEYS = (
@@ -63,6 +173,10 @@ COUNT_KEYS = (
     "ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP",
     "ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD",
     "CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS",
+    # Setup runs per website preparation (default 3, 0 = no cap).
+    "ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT",
+    # Service source rescans per website in 24 hours (default 6, 0 = none).
+    "ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP",
 )
 # 0 is refused: the sweep reads it as 1, and a per-IP sign-in limit of 0 removes
 # that ceiling altogether. Raise a limit for a large event instead.
@@ -83,16 +197,26 @@ WORKSHOP_WINDOWS = "ARTICLES_WORKSHOP_WINDOWS"
 # Startups created at or after this time join the new journey. The backend
 # ignores a naive time, which would leave the launch silently switched off.
 JOURNEY_LAUNCHED_AT = "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT"
+# Startups created at or after this time confirm their details (onboarding v3).
+ONBOARDING_LAUNCHED_AT = "MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT"
 # Per-organisation kill switch: organisation ids or domains, comma separated.
 # An empty release value keeps the host's list, so clear it with "none".
 JOURNEY_DISABLED_ORGANIZATIONS = "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS"
 # A Django REST framework rate such as 30/minute. A malformed one breaks every
 # invite resolve at request time.
 INVITE_RESOLVE_RATE = "COMMUNITY_CHAT_INVITE_RESOLVE_RATE"
+# The backend's model allowance for a maintained SDK setup run (plan B14): a
+# positive dollar amount and a positive token count. The SDK control switch
+# needs both; without them a setup run reaches Content Factory with no ceiling.
+SDK_CONTROL_FLAG = "ARTICLES_RUN_SDK_CONTROL_ENABLED"
+CONTROL_USD = "ARTICLES_RUN_CONTROL_MODEL_USD"
+CONTROL_TOKENS = "ARTICLES_RUN_CONTROL_MODEL_TOKENS"
+MAX_CONTROL_TOKENS = 20_000_000
 DISCOVERY_RECONCILIATION_SINCE = "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE"
 NIGHTLY_RECONCILIATION_SINCE = "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE"
-KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS,
-        JOURNEY_LAUNCHED_AT, JOURNEY_DISABLED_ORGANIZATIONS, INVITE_RESOLVE_RATE, DISCOVERY_RECONCILIATION_SINCE, NIGHTLY_RECONCILIATION_SINCE)
+RECOVERY_DOMAINS = "ARTICLES_SAVED_PREVIEW_RECOVERY_DOMAINS"
+KEYS = (RECOVERY_DOMAINS, *FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS, CONTROL_USD, CONTROL_TOKENS,
+        JOURNEY_LAUNCHED_AT, ONBOARDING_LAUNCHED_AT, JOURNEY_DISABLED_ORGANIZATIONS, INVITE_RESOLVE_RATE, DISCOVERY_RECONCILIATION_SINCE, NIGHTLY_RECONCILIATION_SINCE)
 MAX_DISABLED_ORGANIZATIONS_LENGTH = 2000
 
 MAX_WORKSHOP_WINDOWS = 50
@@ -148,6 +272,13 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     elif key in POSITIVE_KEYS:
         if not re.fullmatch(r"[1-9][0-9]{0,8}", value):
             raise ValueError(f"{key} must be a whole number of 1 or more")
+    elif key == CONTROL_USD:
+        # The same shape the backend accepts when it issues the allowance.
+        if not re.fullmatch(r"[0-9]{1,7}(?:\.[0-9]{1,12})?", value) or float(value) <= 0 or float(value) > 1_000_000:
+            raise ValueError(f"{key} must be a positive dollar amount")
+    elif key == CONTROL_TOKENS:
+        if not re.fullmatch(r"[1-9][0-9]{0,7}", value) or int(value) > MAX_CONTROL_TOKENS:
+            raise ValueError(f"{key} must be a whole number from 1 to {MAX_CONTROL_TOKENS}")
     elif key == ALERTS_SINCE:
         try:
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
@@ -155,9 +286,12 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
             date.fromisoformat(value)
         except ValueError as exc:
             raise ValueError(f"{key} must be an ISO date (YYYY-MM-DD)") from exc
+    elif key == RECOVERY_DOMAINS:
+        if len(value)>2000 or any(not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+",domain.strip()) for domain in value.split(",")):
+            raise ValueError(f"{key} must contain exact, comma-separated startup domains")
     elif key == WORKSHOP_WINDOWS:
         _validate_workshop_windows(key, value)
-    elif key == JOURNEY_LAUNCHED_AT:
+    elif key in {JOURNEY_LAUNCHED_AT, ONBOARDING_LAUNCHED_AT}:
         if _window_time(value) is None:
             raise ValueError(f"{key} must be an ISO 8601 time with an explicit offset")
     elif key in {DISCOVERY_RECONCILIATION_SINCE, NIGHTLY_RECONCILIATION_SINCE}:
@@ -178,6 +312,12 @@ def validate(environment: dict[str, str]) -> None:
     """Validate every Articles setting a release may carry; each may be left empty."""
     for key in KEYS:
         validate_single(key, environment.get(key, ""), optional=True)
+    if environment.get(SDK_CONTROL_FLAG, "") == "true":
+        # B14: a release that switches SDK control on carries its positive
+        # allowance too, rather than trusting whatever the host holds.
+        missing = [key for key in (CONTROL_USD, CONTROL_TOKENS) if not environment.get(key, "")]
+        if missing:
+            raise ValueError(f"{SDK_CONTROL_FLAG}=true needs positive {' and '.join(missing)} in the same release")
 
 
 if __name__ == "__main__":

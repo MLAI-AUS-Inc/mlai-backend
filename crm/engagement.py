@@ -14,7 +14,10 @@ from .audience_profiles import AUDIENCE_PROFILE_KEY
 
 ENGAGEMENT_RATING_KEY = "engagement_rating"
 MARKETING_REVIEW_HOLD_KEY = "marketing_review_hold"
-RESERVED_ATTRIBUTE_KEYS = frozenset((ENGAGEMENT_RATING_KEY, MARKETING_REVIEW_HOLD_KEY, "engagement_import", "engagement_activity", "engagement_refresh", "engagement_legacy_attributes", "engagement_newsletter", "crm_lifecycle", "dormant_suppressed", "source_import", "email_aliases", AUDIENCE_PROFILE_KEY))
+RESERVED_ATTRIBUTE_KEYS = frozenset((ENGAGEMENT_RATING_KEY, MARKETING_REVIEW_HOLD_KEY, "engagement_import", "engagement_activity", "engagement_refresh", "engagement_legacy_attributes", "engagement_newsletter", "crm_lifecycle", "dormant_suppressed", "source_import", "email_aliases", AUDIENCE_PROFILE_KEY,
+    # Not-on-GitHub exit leads (founder_tools.website_leads.LEADS_KEY): system-owned,
+    # so a CRM edit or CSV import never overwrites or drops them.
+    "founder_website_leads"))
 
 
 def engagement_rating(attributes) -> dict | None:

@@ -99,6 +99,18 @@ class LegacyMailboxPathTests(BlastFixtures, TestCase):
             save_mailbox(None, {"email": "bulk@mlai.au", "display_name": "MLAI"}, actor=self.admin)
         self.assertEqual(caught.exception.code, "mailbox_domain_protected")
 
+    @override_settings(CRM_LEGACY_MAILBOX_PATH_ENABLED=False)
+    def test_an_owner_can_retire_a_root_mailbox_after_the_legacy_path_ends(self):
+        owner = self.admin
+        with override_settings(CRM_DELIVERABILITY_OWNERS=(owner.email,)):
+            mailbox = save_mailbox(self.root, {"enabled": False}, actor=owner)
+            self.assertFalse(mailbox.enabled)
+            # Anything else on a protected domain is still refused, including switching it back on.
+            for change in ({"enabled": True}, {"daily_limit": 50}, {"enabled": False, "daily_limit": 5}):
+                with self.assertRaises(CrmError) as caught:
+                    save_mailbox(self.root, change, actor=owner)
+                self.assertEqual(caught.exception.code, "mailbox_domain_protected")
+
     def test_sms_and_whatsapp_paths_are_unchanged(self):
         blast = self.create_draft(channels=["sms", "whatsapp"], email={})
         self.assertIsNone(blast.stream_id)
@@ -107,6 +119,8 @@ class LegacyMailboxPathTests(BlastFixtures, TestCase):
 
 
 @override_settings(**PRODUCTION_SHAPE)
+# These tests cover the named-owner gate; production gives every admin owner access.
+@override_settings(CRM_ALL_ADMINS_ARE_OWNERS=False)
 class StreamPathStaysStrictTests(BlastFixtures, TestCase):
     def setUp(self):
         super().setUp()

@@ -16,7 +16,8 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import requests
 from django.conf import settings
 
-from roo.event_ticket_policy import EVENT_TICKET_MAX_CENTS_EXCLUSIVE
+from integrations.services.luma import calendar_manages_luma_event
+from roo.event_ticket_policy import EVENT_TICKET_MAX_CENTS_EXCLUSIVE, test_event_ids
 
 
 class LumaEventDiscountError(RuntimeError):
@@ -192,9 +193,11 @@ class LumaEventDiscountService:
         expires = _datetime(terms.get("valid_end_at"))
         event = self.get_event(event_id)
         starts = _datetime(event.get("start_at"))
-        if event.get("access") != "manage" or event.get("platform") != "luma":
+        if not calendar_manages_luma_event(event):
             raise LumaEventDiscountError("event_not_managed", "This event does not support Roo discounts.")
-        if event.get("visibility") != "public" or event.get("registration_open") is not True:
+        # A private event is allowed only when explicitly listed for testing.
+        public = event.get("visibility") == "public" or event_id in test_event_ids()
+        if not public or event.get("registration_open") is not True:
             raise LumaEventDiscountError("event_registration_closed", "Registration for this event is not open.")
         if event.get("can_register_for_multiple_tickets") is not False:
             raise LumaEventDiscountError("group_registration_enabled", "This event does not yet support a one-ticket Roo discount.")
@@ -219,6 +222,9 @@ class LumaEventDiscountService:
             raise LumaEventDiscountError("ticket_not_supported", "This ticket type does not support Roo discounts.")
         if "ticket" in terms and terms["ticket"].get("requires_approval", False) != requires_approval:
             raise LumaEventDiscountError("ticket_terms_changed", "The ticket's approval requirements changed. Ask Roo for a new quote.")
+        if "ticket" in terms and "cents" in terms["ticket"] and terms["ticket"]["cents"] != int(cents):
+            # Points are priced from the ticket; a changed price needs a new quote.
+            raise LumaEventDiscountError("ticket_terms_changed", "The ticket price changed. Choose your member perk again.")
         for field, is_end in (("valid_start_at", False), ("valid_end_at", True)):
             value = ticket.get(field)
             if value is not None:
@@ -243,6 +249,45 @@ class LumaEventDiscountService:
             "url": url, "starts_at": _iso(starts), "timezone": str(event.get("timezone") or ""),
             "ticket": {"id": ticket_id, "name": str(ticket.get("name") or ""), "cents": int(cents), "currency": "aud", "requires_approval": requires_approval},
         }
+
+    def member_perk_ticket(self, event_id, *, now=None):
+        """Pick the ticket an automatic member perk covers, or explain why none.
+
+        Only events the MLAI calendar manages on Luma itself qualify (events
+        merely listed on the calendar come back with ``access: view``). Among
+        visible, fixed-price, paid AUD tickets under A$100 that are on sale now,
+        the most expensive is chosen. ``validate_offer`` then re-checks
+        everything, including capacity, before any quote.
+        """
+        now = _datetime(now or datetime.now(timezone.utc))
+        event = self.get_event(event_id)
+        if not calendar_manages_luma_event(event):
+            raise LumaEventDiscountError("event_not_managed", "Member perks only cover events MLAI hosts on its Luma calendar.")
+        starts = _datetime(event.get("start_at"))
+        if starts <= now:
+            raise LumaEventDiscountError("event_offer_expired", "This event has already started.")
+        eligible = []
+        for ticket in self.get_ticket_types(event_id):
+            cents = _number(ticket.get("cents"))
+            if (ticket.get("type") != "paid" or ticket.get("currency") != "aud" or cents is None
+                    or cents <= 0 or cents != cents.to_integral_value() or cents >= EVENT_TICKET_MAX_CENTS_EXCLUSIVE
+                    or ticket.get("is_hidden", False) is not False or ticket.get("is_flexible", False) is not False
+                    or not isinstance(ticket.get("id"), str) or not ticket["id"]):
+                continue
+            try:
+                opens = ticket.get("valid_start_at")
+                closes = ticket.get("valid_end_at")
+                if (opens is not None and _datetime(opens) > now) or (closes is not None and _datetime(closes) <= now):
+                    continue
+                closes = _datetime(closes) if closes is not None else None
+            except LumaEventDiscountError:
+                continue
+            eligible.append((int(cents), ticket["id"], closes))
+        if not eligible:
+            raise LumaEventDiscountError("ticket_not_paid_aud", "Member perks cover paid AUD tickets priced below A$100.")
+        cents, ticket_id, closes = max(eligible, key=lambda row: (row[0], row[1]))
+        expires = min(starts, closes) if closes is not None else starts
+        return {"event_ticket_type_id": ticket_id, "cents": cents, "valid_end_at": _iso(expires), "name": str(event.get("name") or "")}
 
     def find_coupon(self, event_id, code):
         """Find a saved code, rejecting incomplete scans and duplicate matches."""

@@ -44,7 +44,8 @@ class TokenUsageAuthentication(BaseAuthentication):
             .filter(token_hash=token_hash)
             .first()
         )
-        if account is None or not account.user.is_active:
+        from .deletion_tasks import deletion_pending
+        if account is None or not account.user.is_active or deletion_pending(account.user_id):
             raise AuthenticationFailed("Token usage credential is invalid.")
         if not hmac.compare_digest(account.token_hash, token_hash):
             raise AuthenticationFailed("Token usage credential is invalid.")

@@ -99,6 +99,9 @@ class MentorProfile(models.Model):
 
 
 INVITE_TTL_DAYS = 14
+# Slack-imported people who never signed up get this address. Nobody can sign in
+# with it, so an invite to one can never be used.
+PLACEHOLDER_EMAIL_SUFFIX = '@slack.placeholder.com'
 
 
 def invite_link(token):
@@ -110,16 +113,33 @@ def hash_invite_token(token):
     return hashlib.sha256(str(token).encode('utf-8')).hexdigest()
 
 
-class MentorInvite(models.Model):
-    """A single-use, expiring invitation for one existing user to apply as a mentor.
+def is_placeholder_email(email):
+    return str(email or '').strip().lower().endswith(PLACEHOLDER_EMAIL_SUFFIX)
 
-    Only the SHA-256 of the token is stored; the link is shown to staff once, at
-    creation. The invited user must be logged in as that user to use it.
+
+def mask_email(email):
+    """``s•••@example.com``: enough for the invited person to recognise it, no more."""
+    local, _, domain = str(email or '').partition('@')
+    if not local or not domain:
+        return ''
+    return f'{local[0]}\u2022\u2022\u2022@{domain}'
+
+
+class MentorInvite(models.Model):
+    """A single-use, expiring invitation for one person to apply as a mentor.
+
+    The invite names an existing user, or only an email address for someone who
+    has no account yet. An address-only invite is bound to the account that signs
+    in with that address the first time the link is opened. Only the SHA-256 of
+    the token is stored; the plaintext goes into the invite email or is shown to
+    staff once.
     """
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='mentor_invites'
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.CASCADE, related_name='mentor_invites',
     )
+    email = models.EmailField(max_length=320, blank=True, default='')
     token_hash = models.CharField(max_length=64, unique=True, editable=False)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
@@ -133,25 +153,52 @@ class MentorInvite(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name='+', editable=False,
     )
+    # The latest invite email: when, and its system_email.SystemEmail row (no FK,
+    # so the apps stay independent). send_count also numbers the idempotency key.
+    emailed_at = models.DateTimeField(null=True, blank=True)
+    email_log_id = models.UUIDField(null=True, blank=True)
+    send_count = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         ordering = ('-created_at', '-pk')
-        indexes = [models.Index(fields=('user', 'used_at'), name='mentor_invite_user_idx')]
+        indexes = [
+            models.Index(fields=('user', 'used_at'), name='mentor_invite_user_idx'),
+            models.Index(fields=('email',), name='mentor_invite_email_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(user__isnull=False) | ~Q(email=''),
+                name='mentor_invite_has_target',
+            ),
+        ]
 
     def __str__(self):
-        return f'Mentor invite for user {self.user_id}'
+        if self.user_id:
+            return f'Mentor invite for user {self.user_id}'
+        return f'Mentor invite {self.pk} by email'
 
     @classmethod
-    def issue(cls, user, created_by=None, ttl_days=INVITE_TTL_DAYS):
+    def issue(cls, user=None, created_by=None, ttl_days=INVITE_TTL_DAYS, email=''):
         """Create an invite and return (invite, plaintext token)."""
+        address = str(email or getattr(user, 'email', '') or '').strip().lower()
+        if user is None and not address:
+            raise ValueError('An invite needs a user or an email address.')
         token = secrets.token_urlsafe(32)
         invite = cls.objects.create(
             user=user,
+            email=address,
             token_hash=hash_invite_token(token),
             created_by=created_by,
             expires_at=timezone.now() + timedelta(days=ttl_days),
         )
         return invite, token
+
+    def rotate(self, ttl_days=INVITE_TTL_DAYS):
+        """A new token and a fresh expiry; the old link stops working. Caller saves."""
+        token = secrets.token_urlsafe(32)
+        self.token_hash = hash_invite_token(token)
+        self.expires_at = timezone.now() + timedelta(days=ttl_days)
+        return token
 
 
 class MentorAvailabilityRule(models.Model):
@@ -365,3 +412,110 @@ class MentorTimeReservation(models.Model):
             models.UniqueConstraint(fields=('session', 'principal'), name='mentor_reservation_principal_unique'),
         ]
         indexes = [models.Index(fields=('principal', 'active', 'starts_at'), name='mentor_reservation_user_idx')]
+
+
+class MentorSessionFeedback(models.Model):
+    """One person's rating of one session, asked for just after it ends.
+
+    The founder gets one email and one Slack DM (Roo) a few minutes after the
+    booked end, with three faces. A rating can come from either, or from MLAI
+    Chat; the latest one wins and earlier ones stay in ``rating_history``.
+    Delivery outcomes live here only: they never change the session.
+    The links carry an HMAC token derived from ``id`` (mentoring.feedback), so
+    no token is stored.
+    """
+
+    ROLE_FOUNDER = 'founder'
+    ROLE_CHOICES = ((ROLE_FOUNDER, 'Founder'),)
+
+    RATING_SAD = 'sad'
+    RATING_NEUTRAL = 'neutral'
+    RATING_HAPPY = 'happy'
+    RATING_NO_SHOW = 'no_show'
+    RATING_CHOICES = (
+        (RATING_SAD, 'Not great'),
+        (RATING_NEUTRAL, 'Okay'),
+        (RATING_HAPPY, 'Great'),
+        (RATING_NO_SHOW, "Didn't happen"),
+    )
+    NEGATIVE_RATINGS = (RATING_SAD, RATING_NO_SHOW)
+
+    VIA_EMAIL = 'email'
+    VIA_SLACK = 'slack'
+    VIA_APP = 'app'
+    VIA_PAGE = 'page'
+    VIA_CHOICES = ((VIA_EMAIL, 'Email'), (VIA_SLACK, 'Slack'), (VIA_APP, 'MLAI Chat'), (VIA_PAGE, 'Feedback page'))
+
+    DELIVERY_PENDING = 'pending'
+    DELIVERY_SENDING = 'sending'
+    DELIVERY_SENT = 'sent'
+    DELIVERY_FAILED = 'failed'
+    DELIVERY_SUPPRESSED = 'suppressed'
+    DELIVERY_SKIPPED = 'skipped'
+    DELIVERY_OPTED_OUT = 'opted_out'
+    DELIVERY_CHOICES = (
+        (DELIVERY_PENDING, 'Pending'),
+        (DELIVERY_SENDING, 'Sending'),
+        (DELIVERY_SENT, 'Sent'),
+        (DELIVERY_FAILED, 'Failed'),
+        (DELIVERY_SUPPRESSED, 'Suppressed'),
+        (DELIVERY_SKIPPED, 'Skipped'),
+        (DELIVERY_OPTED_OUT, 'Opted out'),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(MentorSession, on_delete=models.CASCADE, related_name='feedback')
+    respondent = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='mentor_session_feedback'
+    )
+    role = models.CharField(max_length=8, choices=ROLE_CHOICES, default=ROLE_FOUNDER)
+    token_expires_at = models.DateTimeField()
+
+    rating = models.CharField(max_length=8, choices=RATING_CHOICES, blank=True, default='')
+    rated_at = models.DateTimeField(null=True, blank=True)
+    rated_via = models.CharField(max_length=8, choices=VIA_CHOICES, blank=True, default='')
+    rating_history = models.JSONField(default=list, blank=True)
+    comment = models.TextField(blank=True, default='', max_length=2000)
+    commented_at = models.DateTimeField(null=True, blank=True)
+    # Three different ratings within seconds of the send look like a mail
+    # scanner opening every link. Kept, but not alerted on and shown greyed.
+    suspect_scanner = models.BooleanField(default=False)
+
+    sent_at = models.DateTimeField(null=True, blank=True)
+    email_status = models.CharField(max_length=10, choices=DELIVERY_CHOICES, default=DELIVERY_PENDING)
+    email_log_id = models.UUIDField(null=True, blank=True)
+    email_error = models.CharField(max_length=64, blank=True, default='')
+    slack_status = models.CharField(max_length=10, choices=DELIVERY_CHOICES, default=DELIVERY_PENDING)
+    slack_channel = models.CharField(max_length=32, blank=True, default='')
+    slack_ts = models.CharField(max_length=32, blank=True, default='')
+    alert_ts = models.CharField(max_length=32, blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ('-created_at', 'pk')
+        constraints = [
+            models.UniqueConstraint(
+                fields=('session', 'respondent'), name='mentor_feedback_one_per_person',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=('rating', 'rated_at'), name='mentor_feedback_rating_idx'),
+            models.Index(fields=('email_status', 'slack_status', 'created_at'), name='mentor_feedback_delivery_idx'),
+        ]
+
+    def __str__(self):
+        return f'Feedback {self.pk} on session {self.session_id}'
+
+
+class MentorFeedbackOptOut(models.Model):
+    """The person asked for no more session feedback emails (Slack DMs still go)."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='mentor_feedback_opt_out'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'Feedback email opt-out for user {self.user_id}'

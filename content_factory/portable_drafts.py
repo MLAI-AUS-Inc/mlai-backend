@@ -217,6 +217,12 @@ def requests_content_only(payload):
 COPY_READY_FLAG = "ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED"
 
 
+def portable_starts_for_all():
+    """Allow private, explicitly selected drafts independently of website setup."""
+    from django.conf import settings
+    return bool(getattr(settings, "ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED", False))
+
+
 def copy_ready_before_verification(organization, config=None):
     """True when ``ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED`` is on and the org is new-journey.
 
@@ -252,6 +258,8 @@ def keeps_copy_ready_start(organization, config, payload, *, can_generate_articl
     keeps today's repository path: enforcing "Publish automatically" beyond the
     content_only upgrade is P2.13.
     """
+    if portable_starts_for_all() and requests_content_only(payload):
+        return True
     if not copy_ready_before_verification(organization, config) or not explicit_portable_request(payload):
         return False
     if not publishes_automatically(organization, config):

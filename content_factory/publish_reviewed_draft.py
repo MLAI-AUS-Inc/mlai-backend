@@ -66,6 +66,10 @@ def _destination(organization):
             or connection.state != 'connected' or not connection.verified_sha
             or not (connection.capabilities or {}).get('publishingReady')):
         return None
+    from .website_repository_identity import has_pausing_blocker
+    if has_pausing_blocker(connection):
+        # Archived, or moved where MLAI can't see it: hold automatic publishing.
+        return None
     target = connection.targets.filter(target_key=config.default_publish_target_id, generation=connection.generation,
         source_sha=connection.verified_sha, verified_at__isnull=False).first()
     if target is None or not _mapping(target.capabilities).get('publishingReady'):
@@ -108,7 +112,7 @@ def publish_offer(run):
     return {'runId': run.run_id, 'blogHost': site.domain if site else run.organization.domain, 'postedHost': posted_host}
 
 
-def claim_count(run, review):
+def claim_count(run, review, *, attested_clear=False):
     """Count canonical claim findings; unknown review state is never zero."""
     result = _mapping(run.result)
     strict = _mapping(result.get('strict_pass_v1'))
@@ -117,7 +121,14 @@ def claim_count(run, review):
         return None
     if strict_count:
         return strict_count
-    findings, known = [], strict_count == 0
+    annotations = _mapping(review).get('draftReviewFindings')
+    if annotations is not None:
+        if not isinstance(annotations, list) or any(not isinstance(item, dict) for item in annotations):
+            return None
+        open_claims = sum(item.get('kind') == 'claim' for item in annotations)
+        if open_claims:
+            return open_claims
+    findings, known = [], strict_count == 0 or attested_clear is True
     for source in [result, _mapping(review), *(_mapping(review).get('fields') or [])]:
         if not isinstance(source, dict) or 'reviewFindings' not in source:
             continue

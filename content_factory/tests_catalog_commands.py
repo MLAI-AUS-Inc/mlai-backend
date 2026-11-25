@@ -14,12 +14,13 @@ from uuid import uuid4
 from django.core.cache import cache
 from django.db import connection, connections, transaction
 from django.test import TransactionTestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from community_chat.account_sessions import issue_account_session
 from community_chat.models import CommunityMemberProfile
 from core.models import User
-from founder_tools import startup_team
+from founder_tools import membership, startup_team
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import get_founder_company_context
 from roo.models import Ledger
@@ -115,6 +116,37 @@ class CatalogCommandTests(TransactionTestCase):
         receipt = next(iter(before[KEY].values()))
         self.assertEqual(receipt["catalog_version"], 1)
         self.assertNotIn("audience_options", receipt)
+        self.assert_no_spend()
+
+    def test_shared_teammate_can_save_and_replay_an_audience_until_removed(self):
+        with startup_team._locked(self.org):
+            self.company.membership_policy = VibeRaisingCompany.SHARED_ACCESS
+            self.company.save(update_fields=["membership_policy"])
+            membership.admit(self.company, self.user, source="creation")
+            admitted, _ = membership.admit(self.company, self.foreign, source="email_invite")
+        teammate = bearer_client(self.foreign)
+        body = self.initial()
+        body["activate_entries"] = [{"kind": "audience", "id": "BUILDERS", "version": 1}]
+        first = self.send(body, client=teammate)
+        self.assertEqual(first.status_code, 200, first.data)
+        audience = self.current()["audience_options"][0]
+        self.assertEqual(audience["status"], "approved")
+        self.assertEqual(audience["approved_by"], f"user:{self.foreign.pk}")
+        before = self.strategy()
+        self.assertEqual(next(iter(before[KEY].values()))["user_id"], self.foreign.pk)
+        replay = self.send(body, client=teammate)
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(replay["Idempotent-Replayed"], "true")
+        self.assertEqual(self.send(body).status_code, 403)
+
+        stale_context = get_founder_company_context(self.foreign, company_id=self.company.pk)
+        with startup_team._locked(self.org):
+            membership.remove(self.company, admitted, actor=self.user, now=timezone.now())
+        self.assertEqual(self.send(body, client=teammate).status_code, 404)
+        stale = mutate_catalog_response({"pk": self.org.pk}, body, owner_context=stale_context,
+            owner_user_id=self.foreign.pk, command_key="catalog-command-one", command_body=body)
+        self.assertEqual(stale.status_code, 404, stale.data)
+        self.assertEqual(self.strategy(), before)
         self.assert_no_spend()
 
     def test_approval_replay_preserves_original_receipt_revision_and_history(self):

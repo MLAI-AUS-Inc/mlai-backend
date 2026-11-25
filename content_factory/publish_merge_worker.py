@@ -164,6 +164,7 @@ def _owned(receipt, connection, pull=None):
 
 
 def _approver(organization, identifier, *, owner_only=False):
+    from founder_tools.membership import has_membership, shared_workspace
     from founder_tools.services import organization_owner_user_id
     from core.models import User
     if not identifier or isinstance(identifier, bool):
@@ -175,6 +176,9 @@ def _approver(organization, identifier, *, owner_only=False):
     user = User.objects.filter(pk=identifier, is_active=True).first()
     if user is None:
         return False
+    workspace = shared_workspace(organization)
+    if workspace:
+        return has_membership(user, workspace)
     if organization_owner_user_id(organization) == identifier:
         return True
     if owner_only:
@@ -198,7 +202,11 @@ def _claims(run, identity):
     findings = review.get("reviewFindings")
     if not isinstance(findings, list) or any(not isinstance(item, dict) or item.get("kind") not in {"style", "claim"} for item in findings):
         return None
-    return sum(item["kind"] == "claim" for item in findings)
+    private_findings = review.get("draftReviewFindings", [])
+    if not isinstance(private_findings, list) or any(not isinstance(item, dict) for item in private_findings):
+        return None
+    return max(sum(item["kind"] == "claim" for item in findings),
+               sum(item.get("kind") == "claim" for item in private_findings))
 
 
 def _copy_article_approval(run):

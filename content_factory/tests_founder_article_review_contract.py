@@ -23,6 +23,22 @@ class FounderReviewContractTests(TransactionTestCase):
     def get_review(self, remote=None):
         return self.client.get(f'/api/v1/vibe-marketing/runs/{self.run.run_id}/article-review/?company_id={self.company.pk}')
 
+    def test_private_draft_annotations_are_opt_in_and_do_not_replace_preview_approval_findings(self):
+        self.prepared()
+        original = deepcopy(self.fixture['article_review_response'])
+        original['draftReviewFindings'] = [{'fieldId': 'body', 'kind': 'claim', 'message': 'Source needed',
+                                            'path': 'internal/record', 'providerText': 'private'}]
+        with patch('content_factory.vibe_marketing_views.http_client.request', return_value=paired.response(original)):
+            old = self.get_review()
+            opted = self.client.get(f'/api/v1/vibe-marketing/runs/{self.run.run_id}/article-review/'
+                                    f'?company_id={self.company.pk}&draft_review_findings=1')
+        self.assertEqual((old.status_code, opted.status_code), (200, 200))
+        for snapshot in (old.data, old.data['articleReview']['review']):
+            self.assertNotIn('draftReviewFindings', snapshot)
+        for snapshot in (opted.data, opted.data['articleReview']['review']):
+            self.assertEqual(snapshot['draftReviewFindings'], [{'fieldId': 'body', 'kind': 'claim', 'message': 'Source needed'}])
+            self.assertEqual(snapshot.get('reviewFindings'), original.get('reviewFindings'))
+
     def test_actual_get_adds_exact_parent_scope_deepcopy_and_real_owner_access_without_extra_provider_reads(self):
         self.prepared()
         before = ContentFactoryRun.objects.values().get(pk=self.run.pk)

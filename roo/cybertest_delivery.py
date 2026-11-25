@@ -22,12 +22,26 @@ def _valid(pattern, value):
     return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
+# A basic check costs BASIC_BLOCK_POINTS for each started block of
+# BASIC_BLOCK_BATCHES source batches in its contract, so a larger repository
+# costs more. The scanner applies the same rule; no client price is accepted.
+BASIC_BLOCK_BATCHES = 64
+BASIC_BLOCK_POINTS = 24
+
+
+def basic_points(checks):
+    batches = sum(1 for check in checks if isinstance(check, dict) and check.get('kind') == 'source_batch') \
+        if isinstance(checks, list) else 0
+    return BASIC_BLOCK_POINTS * max(1, -(-batches // BASIC_BLOCK_BATCHES))
+
+
 def phase_price(contract):
     if not isinstance(contract, dict) or type(contract.get('version')) is not int or contract['version'] != 1:
         _fail('Unsupported scan purchase contract.')
     phase, tier = contract.get('phase'), contract.get('tier')
     if phase == 'basic' and tier == 'basic' and contract.get('parentCheckoutId') is None:
-        return {'totalPoints': 24, 'duePoints': 24}
+        points = basic_points(contract.get('checks'))
+        return {'totalPoints': points, 'duePoints': points}
     if phase == 'upgrade' and tier in ('standard', 'large') and _valid(UUID, contract.get('parentCheckoutId')):
         total = 48 if tier == 'standard' else 124
         return {'totalPoints': total, 'duePoints': total-24}
@@ -118,6 +132,10 @@ def delivery_settlement(contract, evidence, expected_audit_id, pricing, costs, *
         # The original basic receipt remains untouched. Provider costs are the
         # operator's responsibility if the purchased upgrade was not delivered.
         amounts = {'basis': 'upgrade_not_delivered', 'charge_microroo': 0, 'refund_microroo': points*1_000_000}
+    elif isinstance(pricing, dict) and pricing.get('sponsored') is True and (
+            existing is None or isinstance(existing, dict) and existing.get('basis') == 'sponsored_not_delivered'):
+        # No customer points were spent. Usage can still be incomplete for the operator.
+        amounts = {'basis': 'sponsored_not_delivered', 'charge_microroo': 0, 'refund_microroo': 0}
     else:
         if not isinstance(costs, dict) or costs.get('auditId') != expected_audit_id:
             raise CheckoutError('SETTLEMENT_REVIEW_REQUIRED', 'Actual usage for this audit is required.')

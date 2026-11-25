@@ -119,6 +119,20 @@ class LiveUrlVerificationTests(LiveUrlFixture, TestCase):
             self.assertTrue(durable_integration_evidence(built.config, connection)["verified"])
             self.assertTrue(live_deployment_verified(connection, target))
 
+    def test_live_verification_clears_a_stale_scan_prompt(self):
+        """Tala Thrive (org 30, 18 Nov 2026): verified and Ready but still listing scan_required."""
+        built, connection, target = self.new_journey_site()
+        connection.blockers = [{"code": "scan_required", "message": "Scan the current repository.", "retryable": False},
+                               {"code": "website_data_deleted", "deletion_epoch": 4}]
+        connection.save(update_fields=["blockers"])
+        with self.fetch({"https://banksia.studio/blog": LISTING}):
+            verify_live_url(built.config, target, setup_run_id="setup-1")
+        connection.refresh_from_db()
+        self.assertEqual([row["code"] for row in connection.blockers], ["website_data_deleted"])
+        from .website_operations import deletion_epoch, staff_visible_blockers
+        self.assertEqual(deletion_epoch(connection), 4)
+        self.assertEqual(staff_visible_blockers(connection.blockers), [])
+
     def test_one_live_article_is_compared_with_its_saved_body(self):
         built, connection, target = self.new_journey_site()
         url = "https://banksia.studio/blog/first-post"
@@ -404,8 +418,12 @@ class SealedTargetTests(LiveUrlFixture, TestCase):
         self.assertEqual(journey["prerequisites"]["verification"]["status"], "complete")
 
 
+NO_WORKFLOW_NEW_JOURNEY_ONLY = {"ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED": False}
+
+
+@override_settings(**NO_WORKFLOW_NEW_JOURNEY_ONLY)
 class LegacyCiProofTests(LiveUrlFixture, TestCase):
-    """With every P1 flag on, legacy organisations still verify by CI proof (P1.13)."""
+    """With the all-cohorts kill switch off, legacy organisations still verify by CI proof (P1.13)."""
 
     def test_legacy_orgs_are_never_selected_and_keep_their_grants(self):
         self.assertEqual(required_grants(ci_mode="repository"),
@@ -470,3 +488,39 @@ class LegacyCiProofTests(LiveUrlFixture, TestCase):
                 with patch("content_factory.website_setup_consent.enabled", return_value=True), \
                         patch("content_factory.billing.get_content_factory_article_cost_points", return_value=20):
                     self.assertEqual(setup_plan(context, built.config, {})["ciMode"], "repository")
+
+
+@override_settings(**ALL_P1_FLAGS_ON)
+class AllCohortsNoWorkflowTests(LiveUrlFixture, TestCase):
+    """Plan step 7: by default every cohort's new setup is verified by MLAI, with no workflow in its repository."""
+
+    def test_legacy_orgs_are_selected_and_asked_for_no_workflow_grants(self):
+        for name in ("talathrive", "la_vie", "mlai"):
+            with self.subTest(org=name):
+                built = make_named_legacy_org(name)
+                self.assertTrue(selected(built.organization))
+                context = SimpleNamespace(organization=built.organization, company=built.company, profile=None)
+                with patch("content_factory.website_setup_consent.enabled", return_value=True), \
+                        patch("content_factory.billing.get_content_factory_article_cost_points", return_value=20):
+                    plan = setup_plan(context, built.config, {})
+                self.assertEqual(plan["ciMode"], "hosted")
+                self.assertNotIn("workflows", plan["github"]["required"])
+
+    def test_the_live_url_flag_still_gates_every_cohort(self):
+        with override_settings(ARTICLES_LIVE_URL_VERIFICATION_ENABLED=False):
+            self.assertFalse(selected(make_named_legacy_org("vyavos").organization))
+
+    def test_legacy_prepare_skips_the_workflow_grant_and_asks_for_hosted_setup(self):
+        from . import website_prepare
+        built = make_named_legacy_org("vyavos")
+        op = SimpleNamespace(receipt={})
+        context = SimpleNamespace(organization=built.organization, company=built.company)
+        self.assertEqual(website_prepare._dispatch_prepare_step(op, context, built.config, "permissions", user=built.owner,
+            journey={"prerequisites": {"permissions": {"reasonCode": "github_workflow_permission_required", "reason": "x"}}}),
+            {"status": "completed"})
+
+    def test_a_legacy_repositorys_existing_workflow_kit_stays_writable(self):
+        from .website_live_verification import new_journey_selected
+        built = make_named_legacy_org("pawshare")
+        self.assertTrue(selected(built.organization))
+        self.assertFalse(new_journey_selected(built.organization))

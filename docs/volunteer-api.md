@@ -90,7 +90,8 @@ recognition history remains available.
 
 | Route | Contract |
 | --- | --- |
-| GET `journey/` | `account_id`, `community_id`, `relay_url`, `policy_version`, `contribution_roo`, `wallet_balance`, `current_level`, `next_level`, `levels`, `points_to_next`, `progress`, `attendance`, `suggestions`, `actions`, `capabilities`, `feature_flags`, `history_reconciled`, `updated_at` |
+| GET `journey/` | `account_id`, `community_id`, `relay_url`, `policy_version`, `contribution_roo`, `wallet_balance`, `profile_rank`, `current_level`, `next_level`, `levels`, `points_to_next`, `progress`, `attendance`, `suggestions`, `actions`, `capabilities`, `feature_flags`, `history_reconciled`, `updated_at` |
+| GET `point-history/` | Private, paginated `{total_roo, results, next_offset}` for the signed-in member. `scope=contribution` includes reviewed historical credits and changes that count toward level. `scope=wallet` lists earned wallet credits, including level bonuses. |
 | GET `policy/` | `{version, levels, actions}` |
 | GET `opportunities/`, `opportunities/:id/` | Public opportunity list/detail; optional kind/project filter |
 | GET `projects/`, `projects/:id/` | Public project list/detail |
@@ -217,6 +218,20 @@ Conversation pagination groups persisted eligible replies by public opportunity
 root before applying limits. Continuation URLs preserve the selected filter;
 many replies in one conversation cannot hide an older joined opportunity.
 
+### Roo's Slack welcome for Chat intros
+
+Intros typed in Slack are rewarded by Public Roo, which replies in the thread.
+Intros written in MLAI Chat reach Slack through the bridge bot, so Roo ignores
+them and this pipeline awards them silently. The scheduled
+`chat_intro_welcomes` runner (`community_chat/intro_welcome.py`) closes the gap:
+for an approved `introduce_yourself` recognition from a processed Chat
+start-here post in the last 48 hours, once the bridge has posted that message to
+Slack, it replies in the thread with Roo's usual welcome using Public Roo's bot
+token. `ChatIntroWelcome` (one row per recognition) records the claim and reply,
+so each intro is welcomed at most once; Slack failures retry up to five times.
+Linked members are mentioned, others are named. The reward never depends on the
+message. Kill switch: `COMMUNITY_CHAT_INTRO_WELCOME_ENABLED` (default true).
+
 ## Disposable validation
 
 `scripts/test_volunteer_disposable.py` requires an explicit approved migration
@@ -280,6 +295,45 @@ through Level 6 per eligible member, less any already credited milestones.
 Rollback disables new issuance and keeps history/ledger entries. Source receipts
 stay retryable; a failed client refresh cannot repeat a wallet transaction.
 
+## One record per contribution (build step 2, November 2026)
+
+`COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED` (default false) switches the level
+calculation to one record per contribution. Migration
+`community_chat 0017_volunteer_one_record` adds the columns and table it uses;
+with the flag off nothing reads them and behaviour is unchanged.
+
+- **Credit labels.** `community_chat/volunteer/credits.py` labels every earned
+  wallet credit by reference type, then source and description, following the
+  back-fill plan's ledger table. Rate-card tasks, manual awards, points
+  requests, volunteer recognitions and first posts count toward level.
+  Reaction rewards (`link-love`), startup updates, mentor payouts, level
+  bonuses, corrections, merges, purchases and committee pay don't. Their Roo
+  still pays as before.
+- **One record.** Rate-card task approvals, manual awards and points requests
+  each write one approved `VolunteerRecognition` linked to their ledger row,
+  inside the same transaction. A replay finds the existing record.
+- **Level points apart from Roo.** `VolunteerRecognition.level_microroo` holds
+  the points toward level when they differ from the Roo paid; empty means the
+  same. Reaction and startup-update recognitions count 0 toward level.
+- **Opening entries.** `VolunteerOpeningEntry` holds a member's opening
+  balance, one row per piece of evidence, with a unique source key per
+  community, paid or unpaid, evidence class, who added it, and reversal fields.
+  A member with entries opens at their unreversed sum; one without keeps the
+  old single opening, and stays "being checked" if that is empty. The level
+  sum, bonus payer, journey and bonus liability all read the same opening.
+  Opening entries never bring level bonuses, the reconcile endpoint answers
+  `use_opening_entries`, and the one-shot historical bonus path refuses any
+  member with entries (`opening_entries_present`).
+- **Unlabelled credits.** A credit after the member's cut-off that no label
+  covers is left out of the level, logged once at error level and kept as a
+  `VolunteerSourceReceipt` with kind `unlabelled_credit` and status `alert`.
+  The member's level stays visible.
+- **Stored level.** `VolunteerMemberState.level`, `highest_level` and
+  `level_policy` are written when the journey loads or a bonus check runs.
+
+`VolunteerOpeningEntry` protects its user (and the users who added or reversed
+it), so account deletion must handle it with the other Volunteer records.
+
 ## Roo Points member guide refresh (September 2026)
 
 Home includes `boost_startup` (2 points, once for each distinct verified startup
@@ -307,3 +361,90 @@ The questioner marks a native MLAI answer in the advice thread useful with a che
 `COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=true` enables this award independently of other Volunteer awards and bonuses. Configure the verified advice UUID as `COMMUNITY_CHAT_VOLUNTEER_CHANNELS["help"]`, a prospective `COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM` UTC boundary, and a separate `COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN` shared only with the trusted collector. The Chat collector activation timestamp must match that boundary. Keep existing unrelated flags unchanged. There is no backend schema change or historical award backfill.
 
 Question, answer and reaction invalidations block deferred awards. Existing credits preserve their audit trail and use the established correction mechanism. Member locks are acquired in canonical account order, and recognition plus wallet credit remain atomic and idempotent.
+
+## 200-level contribution profiles
+
+The private journey returns `profile_rank` from the same ladder as the
+wardrobe and published profile, including when the member has no published
+profile. It is null while the contribution total is unknown. The journey's
+existing `current_level`, `next_level` and `levels` describe the older
+volunteer milestones and their wallet bonuses.
+
+Authenticated MLAI Chat clients can set `include_contributions: true` on
+`POST /community-chat/profiles/batch/` for up to ten verified profile keys.
+The response includes `contributions` only for published, reconciled profiles.
+It contains qualifying Roo, the `mlai-volunteer-v6` ladder position, and reviewed
+badges with member-safe descriptions and optional public event links.
+
+Each awarded badge includes `earn_count` (positive integer or null),
+`earn_count_status` (`exact`, `at_least` or `unresolved`) and
+`earn_count_progress`. The progress object is empty for most badges.
+`hello.steady` may include `months` and `accepted_deliverables`.
+`event.series` may include `months` and `events_led`. An existing patch with
+unverified repeat history has a null count and an empty progress object.
+
+For count publication, provide the reviewed file and its independently approved
+SHA-256 digest to `manage.py import_volunteer_badge_counts <manifest> --sha256
+<digest> --reviewer-id <account>`. The preview validates the exact existing
+grant identities, evidence anchors, publication status and scoped account history.
+Add `--apply` to publish the complete batch atomically. Repeating it reports the
+existing rows. To withdraw that batch, preview with `--rollback` and add
+`--apply` when ready. A withdrawn count stays unresolved if a stale publisher
+retries. The original badge grant and its public reason survive withdrawal.
+
+Preview the reviewed batch with
+`manage.py import_volunteer_badges <manifest> --reviewer-id <account>`.
+The private manifest contains `community`, `evidence_sha256`, an explicit
+`members` list of reconciled account IDs, and `grants` with `member_id`,
+`badge_id`, `reason`, `evidence_ref` and optional `public_url`. Members can
+receive a rank with an empty badge collection. Run the same command with
+`--apply` to publish the profiles and badges in one transaction. Identical
+retries reuse the existing receipts.
+
+To hide a profile, mark its publication receipt withdrawn. To hide a single
+badge, mark its grant revoked. To hide all contribution profiles, set
+`COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED=false`. This requires
+no database migration.
+
+## Admin Member progress
+
+`GET /api/v1/community-chat/admin/member-progress/` reads the current cohort of
+MLAI Slack and Chat members with qualifying earned Roo. It uses the same
+verified account and device binding as the Chat admin console. An active
+account-linked admin or superuser sees `member_progress` in Admin access.
+Locations and all requests with a region filter additionally require
+`member_progress_locations`. That section requires an active committee record
+or explicit committee-authorised enrolment in
+`COMMUNITY_CHAT_MEMBER_PROGRESS_LOCATION_ACCOUNT_IDS`. Report responses are
+private and use `Cache-Control: no-store`.
+
+| Query | Values |
+| --- | --- |
+| `view` | `overview` (default), `leadership`, `locations`, `members`, `member` |
+| `days`, `months` | `7`, `30` (default), `90` days, and `3` or `6` (default) calendar months |
+| `region` | `VIC`, `NSW`, `QLD`, `WA`, `SA`, `TAS`, `ACT`, `NT`, `OUT`, `UNKNOWN`. Locations starts with Victoria. |
+| `level`, `category`, `metric` | Exact level 0–200 or `pending`, a report category ID, and one of `movement`, `points`, `attendance`, `newBadge`, `recent`, `bookings` |
+| `sort`, `q`, `page` | Members can sort by `movement`, `points`, `attendance`, `badges`, `recent`, `name` or `bookings`, search by display name and select a one-based page |
+| `id`, `month` | Member detail requires a public Chat profile UUID. An optional `YYYY-MM` opens dated monthly detail. Overview also returns member records for the requested month, optionally narrowed to one category. |
+
+Dates use Australia/Melbourne. Calendar months include the current partial
+month. Level gain requires comparable evidence at each end of the rolling
+window. Numeric totals aggregate exact microroo before converting to Roo for
+the response. Approved manual-time actions map to report categories by their
+catalogue group. Combined or unclassified wallet entries remain visible
+under the appropriate residual.
+
+Current badge holdings read published reviewed grants. Dated reporting uses a
+trusted `awarded_on` value only. New reviewed import manifests may supply that
+optional `YYYY-MM-DD` achievement date beside the badge's reviewed evidence
+reference. The receipt's import time remains the publication timestamp.
+Historical grants with no verified date remain visible in holdings, and
+unknown badge periods are nullable. Emerging-leader entries require two
+different awards in the qualifying order within 90 calendar days.
+
+Co-working figures read `CoworkingBooking` on the booked-for date, using Roo's
+active `booked` status and including Office Manager reservations. Each person
+can contribute once per day. The overview uses the monthly chart's calendar
+range, and Locations uses the selected region and rolling window. A member's
+declared base supplies their region. The booking location is irrelevant to
+that attribution. Booking counts provide a separate activity measure.

@@ -1,0 +1,19 @@
+MLAI Arcade
+
+You won $50 in Codex credits!
+
+Your three reels lined up. Here’s your personal code.
+
+{{ activation_code }}
+
+Activate your credits at {{ activation_url }}
+{% if expiry_display %}Redeem before {{ expiry_display }}.
+{% endif %}
+1. Sign in to the ChatGPT account you use for Codex.
+2. Review the offer terms and confirm redemption.
+3. Open Codex with the same ChatGPT account.
+
+Keep your activation link private. If you have trouble redeeming the code, reply to this email and the MLAI team will help.
+
+Happy building!
+The MLAI team

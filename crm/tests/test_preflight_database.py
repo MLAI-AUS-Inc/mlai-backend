@@ -49,6 +49,8 @@ class PreflightProvider(WaveProvider):
 
 
 @override_settings(**{**WAVE_SETTINGS, 'CRM_PREFLIGHT_ENABLED': True})
+# These tests cover the named-owner gate; production gives every admin owner access.
+@override_settings(CRM_ALL_ADMINS_ARE_OWNERS=False)
 class PreflightDatabaseTests(CrmApiMixin, TestCase):
     def setUp(self):
         super().setUp()

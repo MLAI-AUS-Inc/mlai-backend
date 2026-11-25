@@ -115,9 +115,9 @@ class AdminGateTests(SimpleTestCase):
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=True)
     def test_admin_access_lists_sections_for_admins_only(self, _throttle):
         device, role = admin_gate()
-        with device, role:
+        with device, role, patch("community_chat.admin_access.mlai_admin_role", return_value="committee"):
             response = self.call(AdminAccessView, signed_in())
-        self.assertEqual((response.status_code, response.data), (200, {"is_admin": True, "sections": ["crm"]}))
+        self.assertEqual((response.status_code, response.data), (200, {"is_admin": True, "sections": ["crm", "team"]}))
         self.assertEqual(response["Cache-Control"], "no-store")
 
         device, role = admin_gate(False)
@@ -129,11 +129,14 @@ class AdminGateTests(SimpleTestCase):
         self.assertEqual(response.data, {"is_admin": False, "sections": []})
 
     @override_settings(COMMUNITY_CHAT_CRM_ENABLED=False)
-    def test_admin_access_has_no_sections_while_the_crm_is_off(self, _throttle):
+    def test_admin_access_keeps_member_progress_while_crm_is_off(self, _throttle):
         device, role = admin_gate()
-        with device, role:
-            response = self.call(AdminAccessView, signed_in())
-        self.assertEqual(response.data, {"is_admin": True, "sections": []})
+        with device, role, patch(
+            "community_chat.admin_access.mlai_admin_role", return_value="admin",
+        ), patch("community_chat.admin_access.PointsAdmin.objects.filter") as committee:
+            committee.return_value.exists.return_value = False
+            response = self.call(AdminAccessView, signed_in(pk=123))
+        self.assertEqual(response.data, {"is_admin": True, "sections": ["team", "member_progress"]})
 
 
 class MlaiAdminRoleUnitTests(SimpleTestCase):

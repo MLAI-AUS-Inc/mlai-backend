@@ -294,6 +294,7 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         commit = Mock(status_code=200)
         commit.json.return_value = {"sha": "b" * 40}
         with ExitStack() as stack:
+            stack.enter_context(patch("founder_tools.membership.companies_for_user", return_value=context.profile.companies))
             stack.enter_context(patch.object(get_user_model().objects, "get", return_value=self.user))
             stack.enter_context(patch.object(views, "get_founder_company_context", return_value=context))
             stack.enter_context(patch.object(views, "_get_config", return_value=self.config))

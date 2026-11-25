@@ -36,7 +36,8 @@ OTHER_COMPANY_ID = "7e399ce7-8d85-4970-ad8e-aa13bc3b028c"
 def grant(**changes):
     return {"id": "grant", "user_id": 7, "auth_version": 3, "session_id": "session", "company_id": COMPANY_ID,
         "client_id": "client", "clientName": "Claude", "scopes": sorted(config.SCOPES), "resource": config.mcp_url(),
-        "redirectOrigin": "https://claude.ai", "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + 3600, "revoked": False, **changes}
+        "redirectOrigin": "https://claude.ai", "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + 3600, "revoked": False,
+        "binding": "account", "boundAt": time.time() - 60, **changes}
 
 
 def principal():
@@ -293,7 +294,7 @@ class OAuthTests(SimpleTestCase):
             code = parse_qs(urlsplit(callback).query)["code"][0]
             grant_id = cache.get(oauth.key("code", code))["grant_id"]
             value = cache.get(oauth.key("grant", grant_id))
-            self.assertEqual(value["expiresAt"], now + 30 * 86400)
+            self.assertEqual(value["expiresAt"], now + 180 * 86400)
             with patch.object(oauth, "valid_grant", return_value=oauth.Principal(user=user, grant=value)):
                 tokens = oauth.issue_tokens(grant_id)
             self.assertEqual(tokens["expires_in"], 3600)
@@ -301,12 +302,12 @@ class OAuthTests(SimpleTestCase):
             clock.return_value = now + 3601
             self.assertIsNone(cache.get(oauth.key("access", tokens["access_token"])))
             self.assertIsNotNone(cache.get(oauth.key("refresh", tokens["refresh_token"])))
-            clock.return_value = now + 30 * 86400 + 1
+            clock.return_value = now + 180 * 86400 + 1
             self.assertIsNone(cache.get(oauth.key("refresh", tokens["refresh_token"])))
             with self.assertRaises(AuthenticationFailed):
                 oauth.valid_grant(grant_id)
 
-            clock.return_value = now + 91 * 86400
+            clock.return_value = now + 365 * 86400
             self.assertEqual(oauth.client_for(client["client_id"]), client)
             resumed = oauth.create_intent(query)
             self.assertEqual(resumed["client_id"], client["client_id"])
@@ -373,12 +374,15 @@ class OAuthTests(SimpleTestCase):
             request = {"grant_type": "refresh_token", "refresh_token": value["refresh_token"], "client_id": self.client["client_id"], "resource": config.mcp_url()}
             # Match the principal's registered client for this test grant.
             cache.set(oauth.key("refresh", value["refresh_token"]), {"grant_id": "grant", "client_id": self.client["client_id"]})
-            with self.assertRaises(oauth.OAuthError):
-                oauth.token_exchange({**request, "scope": "finance:write"})
-            self.assertNotEqual(oauth.token_exchange(request)["refresh_token"], value["refresh_token"])
-            with self.assertRaises(oauth.OAuthError):
+            # Hosts resend their original scope request; anything not granted
+            # is ignored, and the rotated token never carries more.
+            rotated = oauth.token_exchange({**request, "scope": "finance:write startup:brief:read"})
+            self.assertNotEqual(rotated["refresh_token"], value["refresh_token"])
+            self.assertEqual(rotated["scope"], " ".join(sorted(config.SCOPES)))
+            with override_settings(MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS=0), self.assertRaises(oauth.OAuthError):
                 oauth.token_exchange(request)
 
+    @override_settings(MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS=0)
     def test_refresh_reuse_revokes_rotated_family_only_for_the_bound_client(self):
         user = Obj(pk=7, auth_version=3, is_active=True)
         with patch.object(oauth, "get_user_model") as users, patch.object(oauth.CommunityChatAccountSession, "objects") as sessions, patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"), patch.object(oauth, "require_community_access"), patch.object(oauth, "company_for"):
@@ -417,24 +421,25 @@ class OAuthTests(SimpleTestCase):
             with self.assertRaises(AuthenticationFailed):
                 oauth.valid_grant("grant")
             user.auth_version = 3
+            # A startup grant follows the account, not the browser sign-in that
+            # approved it: that session ending must not end the connection.
             valid.return_value = False
-            with self.assertRaises(AuthenticationFailed):
-                oauth.valid_grant("grant")
-            valid.return_value = True
+            self.assertEqual(oauth.valid_grant("grant").user, user)
+            sessions.select_related.assert_not_called()
             oauth.revoke_grant("grant")
             with self.assertRaises(AuthenticationFailed):
                 oauth.valid_grant("grant")
 
     def test_wrong_owner_and_cross_startup_rejected_before_tools(self):
-        with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
-            companies.select_related.return_value.filter.return_value.first.return_value = None
+        with patch.object(oauth, "companies_for_user") as companies:
+            companies.return_value.filter.return_value.first.return_value = None
             with self.assertRaises(PermissionDenied):
                 oauth.company_for(principal().user, COMPANY_ID)
-            self.assertEqual(companies.select_related.return_value.filter.call_args.kwargs["profile__user"].pk, 7)
+            self.assertEqual(companies.call_args.args[0].pk, 7)
             companies.reset_mock()
             with self.assertRaises(PermissionDenied):
                 oauth.company_for(principal().user, OTHER_COMPANY_ID, grant())
-            companies.select_related.assert_not_called()
+            companies.assert_not_called()
 
     def test_model_uuid_company_approval_and_tool_round_trip(self):
         from organizations.models import Organization
@@ -443,11 +448,12 @@ class OAuthTests(SimpleTestCase):
         intent = oauth.create_intent(self.query)
         user = Obj(pk=7, auth_version=3, is_active=True)
         session = Obj(pk="session", user_id=7)
-        with patch.object(oauth.VibeRaisingCompany, "objects") as companies, patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
-            companies.select_related.return_value.filter.return_value.first.return_value = company
+        with patch.object(oauth, "companies_for_user") as companies, patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+            companies.return_value.filter.return_value.first.return_value = company
             callback = oauth.approve_intent(intent["requestId"], user=user, session=session,
                 company_id=COMPANY_ID.upper(), approve=True)
-            companies.select_related.return_value.filter.assert_called_with(pk=UUID(COMPANY_ID), profile__user=user)
+            companies.assert_called_with(user)
+            companies.return_value.filter.assert_called_with(pk=UUID(COMPANY_ID))
             code = parse_qs(urlsplit(callback).query)["code"][0]
             grant_id = cache.get(oauth.key("code", code))["grant_id"]
             saved_grant = cache.get(oauth.key("grant", grant_id))
@@ -460,7 +466,7 @@ class OAuthTests(SimpleTestCase):
                 self.assertEqual(oauth.grants_for(user, COMPANY_ID.upper())[0]["id"], grant_id)
                 self.assertEqual(tools.call_tool(value, "list_startups", {}),
                     {"startups": [{"id": COMPANY_ID, "name": company.name}]})
-                with patch.object(tools.StartupProfile, "objects") as profiles:
+                with patch.object(tools.StartupProfile, "objects") as profiles, patch.object(tools, "existing_drafts", return_value=[]):
                     profiles.filter.return_value.first.return_value = Obj(reporting_timezone="Australia/Melbourne", short_description="Fictional test material", stage="Idea")
                     brief = tools.call_tool(value, "get_monthly_update_brief", {"companyId": COMPANY_ID.upper(), "month": "2026-09"})
                 self.assertEqual(brief["companyId"], COMPANY_ID)
@@ -473,11 +479,11 @@ class OAuthTests(SimpleTestCase):
                 self.assertEqual(parse_qs(urlsplit(status["reviewUrl"]).query)["company_id"], [COMPANY_ID])
 
     def test_invalid_company_ids_are_denied_before_ownership_query(self):
-        with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
+        with patch.object(oauth, "companies_for_user") as companies:
             for company_id in (None, True, False, 9, "9", "not-a-uuid", {}, [], "04d89807-5884-4b0e-83cc-311abf13b648/other"):
                 with self.subTest(company_id=company_id), self.assertRaises(PermissionDenied):
                     oauth.company_for(principal().user, company_id)
-            companies.select_related.assert_not_called()
+            companies.assert_not_called()
 
     def test_revoked_scope_rejected(self):
         user = Obj(pk=7, auth_version=3, is_active=True)
@@ -496,7 +502,7 @@ class BriefActivityWindowTests(SimpleTestCase):
 
     def brief(self, **changes):
         arguments = {"companyId": COMPANY_ID, "month": "2026-10", **changes}
-        with patch.object(tools, "valid_grant", return_value=principal()), patch.object(tools, "company_for", return_value=self.company), patch.object(tools.StartupProfile, "objects") as profiles, patch.object(tools.timezone, "now", return_value=self.now):
+        with patch.object(tools, "valid_grant", return_value=principal()), patch.object(tools, "company_for", return_value=self.company), patch.object(tools.StartupProfile, "objects") as profiles, patch.object(tools.timezone, "now", return_value=self.now), patch.object(tools, "existing_drafts", return_value=[]):
             profiles.filter.return_value.first.return_value = Obj(reporting_timezone="Australia/Melbourne")
             return tools.call_tool(principal(), "get_monthly_update_brief", arguments)
 
@@ -528,7 +534,7 @@ class BriefActivityWindowTests(SimpleTestCase):
                        {**valid, "startInclusive": 123},
                        {**valid, "startInclusive": valid["endExclusive"]},
                        {**valid, "startInclusive": "2026-10-04T04:00:00Z"},
-                       {**valid, "startInclusive": "2026-09-02T03:59:59Z"},
+                       {**valid, "startInclusive": "2026-09-02T02:59:59Z"},
                        {**valid, "endExclusive": "2026-10-03T04:05:01Z"}):
             with self.subTest(window=window), self.assertRaises(ValidationError):
                 self.brief(activityWindow=window)
@@ -734,6 +740,20 @@ class ConnectionConfigurationTests(SimpleTestCase):
         self.assertEqual(codex["setupUrl"], "https://learn.chatgpt.com/docs/extend/mcp?surface=cli")
         self.assertIn("Streamable HTTP", " ".join(codex["instructions"]))
         self.assertNotIn("token", json.dumps(rows))
+
+    def test_client_steps_name_the_app_without_protocol_words(self):
+        for unified in (False, True):
+            with override_settings(MLAI_MCP_ENABLED=unified):
+                rows = config.client_catalog()
+            for row in rows:
+                steps = " ".join(row["instructions"])
+                self.assertIn(row["name"], steps)
+                self.assertIn("sign in to MLAI", steps.replace("Sign in", "sign in"))
+                for jargon in ("MCP", "server URL", "remote", "OAuth", "→"):
+                    self.assertNotIn(jargon, steps, (row["id"], jargon))
+                self.assertTrue(row["config"]["url"])
+            self.assertIn("connection link", " ".join(
+                next(item for item in rows if item["id"] == "codex")["instructions"]))
 
     def test_codex_reuses_legacy_chatgpt_listing_without_duplicate_option(self):
         listing = "https://chatgpt.com/plugins/approved-openai-plugin?open_in_app"

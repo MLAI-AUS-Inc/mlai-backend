@@ -17,7 +17,7 @@ from django.contrib.auth.models import update_last_login
 from django.core import signing
 from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.http import HttpResponse
 from django.urls import reverse
 from django.utils import timezone
@@ -52,6 +52,7 @@ from .account_cookies import (
     clear_account_session_cookies,
     set_account_session_cookies,
 )
+from .email_change import available_for as email_change_available, lock_signer, retired_signer
 from .account_sessions import (
     InvalidAccountSession,
     InvalidBrowserAccountBinding,
@@ -63,6 +64,7 @@ from .account_profiles import ProfileVersionConflict, update_account_profile
 from . import device_auth_v2
 from .inbox_accounts import bind_verified_device
 from .models import (
+    AccountDeletionRequest,
     CommunityChatAccountSession,
     CommunityChatBootstrapToken,
     CommunityChatChallenge,
@@ -141,9 +143,10 @@ DESKTOP_AUTH_ORIGINS = (
 DESKTOP_AUTHORIZATION_CODE_SALT = "community-chat.desktop-authorization.v1"
 DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL = "Desktop authorization code is invalid."
 PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
-UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v3"
+UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v4"
 UPCOMING_EVENT_FIELDS = (
     "id",
+    "mlai_managed",
     "cover_url",
     "name",
     "url",
@@ -212,7 +215,9 @@ def _require_token_key(request, public_key):
         raise PermissionDenied("This authorization is bound to a different device key.")
 
 
-def _require_current_chat_credential_locked(request, locked_user, *, allow_unapproved=False):
+def _require_current_chat_credential_locked(
+    request, locked_user, *, allow_unapproved=False, session_expired=PermissionDenied,
+):
     """Revalidate a Chat credential after taking the shared user row lock.
 
     ``allow_unapproved`` lets desktop sign-in v2 admit a pending or new member
@@ -221,6 +226,9 @@ def _require_current_chat_credential_locked(request, locked_user, *, allow_unapp
     """
 
     now = timezone.now()
+    public_key = getattr(request, "community_chat_public_key", None)
+    if public_key and retired_signer(public_key):
+        raise session_expired("Sign in with a new installation key.")
     if not (allow_unapproved and device_auth_v2.admits_unapproved_member(locked_user)):
         _require_eligible(locked_user)
     account_session = getattr(request, "community_chat_account_session", None)
@@ -247,7 +255,7 @@ def _require_current_chat_credential_locked(request, locked_user, *, allow_unapp
             current.access_token_hash,
             presented_hash,
         ):
-            raise PermissionDenied("MLAI Chat session has expired.")
+            raise session_expired("MLAI Chat session has expired.")
         request.community_chat_account_session = current
 
     bootstrap_token = getattr(request, "community_chat_bootstrap_token", None)
@@ -521,6 +529,8 @@ class PasswordAuthView(APIView):
             # pre-lock authorization.
             if (
                 not locked_user.is_active
+                or not locked_user.__class__.objects.for_email(email).filter(pk=locked_user.pk).exists()
+                or retired_signer(public_key)
                 or not locked_user.has_usable_password()
                 or not locked_user.check_password(data["password"])
             ):
@@ -629,6 +639,8 @@ def _issue_email_code_bootstrap(user, challenge):
     # pending proofs and credentials. Keep issuance on that side of the fence.
     get_user_model().objects.select_for_update().get(pk=user.pk)
     _lock_device_auth_installation(challenge)
+    if retired_signer(challenge.public_key):
+        raise _EmailCodeBindingConflict("public_key_retired")
     cleanup_grant_ids = ()
     active_key = CommunityChatDevice.objects.filter(
         public_key=challenge.public_key,
@@ -952,7 +964,7 @@ class AccountSessionLogoutView(APIView):
                 str(request.headers.get("Origin") or "").strip().rstrip("/")
             )
         try:
-            revoke_account_session(
+            signed_out = revoke_account_session(
                 raw_token, required_origin=required_origin,
                 required_public_key=(
                     request.headers.get("X-MLAI-Public-Key") if not explicit_token else None
@@ -970,6 +982,10 @@ class AccountSessionLogoutView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
             return clear_account_session_cookies(response)
+        # AI connections this device approved for a startup end with an
+        # explicit sign-out (signing in again keeps them).
+        from startup_updates.mcp.oauth import end_installation_grants
+        end_installation_grants(signed_out.user_id, signed_out.installation_id)
         response = Response({"status": "signed_out"}, status=status.HTTP_200_OK)
         return clear_account_session_cookies(response)
 
@@ -1014,6 +1030,7 @@ class AccountView(APIView):
                 "authenticated": True,
                 "onboarding": onboarding_payload(user),
                 "profile": own_chat_profile(user),
+                "email_change_available": email_change_available(user),
                 "public_profile": public_chat_profile(user),
                 "session": {
                     "id": str(account_session.id),
@@ -1103,6 +1120,7 @@ class PublicProfileBatchView(APIView):
     Revoking a device removes its access, but it must not erase attribution on
     messages and membership events that the key signed while it was verified.
     Pending or otherwise never-verified keys remain private and unresolved.
+    A deletion request removes old keys from public profile resolution.
     """
 
     authentication_classes = (CommunityChatAccountAuthentication,)
@@ -1114,6 +1132,10 @@ class PublicProfileBatchView(APIView):
         serializer = CommunityChatPublicProfileBatchSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         public_keys = serializer.validated_data["public_keys"]
+        deletion = AccountDeletionRequest.objects.filter(user_id=OuterRef("user_id")).filter(
+            ~Q(status=AccountDeletionRequest.Status.COMPLETED)
+            | Q(completed_at__gte=OuterRef("verified_at")),
+        )
 
         devices = (
             CommunityChatDevice.objects.select_related("user")
@@ -1126,14 +1148,23 @@ class PublicProfileBatchView(APIView):
                 verified_at__isnull=False,
                 user__is_active=True,
             )
+            .filter(~Exists(deletion))
             .order_by("public_key", "-verified_at", "-created_at")
         )
         devices_by_key = {}
         for device in devices:
             devices_by_key.setdefault(device.public_key, device)
+        if serializer.validated_data["include_contributions"]:
+            from .volunteer.profile_progression import profile_progressions
+
+            progression = profile_progressions({device.user_id: device.user for device in devices_by_key.values()})
+        else:
+            progression = {}
         profiles = {
             public_key: {
                 **public_chat_profile(devices_by_key[public_key].user),
+                **({"contributions": progression[devices_by_key[public_key].user_id]}
+                   if devices_by_key[public_key].user_id in progression else {}),
                 # Historical keys retain attribution but must not be offered
                 # as current notification targets by mention autocomplete.
                 "mentionable": (
@@ -2137,6 +2168,9 @@ class InviteView(APIView):
                 _require_token_challenge_context(request, challenge)
                 public_key = challenge.public_key
                 _require_token_key(request, public_key)
+                lock_signer(public_key)
+                if retired_signer(public_key):
+                    return Response({"error": "public_key_retired"}, status=409)
                 enforce_bootstrap_limits(
                     request,
                     action="invite",

@@ -1,0 +1,33 @@
+{
+  "schema": "replay-record-v1",
+  "id": "be-vyavos-three-empty-nights",
+  "source": {
+    "run_pk": null,
+    "org_id": 87,
+    "catalogue": "founder issues catalogue 2026-11-18, section 4.7",
+    "synthetic": true
+  },
+  "workflow": "auto_discovery",
+  "step": "find_opportunities",
+  "code": "NO_OPPORTUNITIES",
+  "framework_fingerprint": null,
+  "http": [],
+  "inputs": {
+    "domain": "founder-87.example",
+    "competitors": [
+      "competitor-a.example"
+    ],
+    "seed_keywords": [
+      "clinic scheduling"
+    ],
+    "nights": 3,
+    "empty_reason": "no_opportunities",
+    "empty_detail_code": "NO_OPPORTUNITIES"
+  },
+  "replay": {
+    "repo": "be",
+    "handler": "research.empty_nights"
+  },
+  "expected": "ask:add_seed_topics",
+  "notes": "Three scheduled nights found nothing new. No run fails, no staff alert fires, and the founder gets one notice suggesting new seed topics or competitors (B23)."
+}

@@ -43,6 +43,18 @@ class ReliabilityContractTests(unittest.TestCase):
             self.assertFalse(rendered["resumeAvailable"])
             self.assertFalse(rendered["retryAvailable"])
 
+    def test_terminal_snapshot_retires_previous_resume_without_discarding_history(self):
+        result = {"status": "queued", "precondition_recovered": True,
+            "failure": {"code": "verified_target_required", "retryable": False,
+                        "next_action": "inspect_failure_report"},
+            "recovery": {"status": "resume_queued", "recovered_at": "2026-11-17T23:48:19Z"}}
+        rendered = reliability_presentation(result, status="failed")
+        self.assertEqual(rendered["nextAction"], "inspect_failure_report")
+        self.assertEqual(rendered["recovery"], {**result["recovery"], "status": "finished"})
+        self.assertEqual(reliability_presentation(result, status="running")["recovery"], result["recovery"])
+        retry = reliability_presentation({**result, "recovery": {"state": "pending"}}, status="failed")
+        self.assertEqual(retry["nextAction"], "automatic_retry")
+
     def test_live_body_requires_exact_content_and_canonical_identity(self):
         from content_factory.article_live_evidence import compare_live_body
         body = "<article><h1>Requirements</h1><p>" + "The cost is AUD 50 and it is not guaranteed. " * 5 + "</p></article>"

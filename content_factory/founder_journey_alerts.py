@@ -29,6 +29,10 @@ time ``details["ack_due_at"]`` (one Melbourne business day after queueing) and a
 seam through which be-staff's ``staff_alert_rules.enrich_alert_details`` adds ids
 to a receipt's details. Details still hold ids only; the staff console resolves
 names, emails and links at read time.
+
+``founder_stuck`` (content_factory.founder_stuck_alerts) is the one reason whose
+Slack text names the founder and the startup, so staff can act without opening
+the database. The names are read at send time and are never stored in a receipt.
 """
 from __future__ import annotations
 
@@ -44,7 +48,10 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import Exists, Max, OuterRef, Q
+from django.db.models import Exists, Max, OuterRef, Q, TextField, Value
+from django.db.models.fields.json import KT
+from django.db.models.functions import Coalesce
+from django.db.models.lookups import Exact, StartsWith
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
@@ -99,6 +106,19 @@ P2_REASON_LABELS = {
     "deploy_not_detected": "A merged article was not deployed within 30 minutes",
     "merge_rejected_twice": "GitHub rejected an MLAI merge twice",
     "join_request_unanswered": "A team join request has waited 72 hours",
+    "founder_stuck": "A founder is stuck",
+    # B6: the only alerts on nightly scheduler runs (content_factory.background_job_digest).
+    "background_job_failing": "A startup's nightly job failed three nights running",
+    "background_job_failure_spike": "Nightly job failures passed 5% of startups in one night",
+    # B22: website_connection_invariants, one per broken connection.
+    "connection_invariant": "A website connection is in a state that should never happen",
+    # E7: founder_transitions, one per ask that waited past its per-action threshold.
+    "ask_waiting": "A founder ask has waited past its staff threshold",
+    # Workstream 5: content_factory.staff_hold_alerts, behind ARTICLES_STAFF_HOLD_ALERTS_ENABLED.
+    "repo_health_probe_stalled": "A website build probe needs staff reconciliation",
+    "resume_reconciliation_required": "An article recovery needs staff to reconcile its dispatch",
+    "article_staff_hold": "An article's final check is held for staff",
+    "article_staff_hold_24h": "An article has been held for staff for 24 hours",
 }
 P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
 ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS
@@ -112,8 +132,24 @@ TERMINAL_STATUSES = frozenset({"failed", "cancelled", "denied", "stopped"})
 YOUR_TURN_STATUSES = frozenset({"awaiting_approval", "approval_required", "awaiting_confirmation", "awaiting_delivery_mode"})
 # IF-20 owner actions. Every other cancellation_reason, 'unspecified' included, alerts.
 OWNER_CANCELLATION_REASONS = ("owner_cancelled", "draft_deleted", "article_discarded")
-SCHEDULER_WORKFLOWS = ("island_refresh",)
 SCHEDULER_REQUEST_SOURCE = "mlai_backend_scheduler"
+# Background work is decided by who asked for it, never by the workflow name:
+# founder-paid island research runs as ``island_refresh`` too (A2). The only
+# workflow-name rule left is for scheduler rows saved before the scheduler
+# stamped ``request_source``: an ``island_refresh`` row without any
+# ``request_source`` is the old nightly refresh, because every founder request
+# path stamps its own source (island research uses ``island-research:`` ids).
+LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS = ("island_refresh",)
+FOUNDER_RESEARCH_REQUEST_PREFIX = "island-research:"
+# The admission receipt's principal (``run_ownership.scheduler_principal``) also
+# marks a run the scheduler started, whatever its request says (B1).
+SCHEDULER_PRINCIPAL_KIND = "scheduler"
+OWNER_PRINCIPAL_KIND_PATH = ("run_owner_v1", "identity", "principal", "kind")
+# B5: one alert per (org, workflow, original code) for these reasons, so nine
+# failed runs with one cause are one alert, not nine.
+INCIDENT_SLOT_REASONS = frozenset({"run_terminal", "self_heal_capped"})
+# Self-heal's own stop codes (B2); an older engine wrote them over error_code.
+SELF_HEAL_STOP_CODES = frozenset({"SELF_HEAL_DEADLINE_REACHED", "SELF_HEAL_ATTEMPTS_EXHAUSTED"})
 # Daily research automations stamp this request-id prefix. Their topic batches
 # wait on the founder by design, and the automation pauses itself after three
 # unanswered days, so an unpicked batch is not a stuck founder (your_turn_72h).
@@ -143,8 +179,9 @@ class FounderJourneyAlertConfigError(ValueError):
 def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, company_id=None, claimant_user_id=None, slot=None) -> str:
     """Return the stable alert id for one (org, slot, reason); it is also the Slack client_msg_id."""
     if slot is not None:
-        if alert_reason not in P2_ALERT_REASONS or not isinstance(slot, str) or not SAFE_TOKEN.fullmatch(slot):
-            raise ValueError("An alert slot must be a safe token for a P2 reason.")
+        if (alert_reason not in P2_ALERT_REASONS | INCIDENT_SLOT_REASONS or not isinstance(slot, str)
+                or not SAFE_TOKEN.fullmatch(slot)):
+            raise ValueError("An alert slot must be a safe token for a P2 or incident reason.")
         slot = f"p2-slot-{slot}"
     elif run_id:
         slot = str(run_id)
@@ -168,17 +205,34 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     so each claimant gets their own alert. P2 owners may pass a stable
     ``slot`` (for example ``day-2026-11-02`` in Melbourne time) for recurring
     org-level alerts; leave it absent to retain the original lifetime dedupe.
+
+    A scheduler run (``is_scheduler_run``) is background work, not a founder's:
+    its alert id is returned but no receipt is written, whichever caller asked.
+    ``run_terminal`` and ``self_heal_capped`` with a run default to the run's
+    incident slot (``run_incident_slot``), so every caller shares one id (B5).
     """
     if alert_reason not in ALERT_REASONS:
         raise ValueError(f"Unknown founder-journey alert_reason: {alert_reason!r}")
     if organization is None or getattr(organization, "pk", None) is None:
         raise ValueError("A founder-journey alert needs a saved organization.")
+    if slot is None and run is not None and alert_reason in INCIDENT_SLOT_REASONS:
+        slot = run_incident_slot(run)
     safe_details = _safe_details(details)
     alert_id = founder_journey_alert_id(
         organization_id=organization.pk, alert_reason=alert_reason,
         run_id=getattr(run, "run_id", None), company_id=company_id,
         claimant_user_id=safe_details.get("claimant_user_id"), slot=slot,
     )
+    if run is not None and is_scheduler_run(run):
+        logger.info("founder_journey_alert_background_suppressed alert_reason=%s org_id=%s run_pk=%s",
+                    alert_reason, organization.pk, getattr(run, "pk", None))
+        return alert_id
+    from .founder_test_orgs import is_test_org
+    if is_test_org(organization):
+        # Plan F1: a marked test organisation is MLAI's own traffic, never a founder alert.
+        logger.info("founder_journey_alert_test_organization_suppressed alert_reason=%s org_id=%s",
+                    alert_reason, organization.pk)
+        return alert_id
     queued_at = timezone.now()
     receipt = {
         "alert_id": alert_id, "alert_reason": alert_reason, "state": "pending", "attempts": 0, "sent_at": None,
@@ -212,6 +266,8 @@ def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
     from .models import OrganizationContentConfig
     queued_at = now or timezone.now()
     prepared, sources = [], {}
+    from .founder_test_orgs import test_organization_ids
+    test_ids = test_organization_ids()
     for item in items:
         organization, reason = item["organization"], item["alert_reason"]
         run = item.get("run")
@@ -219,11 +275,20 @@ def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
             raise ValueError("An incident batch needs saved organizations and registered alert reasons.")
         if run is not None and run.organization_id != organization.pk:
             raise ValueError("An incident run must belong to its organization.")
+        if run is not None and is_scheduler_run(run):
+            # Background work never reserves a founder-journey receipt (A2).
+            continue
+        if organization.pk in test_ids:
+            # Nor does a marked test organisation (F1).
+            continue
         details = _safe_details(item.get("details"))
         company = item.get("company_id")
+        slot = item.get("slot")
+        if slot is None and run is not None and reason in INCIDENT_SLOT_REASONS:
+            slot = run_incident_slot(run)
         identifier = founder_journey_alert_id(organization_id=organization.pk, alert_reason=reason,
             run_id=getattr(run, "run_id", None), company_id=company,
-            claimant_user_id=details.get("claimant_user_id"), slot=item.get("slot"))
+            claimant_user_id=details.get("claimant_user_id"), slot=slot)
         receipt = {"alert_id": identifier, "alert_reason": reason, "state": "pending", "attempts": 0,
             "sent_at": None, "queued_at": queued_at.isoformat(), "company_id": str(company) if company else None,
             "run_id": str(run.run_id) if run is not None else None, "run_pk": run.pk if run is not None else None,
@@ -341,7 +406,10 @@ def _p2_details(receipt, *, organization, run, queued_at) -> dict:
     details = dict(receipt.get("details") or {})
     extra = _enriched(receipt, organization=organization, run=run)
     if extra:
-        details = _safe_details({**details, **extra})
+        # A founder_stuck receipt has no run, so enrichment would replace its own
+        # attempts and item with run-less defaults; its caller's details win.
+        merged = {**extra, **details} if receipt.get("alert_reason") == "founder_stuck" else {**details, **extra}
+        details = _safe_details(merged)
     if _ack_due_applies(receipt.get("alert_reason")):
         details["ack_due_at"] = ack_due_at(queued_at).isoformat()
     return details
@@ -375,6 +443,44 @@ def acknowledge_founder_journey_alert(organization, alert_id, *, by_user) -> dic
         OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**strategy, RECEIPTS_KEY: receipts})
     _mirror_settled(receipt)
     return dict(receipt)
+
+
+def resolve_founder_journey_alert(organization, alert_id, *, now=None) -> dict | None:
+    """Mark one alert resolved because what it reported has cleared (plan E7), and return it.
+
+    Sets ``resolved_at`` (the staff console's existing field) once. A receipt
+    still pending is never sent afterwards (state ``resolved``); a sent one
+    keeps its delivery record. Returns None when the org has no such alert.
+    """
+    from .models import OrganizationContentConfig
+    if organization is None or getattr(organization, "pk", None) is None or not alert_id:
+        return None
+    now = now or timezone.now()
+    with transaction.atomic():
+        row = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+        if row is None:
+            return None
+        strategy = dict(row.pillar_strategy) if isinstance(row.pillar_strategy, dict) else {}
+        receipts = dict(_receipts_in(strategy))
+        receipt = receipts.get(str(alert_id))
+        if not isinstance(receipt, dict):
+            return None
+        if receipt.get("resolved_at"):
+            return dict(receipt)
+        receipt = {**receipt, "resolved_at": now.isoformat(), "resolved_by": "cleared"}
+        if receipt.get("state") == "pending":
+            receipt["state"] = "resolved"
+            receipt.pop("next_attempt_at", None)
+        receipts[str(alert_id)] = receipt
+        OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**strategy, RECEIPTS_KEY: receipts})
+    _mirror_settled(receipt)
+    return dict(receipt)
+
+
+def _ladder_tracks(organization, item, now=None) -> bool:
+    """Whether founder_transitions escalates this item itself, with its per-action threshold (plan E7)."""
+    from .founder_transitions import escalates_asks, tracks_item
+    return bool(escalates_asks(organization) and tracks_item(organization.pk, item, now=now))
 
 
 def run_founder_journey_alert_sweep(now=None, limit=None) -> dict:
@@ -482,10 +588,81 @@ def is_superseded(run) -> bool:
                                             created_at__gt=run.created_at).exists()
 
 
+def _principal_kind(run) -> str:
+    value = getattr(run, "result", None)
+    for key in OWNER_PRINCIPAL_KIND_PATH:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def is_scheduler_run(run) -> bool:
-    """Island refresh or ``mlai_backend_scheduler`` runs, which are never alerted (IF-15)."""
-    request = run.run_request if isinstance(run.run_request, dict) else {}
-    return run.workflow in SCHEDULER_WORKFLOWS or request.get("request_source") == SCHEDULER_REQUEST_SOURCE
+    """A run the backend scheduler started, which never alerts or self-heals (IF-15, A2, B1).
+
+    This is the one audience test: the self-heal engine, the queue functions and
+    every alert sweep use it or its SQL twin ``founder_run_q``. It is decided by
+    who asked, never by the workflow name: the saved request source, or the
+    admission receipt's scheduler principal. A founder-started run of the same
+    workflow (paid island research is ``island_refresh`` too) is founder work and
+    alerts like any other. An old unstamped nightly refresh still counts as
+    scheduler work (see ``LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS``).
+    """
+    if _principal_kind(run) == SCHEDULER_PRINCIPAL_KIND:
+        return True
+    request = getattr(run, "run_request", None)
+    request = request if isinstance(request, dict) else {}
+    if "request_source" in request:
+        return request.get("request_source") == SCHEDULER_REQUEST_SOURCE
+    return (getattr(run, "workflow", None) in LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS
+            and not str(request.get("client_request_id") or "").startswith(FOUNDER_RESEARCH_REQUEST_PREFIX))
+
+
+def founder_run_q(prefix: str = "") -> Q:
+    """SQL twin of ``not is_scheduler_run``; ``prefix`` is a relation path such as ``run__``.
+
+    Written with positive ``has_key`` tests so a missing key is never NULL on
+    Postgres (a negated nested key lookup would drop the row instead).
+    """
+    request, workflow = f"{prefix}run_request", f"{prefix}workflow"
+    stamped = Q(**{f"{request}__has_key": "request_source"})
+    founder_stamped = stamped & ~Q(**{f"{request}__request_source": SCHEDULER_REQUEST_SOURCE})
+    # Coalesce: a JSON null id reads as "" (as in Python), never as SQL NULL,
+    # so ``exclude(founder_run_q())`` is the exact complement of the filter.
+    client_id = Coalesce(KT(f"{request}__client_request_id"), Value(""), output_field=TextField())
+    founder_research = Q(StartsWith(client_id, FOUNDER_RESEARCH_REQUEST_PREFIX))
+    unstamped_founder = ~stamped & (~Q(**{f"{workflow}__in": LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS}) | founder_research)
+    principal = Coalesce(KT(f"{prefix}result__" + "__".join(OWNER_PRINCIPAL_KIND_PATH)), Value(""),
+                         output_field=TextField())
+    not_scheduler_principal = ~Q(Exact(principal, SCHEDULER_PRINCIPAL_KIND))
+    return (founder_stamped | unstamped_founder) & not_scheduler_principal
+
+
+def original_failure_code(result) -> str:
+    """The run's own failure code, seen through an older self-heal recode (B2, B5)."""
+    result = result if isinstance(result, dict) else {}
+    code = run_stop_code(result)
+    if code in SELF_HEAL_STOP_CODES:
+        heal = result.get("self_heal_v1") if isinstance(result.get("self_heal_v1"), dict) else {}
+        for value in [heal.get("code")] + [row.get("code") for row in reversed(heal.get("history") or [])
+                                           if isinstance(row, dict)]:
+            if isinstance(value, str) and SAFE_CODE.fullmatch(value) and value not in SELF_HEAL_STOP_CODES:
+                return value
+    return code
+
+
+def run_incident_slot(run):
+    """The (workflow, original code) slot shared by one run's duplicates (B5), or None without a code."""
+    code = original_failure_code(getattr(run, "result", None))
+    if not code:
+        return None
+    workflow = re.sub(r"[^A-Za-z0-9_.\-]", "_", str(getattr(run, "workflow", "") or "-"))[:40]
+    return f"wf-{workflow}:code-{code[:48]}"
+
+
+def run_alert_id(run, reason) -> str:
+    """The alert id ``queue_founder_journey_alert`` gives this run and reason."""
+    slot = run_incident_slot(run) if reason in INCIDENT_SLOT_REASONS else None
+    return founder_journey_alert_id(organization_id=run.organization_id, alert_reason=reason,
+                                    run_id=None if slot else run.run_id, slot=slot)
 
 
 def is_owner_cancel(run) -> bool:
@@ -533,7 +710,8 @@ def _detect(*, now, since, limit) -> dict:
     budget = [limit]
     counts = dict.fromkeys(DETECTED_REASONS, 0)
     # Every org's alert ids, read once per tick; kept current as this tick queues.
-    known = {org_id: set(receipts) for org_id, receipts in _receipt_index()}
+    index = dict(_receipt_index())
+    known = {org_id: set(receipts) for org_id, receipts in index.items()}
 
     def seen(organization_id, alert_id):
         return alert_id in known.get(organization_id, ())
@@ -541,12 +719,18 @@ def _detect(*, now, since, limit) -> dict:
     def queue(reason, **kwargs):
         alert_id = queue_founder_journey_alert(alert_reason=reason, **kwargs)
         known.setdefault(kwargs["organization"].pk, set()).add(alert_id)
+        stored = _receipts_in(getattr(kwargs.get("run"), "result", None)).get(reason)
+        if isinstance(stored, dict):
+            # Later duplicates in this tick adopt the same receipt (B5).
+            index.setdefault(kwargs["organization"].pk, {})[alert_id] = stored
         counts[reason] += 1
         budget[0] -= 1
 
-    base = (ContentFactoryRun.objects.filter(created_at__gte=since, organization__isnull=False)
-            .exclude(workflow__in=SCHEDULER_WORKFLOWS)
-            .filter(~Q(run_request__has_key="request_source") | ~Q(run_request__request_source=SCHEDULER_REQUEST_SOURCE)))
+    from .founder_test_orgs import test_organization_ids
+    test_ids = sorted(test_organization_ids())
+    # A marked test organisation (F1) is never a candidate, so it never uses this tick's budget.
+    base = ContentFactoryRun.objects.filter(founder_run_q(), created_at__gte=since, organization__isnull=False).exclude(
+        organization_id__in=test_ids)
     steps = ContentFactoryRunStep.objects.filter(run=OuterRef("pk"))
     legacy_owner_cancel = (Q(status="cancelled", error="") & ~Q(result__has_key="cancellation_reason") & (
         Q(Exists(steps.filter(message=LEGACY_OWNER_CANCEL_MESSAGE)))
@@ -576,21 +760,32 @@ def _detect(*, now, since, limit) -> dict:
                     organization_id=organization_id, alert_reason=reason, run_id=run_id)):
                 continue
             run = ContentFactoryRun.objects.select_related("organization").filter(pk=pk).first()
+            if run and reason == "your_turn_72h" and _ladder_tracks(run.organization, "article:" + run.run_id, now=now):
+                continue
             if run and reason in run_alert_reasons(run, now=now) and reason not in _receipts_in(run.result):
+                shared = run_alert_id(run, reason) if reason in INCIDENT_SLOT_REASONS else None
+                if shared and seen(organization_id, shared):
+                    # Another run with the same workflow and cause already holds the
+                    # alert (B5): record it on this run too, without a second alert.
+                    existing = index.get(organization_id, {}).get(shared)
+                    if isinstance(existing, dict):
+                        _mirror_run_receipt(run, reason, existing)
+                    continue
                 queue(reason, organization=run.organization, run=run)
     if budget[0] > 0:
-        _detect_companies_without_draft(now=now, since=since, budget=budget, queue=queue, seen=seen)
+        _detect_companies_without_draft(now=now, since=since, budget=budget, queue=queue, seen=seen, test_ids=test_ids)
     if budget[0] > 0:
-        _detect_waiting_website_operations(now=now, since=since, budget=budget, queue=queue, seen=seen)
+        _detect_waiting_website_operations(now=now, since=since, budget=budget, queue=queue, seen=seen, test_ids=test_ids)
     return counts
 
 
-def _detect_companies_without_draft(*, now, since, budget, queue, seen):
+def _detect_companies_without_draft(*, now, since, budget, queue, seen, test_ids=()):
     from founder_tools.models import VibeRaisingCompany
     from organizations.models import Organization
     companies = (VibeRaisingCompany.objects.filter(created_at__gte=since, created_at__lte=now - NO_DRAFT_AFTER,
                                                    organization__isnull=False)
-                 .exclude(profile__user__is_staff=True).order_by("created_at", "pk")
+                 .exclude(profile__user__is_staff=True).exclude(organization_id__in=list(test_ids))
+                 .order_by("created_at", "pk")
                  .values_list("pk", "organization_id"))
     unalerted = [(company_id, organization_id) for company_id, organization_id in companies
                  if not seen(organization_id, founder_journey_alert_id(
@@ -604,16 +799,19 @@ def _detect_companies_without_draft(*, now, since, budget, queue, seen):
         queue("no_draft_24h", organization=organization, company_id=company_id)
 
 
-def _detect_waiting_website_operations(*, now, since, budget, queue, seen):
+def _detect_waiting_website_operations(*, now, since, budget, queue, seen, test_ids=()):
     from .website_models import WebsiteConnectionOperation
     operations = (WebsiteConnectionOperation.objects.filter(state="needs_user", created_at__gte=since,
                                                              updated_at__lte=now - YOUR_TURN_AFTER)
+                  .exclude(connection__organization_id__in=list(test_ids))
                   .select_related("connection__organization").order_by("created_at", "pk"))
     for operation in list(operations):
         if budget[0] <= 0:
             return
         organization = operation.connection.organization
         if seen(organization.pk, founder_journey_alert_id(organization_id=organization.pk, alert_reason="your_turn_72h")):
+            continue
+        if _ladder_tracks(organization, "website:" + str(organization.pk), now=now):
             continue
         queue("your_turn_72h", organization=organization, details={"website_operation": operation.action})
 
@@ -625,11 +823,13 @@ def _receipts_in(result) -> dict:
     return receipts if isinstance(receipts, dict) else {}
 
 
-def _receipt_index():
-    """(organization_id, receipts) for every org holding receipts; reads only the receipt JSON."""
+def _receipt_index(organization_ids=None):
+    """(organization_id, receipts) for every org holding receipts, or only ``organization_ids``; reads only the receipt JSON."""
     from .models import OrganizationContentConfig
-    rows = (OrganizationContentConfig.objects.filter(pillar_strategy__has_key=RECEIPTS_KEY)
-            .order_by("pk").values_list("organization_id", f"pillar_strategy__{RECEIPTS_KEY}"))
+    rows = OrganizationContentConfig.objects.filter(pillar_strategy__has_key=RECEIPTS_KEY)
+    if organization_ids is not None:
+        rows = rows.filter(organization_id__in=list(organization_ids))
+    rows = (rows.order_by("pk").values_list("organization_id", f"pillar_strategy__{RECEIPTS_KEY}"))
     return [(organization_id, receipts if isinstance(receipts, dict) else {}) for organization_id, receipts in rows]
 
 
@@ -771,21 +971,29 @@ class _Target:
         OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**container, RECEIPTS_KEY: receipts})
 
 
-def _pending_targets() -> list:
-    """Every pending index receipt, oldest queued first."""
+def _pending_targets(organization_ids=None, reasons=None) -> list:
+    """Every pending index receipt, oldest queued first, optionally only some orgs and reasons.
+
+    A receipt queued before its organisation was marked as a test organisation
+    (F1) stays pending and is never posted.
+    """
+    from .founder_test_orgs import test_organization_ids
+    test_ids = test_organization_ids()
     targets = [(_Target(organization_id=organization_id, key=key), receipt)
-               for organization_id, receipts in _receipt_index()
+               for organization_id, receipts in _receipt_index(organization_ids)
+               if organization_id not in test_ids
                for key, receipt in receipts.items()
-               if isinstance(receipt, dict) and receipt.get("state") == "pending"]
+               if isinstance(receipt, dict) and receipt.get("state") == "pending"
+               and (reasons is None or receipt.get("alert_reason") in reasons)]
     return sorted(targets, key=lambda item: (str(item[1].get("queued_at") or ""), item[0].organization_id, item[0].key))
 
 
-def _deliver(*, now, limit) -> dict:
+def _deliver(*, now, limit, organization_ids=None, reasons=None) -> dict:
     channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
     configured = bool(SLACK_CHANNEL_PATTERN.fullmatch(channel))
     outcome = {"sent": 0, "unconfigured": 0, "undelivered": 0}
     processed = 0
-    for target, seen in _pending_targets():
+    for target, seen in _pending_targets(organization_ids, reasons):
         if processed >= limit:
             break
         lease = _timestamp(seen.get("next_attempt_at"))
@@ -873,7 +1081,7 @@ def _alert_context(row, receipt) -> dict:
     context = {
         "org_id": org_id, "domain": _safe(domain), "company_id": _safe(receipt.get("company_id")),
         "run_id": _safe(receipt.get("run_id")), "workflow": "", "run_status": "", "stop_code": "",
-        "step_attempts": None, "staff_link": "",
+        "lead_code": "", "step_attempts": None, "staff_link": "",
     }
     run = None
     if receipt.get("run_pk") is not None:
@@ -882,7 +1090,7 @@ def _alert_context(row, receipt) -> dict:
         run = ContentFactoryRun.objects.filter(run_id=receipt["run_id"]).first()
     if run is not None:
         context.update(run_id=_safe(run.run_id), workflow=_safe(run.workflow), run_status=_safe(run.status),
-                       stop_code=run_stop_code(run.result),
+                       stop_code=run_stop_code(run.result), lead_code=run_blocking_code(run),
                        step_attempts=run.steps.aggregate(value=Max("attempts"))["value"],
                        staff_link=_admin_link("admin:workflow_runs_contentfactoryrun_change", run.pk))
     elif context["company_id"]:
@@ -903,10 +1111,65 @@ def run_stop_code(result) -> str:
     return ""
 
 
+BLOCKING_STATUSES = frozenset({"blocked", "failed", "denied"})
+# Precedence when one run carries several codes (A3): connection or authority,
+# website setup, delivery, quality or safety hold, then anything else.
+_BLOCKING_TIERS = (
+    ("website_connection", "authority", "authoriz", "consent", "reconnect", "github_access", "installation",
+     "permission", "repository_access", "repo_access"),
+    ("setup", "article_surface", "article_system", "articles_page", "prepare"),
+    ("delivery", "publish", "merge", "pull_request", "deploy"),
+    ("quality", "safety", "review", "finding"),
+)
+
+
+def _blocking_tier(code, *, source) -> int:
+    if source == "authority_denied":
+        return 0
+    lowered = code.lower()
+    for tier, markers in enumerate(_BLOCKING_TIERS):
+        if any(marker in lowered for marker in markers):
+            return tier
+    return len(_BLOCKING_TIERS)
+
+
+def run_blocking_code(run) -> str:
+    """The code that blocks this run, for the front of its alert (A3); "" when nothing blocks it.
+
+    A run blocks when its status is blocked, failed or denied, or when its failure
+    asks the founder to act (``requires_user_action``), which is how a run held at
+    ``approval_required`` still carries a connection error. Of several codes the
+    highest-precedence one wins (``_BLOCKING_TIERS``); a tie keeps the order
+    ``run_stop_code`` reads them in.
+    """
+    result = run.result if isinstance(getattr(run, "result", None), dict) else {}
+    failure = result.get("failure") if isinstance(result.get("failure"), dict) else {}
+    denied = result.get("authority_denied") if isinstance(result.get("authority_denied"), dict) else {}
+    asks_user = failure.get("requires_user_action") is True or result.get("requires_user_action") is True
+    if str(getattr(run, "status", "") or "") not in BLOCKING_STATUSES and not asks_user and not denied:
+        return ""
+    candidates = []
+    for source, value in (("error_code", result.get("error_code")), ("failure_code", result.get("failure_code")),
+                          ("failure", failure.get("code")), ("authority_denied", denied.get("code"))):
+        if isinstance(value, str) and SAFE_CODE.fullmatch(value.strip()):
+            candidates.append((_blocking_tier(value.strip(), source=source), len(candidates), value.strip()))
+    return min(candidates)[2] if candidates else ""
+
+
 def alert_text(receipt, context) -> str:
-    """The Slack message. The error code lives only inside this string (IF-23)."""
+    """The Slack message. The error code lives only inside this string (IF-23).
+
+    When the run is blocked by a code, the message leads with that code and the
+    alert reason follows, so a connection error is never hidden behind, say, a
+    quality hold on the same run (A3).
+    """
     reason = receipt.get("alert_reason") or ""
-    parts = [f"Founder journey alert: {REASON_LABELS.get(reason, reason)} ({reason})."]
+    if reason == "founder_stuck":
+        from .founder_stuck_alerts import stuck_alert_text
+        return stuck_alert_text(receipt, context)
+    blocking = context.get("lead_code") or ""
+    parts = [f"{blocking} blocks this run."] if blocking else []
+    parts.append(f"Founder journey alert: {REASON_LABELS.get(reason, reason)} ({reason}).")
     parts.append(f"Org {context['org_id']}" + (f" ({context['domain']})." if context["domain"] else "."))
     if context["company_id"]:
         parts.append(f"Company {context['company_id']}.")

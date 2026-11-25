@@ -33,6 +33,10 @@ class UserAdmin(MemberAudienceAuthorityAdminMixin, BaseUserAdmin):
         """Show read-only alias history only for an existing account."""
         return super().get_inlines(request, obj) if obj is not None else ()
 
+    def get_readonly_fields(self, request, obj=None):
+        fields = super().get_readonly_fields(request, obj)
+        return (*fields, 'email', 'email_verified_at', 'auth_version') if obj else fields
+
     @admin.action(description='Ban selected MLAI accounts (retain email)')
     def ban_mlai_accounts(self, request, queryset):
         from community_chat.account_bans import ban_account

@@ -2,6 +2,7 @@
 
 from django.urls import path
 
+from .arcade_views import ArcadeStockView
 from . import views
 from .deliverability_views import (DeliverabilityView, IncidentAcknowledgeView, IncidentsView,
     StreamPolicyView, SelfCheckView, SeedHeartbeatView, ReconfirmationDraftView, ContactTypoCorrectionView)
@@ -17,6 +18,7 @@ urlpatterns = [
     path("deliverability/incidents/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incidents"),
     path("deliverability/incidents/<uuid:incident_id>/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incident"),
     path("deliverability/incidents/<uuid:incident_id>/acknowledge/", IncidentAcknowledgeView.as_view(), name="community_chat_crm_deliverability_acknowledge"),
+    path("arcade-stock/", ArcadeStockView.as_view(), name="community_chat_crm_arcade_stock"),
     path("access/", views.AccessView.as_view(), name="community_chat_crm_access"),
     path("overview/", views.OverviewView.as_view(), name="community_chat_crm_overview"),
     path("events/", views.EventsView.as_view(), name="community_chat_crm_events"),
@@ -106,6 +108,8 @@ urlpatterns = [
     ),
     path("blasts/", views.BlastsView.as_view(), name="community_chat_crm_blasts"),
     path("blasts/<uuid:blast_id>/", views.BlastsView.as_view(), name="community_chat_crm_blast"),
+    path("blasts/<uuid:blast_id>/roo-draft/", views.BlastRooDraftView.as_view(), name="community_chat_crm_blast_roo_draft"),
+    path("events/<uuid:event_id>/reminders/", views.EventRemindersView.as_view(), name="community_chat_crm_event_reminders"),
     path("blasts/<uuid:blast_id>/plan/", views.BlastPlanView.as_view(), name="community_chat_crm_blast_plan"),
     path("blasts/<uuid:blast_id>/pause/", views.BlastPauseView.as_view(), name="community_chat_crm_blast_pause"),
     path("blasts/<uuid:blast_id>/resume/", views.BlastResumeView.as_view(), name="community_chat_crm_blast_resume"),

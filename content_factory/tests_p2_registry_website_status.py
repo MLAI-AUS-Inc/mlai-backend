@@ -144,7 +144,10 @@ class WebsiteStatusP2Tests(TestCase):
                     expected_ask = registry_policy.founder_ask_for_code(code, org)
                     self.assertEqual(result["copyId"], registry_policy.copy_id_for(
                         code, organization=org, terminal=False, self_heal=None))
-                    if expected_ask:
+                    if expected_ask and registry_policy.wire_action_id(expected_ask) is None:
+                        # B23: an ask old builds cannot open travels without an action id.
+                        self.assertIsNone(result["action"])
+                    elif expected_ask:
                         self.assertEqual(result["action"]["id"], registry_policy.wire_action_id(expected_ask))
                     else:
                         self.assertIsNone(result["action"])
@@ -189,3 +192,20 @@ class WebsiteStatusP2Tests(TestCase):
                 self.assertEqual("copyId" in result, has_copy)
                 if not has_copy:
                     self.assertEqual(result, self._project(op))
+
+
+@override_settings(**STATUS_FLAGS)
+class PageChoiceP2Tests(WebsiteStatusP2Tests):
+    """Plan A9 follow-up: a P2 org's page ask stays a needs-you action, never Working on it."""
+
+    @override_settings(**ALL_FLAGS_ON)
+    def test_a_p2_org_keeps_the_choose_articles_page_action(self):
+        org = make_p2_org().organization
+        receipt = {"user_action": {"id": "choose_articles_page", "candidates": ["/blog", "/news"]},
+                   "reason_code": "articles_page_choice_required", "failure_class": "needs_user"}
+        today, result = self._status("needs_user", receipt, org)
+        self.assertEqual(today["state"], "needs_you")
+        self.assertEqual(result["state"], "needs_you")
+        self.assertEqual(result["action"]["id"], "choose_articles_page")
+        self.assertEqual(result["action"]["candidates"], ["/blog", "/news"])
+        self.assertNotIn("copyId", result)

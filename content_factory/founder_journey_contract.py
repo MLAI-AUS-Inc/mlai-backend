@@ -127,6 +127,12 @@ def _rights(organization, company, config, user):
     from founder_tools.services import organization_owner_user_id
     if not startup_team._valid_user(user):
         return False, False, False, False
+    from founder_tools.membership import has_membership, shared_workspace
+
+    workspace = shared_workspace(organization)
+    if workspace:
+        allowed = has_membership(user, workspace)
+        return allowed, allowed, allowed, allowed
     owner = organization_owner_user_id(organization)
     strategy = _mapping(getattr(config, "pillar_strategy", None))
     roster = startup_team._roster(config)
@@ -225,6 +231,11 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
             "controls": article_controls(organization=organization, company=company, user=user, run=run),
             "failure": deepcopy(failure), "capabilities": deepcopy(payload["capabilities"])}
     payload.setdefault("holdingReason", None)
+    from . import repo_health
+    if repo_health.enabled():
+        health = repo_health.journey_block(connection, target_key=getattr(config, "default_publish_target_id", None))
+        if health is not None:
+            payload["repoHealth"] = health
     return payload
 
 

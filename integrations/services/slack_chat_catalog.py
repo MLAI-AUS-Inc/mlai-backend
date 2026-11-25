@@ -351,6 +351,7 @@ def _publication_key(conversation):
 def catalog_payload(conversations, public_key):
     """Expose only mirrors provisioned for this verified device."""
     from integrations.services.slack_channel_mentions import roo_channel_targets
+    from integrations.services.managed_channels.personal import personal_section
 
     key = str(public_key or "").lower()
     conversations = [
@@ -367,6 +368,7 @@ def catalog_payload(conversations, public_key):
             "channel_id": str(conversation.mlai_channel_id),
             "slack_conversation_id": conversation.slack_conversation_id,
             "kind": conversation_kind(conversation),
+            **({"managed_section": section} if (section := personal_section(conversation)) else {}),
             "last_message_at": conversation_activity_at(conversation),
             "ready_for_display": readiness[id(conversation)],
             "history_complete": history_complete(conversation),

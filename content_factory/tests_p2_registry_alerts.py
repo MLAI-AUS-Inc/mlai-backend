@@ -52,6 +52,26 @@ HOSTED_QUALITY_REASONS = {
     "article_safety_review_required": "An article needs staff review of safety guidance",
     "article_quality_review_required": "An article's automatic quality repair needs staff review",
 }
+# The always-on stuck-founder alert (content_factory.founder_stuck_alerts).
+STUCK_REASONS = {"founder_stuck": "A founder is stuck"}
+# B6: the nightly-job digest (content_factory.background_job_digest).
+BACKGROUND_REASONS = {
+    "background_job_failing": "A startup's nightly job failed three nights running",
+    "background_job_failure_spike": "Nightly job failures passed 5% of startups in one night",
+}
+# The connection invariant sweep (content_factory.website_connection_invariants, B22).
+INVARIANT_REASONS = {"connection_invariant": "A website connection is in a state that should never happen"}
+# The ask ladder's per-action staff threshold (content_factory.founder_transitions, E7).
+ASK_LADDER_REASONS = {"ask_waiting": "A founder ask has waited past its staff threshold"}
+# Workstream 5: an article held for staff, and still held 24 hours later (content_factory.staff_hold_alerts).
+STAFF_HOLD_REASONS = {
+    "article_staff_hold": "An article's final check is held for staff",
+    "article_staff_hold_24h": "An article has been held for staff for 24 hours",
+}
+ARTICLE_RECOVERY_REASONS = {
+    "repo_health_probe_stalled": "A website build probe needs staff reconciliation",
+    "resume_reconciliation_required": "An article recovery needs staff to reconcile its dispatch",
+}
 PRIVATE_DETAILS = {
     "owner_email": "founder@example.test", "founder_name": "Ada", "article_title": "Secret", "contact": "a@b.test",
     "link": "https://example.test/admin/1", "path_hint": "/my-startup/runs/1", "note": "Free text with spaces",
@@ -72,14 +92,22 @@ class AlertReasonTests(SimpleTestCase):
         for reason, label in HOSTED_QUALITY_REASONS.items():
             self.assertIn(reason, alerts.ALERT_REASONS)
             self.assertEqual(alerts.REASON_LABELS[reason], label)
-        self.assertEqual(alerts.ALERT_REASONS,
-                         frozenset(TODAY_REASONS) | frozenset(P2_REASONS) | frozenset(HOSTED_QUALITY_REASONS))
+        for reason, label in {**STUCK_REASONS, **INVARIANT_REASONS, **ASK_LADDER_REASONS,
+                              **STAFF_HOLD_REASONS, **ARTICLE_RECOVERY_REASONS}.items():
+            self.assertEqual(alerts.REASON_LABELS[reason], label)
+        for reason, label in BACKGROUND_REASONS.items():
+            self.assertEqual(alerts.REASON_LABELS[reason], label)
+        self.assertEqual(alerts.ALERT_REASONS, frozenset(TODAY_REASONS) | frozenset(P2_REASONS)
+                         | frozenset(HOSTED_QUALITY_REASONS) | frozenset(STUCK_REASONS) | frozenset(BACKGROUND_REASONS)
+                         | frozenset(INVARIANT_REASONS) | frozenset(ASK_LADDER_REASONS)
+                         | frozenset(STAFF_HOLD_REASONS) | frozenset(ARTICLE_RECOVERY_REASONS))
         self.assertEqual(set(alerts.REASON_LABELS), set(alerts.ALERT_REASONS))
         self.assertEqual(alerts.DETECTED_REASONS,
                          ("run_terminal", "run_blocked", "startup_autofill_blocked", "your_turn_72h", "no_draft_24h"))
 
     def test_labels_carry_no_dashes(self):
-        for label in {**P2_REASONS, **HOSTED_QUALITY_REASONS}.values():
+        for label in {**P2_REASONS, **HOSTED_QUALITY_REASONS, **STUCK_REASONS, **INVARIANT_REASONS,
+                      **ASK_LADDER_REASONS, **STAFF_HOLD_REASONS, **ARTICLE_RECOVERY_REASONS}.values():
             self.assertNotRegex(label, "[\u2013\u2014]")
             self.assertNotIn(" - ", label)
 
@@ -153,7 +181,8 @@ class AlertStoreTests(TestCase):
         self.assertEqual(set(self._receipts()), {first, tomorrow})
 
     def test_invalid_or_non_p2_slots_are_rejected(self):
-        for reason, slot in (("run_terminal", "day-2026-11-02"), ("pull_request_cap", "private detail@email.test")):
+        # run_terminal takes an incident slot (B5); run_blocked is a pre-P2 reason without one.
+        for reason, slot in (("run_blocked", "day-2026-11-02"), ("pull_request_cap", "private detail@email.test")):
             with self.subTest(reason=reason, slot=slot), self.assertRaises(ValueError):
                 alerts.queue_founder_journey_alert(organization=self.org, alert_reason=reason, slot=slot)
 

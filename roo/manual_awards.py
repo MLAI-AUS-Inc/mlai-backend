@@ -14,7 +14,7 @@ from core.models import User
 
 from .models import Ledger, PointsAdmin
 from .permissions import IdempotencyConflictError, PermissionDeniedError, is_points_admin
-from .services import PointsService
+from .services import PointsService, record_volunteer_credit
 
 
 class ManualAwardError(ValueError):
@@ -141,6 +141,8 @@ def adjust_points(*, actor, admin_slack_id, values, resolve_slack_user):
             created_by_slack_id=admin_slack_id, idempotency_key=key,
             reference_type="MANUAL_ADJUSTMENT", reference_id=fingerprint,
         )
+    if points > 0:
+        record_volunteer_credit(ledger)
     return {
         "success": True,
         "new_balance": PointsService.get_balance(recipient)["balance"],

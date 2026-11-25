@@ -46,12 +46,14 @@ class CoworkingTodayTests(unittest.TestCase):
         self.booking = SimpleNamespace(pk="booking-123", points_cost=4)
         self.service.book.return_value = (self.booking, True)
         self.user = SimpleNamespace(pk="member-123", slack_id="UMEMBER", is_authenticated=True)
+        self.announce = Mock(return_value=True)
         modules = {}
         for name, attrs in {
             "roo.models": {"CoworkingBooking": self.model},
             "roo.services": {"CoworkingService": self.service},
             "roo.permissions": {"InsufficientBalanceError": InsufficientBalanceError},
             "community_chat.authentication": {"CommunityChatAccountAuthentication": NoSessionAuthentication},
+            "community_chat.coworking_announcement": {"announce_booking": self.announce},
         }.items():
             module = ModuleType(name)
             module.__dict__.update(attrs)
@@ -70,6 +72,12 @@ class CoworkingTodayTests(unittest.TestCase):
             2026, 9, 10, 23, 30, tzinfo=datetime_timezone.utc))
         self.clock.start()
         self.addCleanup(self.clock.stop)
+        # Dummy DB settings: run on-commit callbacks immediately, as Django
+        # does outside an atomic block.
+        self.on_commit = patch.object(
+            self.views.transaction, "on_commit", side_effect=lambda callback: callback())
+        self.on_commit.start()
+        self.addCleanup(self.on_commit.stop)
 
     def request(self, method="get", data=None, authenticated=True):
         request = getattr(self.factory, method)("/coworking/today/", data or {}, format="json")
@@ -152,3 +160,21 @@ class CoworkingTodayTests(unittest.TestCase):
             self.assertEqual(response["Cache-Control"], "private, no-store")
         self.service.book.assert_not_called()
         self.model.objects.filter.assert_not_called()
+
+    def test_new_booking_is_announced_once_after_commit(self):
+        response = self.request("post", {"date": "2026-09-11"})
+        self.assertEqual(response.status_code, 201)
+        self.announce.assert_called_once_with(self.user, self.booking)
+
+    def test_repeat_or_failed_booking_is_not_announced(self):
+        self.service.book.return_value = (self.booking, False)
+        self.assertEqual(self.request("post", {"date": "2026-09-11"}).status_code, 200)
+        self.service.book.side_effect = InsufficientBalanceError()
+        self.assertEqual(self.request("post", {"date": "2026-09-11"}).status_code, 409)
+        self.announce.assert_not_called()
+
+    def test_announcement_failure_never_changes_the_receipt(self):
+        self.announce.return_value = False
+        response = self.request("post", {"date": "2026-09-11"})
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["status"], "booked")

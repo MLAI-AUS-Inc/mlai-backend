@@ -11,7 +11,13 @@ CHAT_TARGETS = (
     "chat_access", "relay_messages_and_media", "bridge_copies_and_credentials",
     "chat_profile_and_preferences", "backups_and_processor_copies", "relay_inbox_cursors",
 )
-ACCOUNT_TARGETS = CHAT_TARGETS + ("shared_account_and_dependencies",)
+SHARED_ACCOUNT_TARGET = "shared_account_and_dependencies"
+ACCOUNT_TARGETS = CHAT_TARGETS + (SHARED_ACCOUNT_TARGET,)
+EVIDENCE_FIELDS = {
+    "deleted_rows", "remaining_rows", "revoked_credentials", "removed_objects", "verified_targets",
+}
+LIVE_ERASURE_DAYS = 7
+DELETION_DEADLINE_DAYS = 30
 
 
 def targets_for(scope):
@@ -35,7 +41,48 @@ def schedule_deletion(record):
 
 def deletion_deadline(record):
     """The owner commitment is 30 calendar days from the original request."""
-    return record.requested_at + timedelta(days=30)
+    return record.requested_at + timedelta(days=DELETION_DEADLINE_DAYS)
+
+
+def live_erasure_deadline(record):
+    """Live systems and managed Slack copies share the day-seven target."""
+    return record.requested_at + timedelta(days=LIVE_ERASURE_DAYS)
+
+
+def deletion_pending(user_id):
+    """Prevent re-enrollment and new sharing while any deletion scope is open."""
+    return AccountDeletionRequest.objects.filter(user_id=user_id).exclude(
+        status=AccountDeletionRequest.Status.COMPLETED,
+    ).exists()
+
+
+def _verified_cleanup(counts):
+    return (
+        isinstance(counts, dict)
+        and counts.keys() <= EVIDENCE_FIELDS
+        and all(type(value) is int and 0 <= value < 2 ** 63 for value in counts.values())
+        and counts.get("remaining_rows") == 0
+        and counts.get("verified_targets", 0) > 0
+    )
+
+
+def targets_verified(request, targets):
+    """Check independent cleanup evidence rather than a task status alone."""
+    verified = {
+        task.target for task in request.tasks.filter(target__in=targets)
+        if task.status == AccountDeletionTask.Status.COMPLETED and _verified_cleanup(task.evidence)
+    }
+    return set(targets).issubset(verified)
+
+
+def _finalize_locked(request, now):
+    if not targets_verified(request, targets_for(request.scope)):
+        return
+    if request.scope == AccountDeletionRequest.Scope.ACCOUNT and request.user_id is not None:
+        return
+    request.status = AccountDeletionRequest.Status.COMPLETED
+    request.completed_at = now
+    request.save(update_fields=("status", "completed_at", "updated_at"))
 
 
 @transaction.atomic
@@ -88,26 +135,25 @@ def fail_task(task_id, *, attempt, error_code):
 def complete_task(task_id, *, attempt, verified_counts):
     """Record an executor's verified cleanup counts, rejecting stale workers.
 
-    Only real cleanup executors may call this after read-after-delete checks.
-    No admin or client endpoint may set completion. Request-level completion
-    remains separate until every required storage boundary is verified.
+    Only cleanup executors call this after read-after-delete checks. The
+    request lock serializes the final readback with other completing tasks.
     """
-    if (not isinstance(verified_counts, dict) or not verified_counts
-            or len(verified_counts) > 20
-            or any(key not in {"deleted_rows", "remaining_rows", "revoked_credentials", "removed_objects", "verified_targets"}
-                   or type(value) is not int or not 0 <= value < 2 ** 63 for key, value in verified_counts.items())):
-        raise ValueError("Deletion evidence must contain bounded non-sensitive counts")
-    if verified_counts.get("remaining_rows", 0) != 0:
-        raise ValueError("Cleanup with remaining rows is not complete")
+    if not _verified_cleanup(verified_counts):
+        raise ValueError("Deletion evidence must verify a target and explicitly prove zero remaining rows")
     snapshot = AccountDeletionTask.objects.get(pk=task_id)
-    AccountDeletionRequest.objects.select_for_update().get(pk=snapshot.request_id)
+    request = AccountDeletionRequest.objects.select_for_update().get(pk=snapshot.request_id)
     task = AccountDeletionTask.objects.select_for_update().get(pk=task_id)
-    if task.status != AccountDeletionTask.Status.PROCESSING or task.attempts != attempt:
+    if (request.status == AccountDeletionRequest.Status.COMPLETED
+            or task.status != AccountDeletionTask.Status.PROCESSING or task.attempts != attempt):
         return False
+    if task.target == SHARED_ACCOUNT_TARGET and request.user_id is not None:
+        raise ValueError("Shared account erasure requires removal of the linked account.")
+    now = timezone.now()
     task.status = AccountDeletionTask.Status.COMPLETED
-    task.completed_at = timezone.now()
+    task.completed_at = now
     task.next_attempt_at = None
     task.error_code = ""
     task.evidence = verified_counts
     task.save()
+    _finalize_locked(request, now)
     return True

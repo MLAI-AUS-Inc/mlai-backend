@@ -12,6 +12,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 
+from .deletion_tasks import deletion_pending
 from .models import AccountDeletionRequest, AiConsentRecord, CommunityChatAccountSession
 
 
@@ -36,7 +37,7 @@ def ai_disclosure():
 def has_ai_consent(user_id):
     """Check current consent at dispatch time, including disclosure changes."""
     disclosure = ai_disclosure()
-    return disclosure["available"] and AiConsentRecord.objects.filter(
+    return disclosure["available"] and not deletion_pending(user_id) and AiConsentRecord.objects.filter(
         user_id=user_id, purpose="roo_chat", user__is_active=True,
         disclosure_version=disclosure["version"],
         provider_digest=disclosure["provider_digest"],
@@ -64,6 +65,8 @@ def locked_privacy_session(authenticated_session):
 def set_ai_consent(*, authenticated_session, granted, version, provider_digest):
     """Withdraw at any time; require the exact visible disclosure when granting."""
     with locked_privacy_session(authenticated_session) as (user, _):
+        if granted and deletion_pending(user.pk):
+            raise PermissionDenied("AI sharing is paused while your deletion request is processed.")
         disclosure = ai_disclosure()
         if granted and (not disclosure["available"] or version != disclosure["version"]
                         or provider_digest != disclosure["provider_digest"]):
@@ -115,4 +118,7 @@ def request_account_deletion(*, authenticated_session, scope, policy_version):
         record = AccountDeletionRequest.objects.create(user=user, scope=scope, policy_version=policy_version)
         from .deletion_tasks import schedule_deletion
         schedule_deletion(record)
+        if settings.COMMUNITY_CHAT_ACCOUNT_DELETION_NOTICE_ENABLED:
+            from .deletion_notice import capture_recipient
+            capture_recipient(record, user.email)
         return record, True

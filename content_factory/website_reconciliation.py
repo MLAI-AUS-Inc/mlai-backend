@@ -16,6 +16,7 @@ from .website_contract import cleanup_plan, safe_repository_path, evidence_diges
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot
 from . import website_preview_cleanup_budget as preview_budget
 from . import website_cancellation_retirement as cancel_work
+from . import website_repository_identity as identity
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +120,16 @@ def _setup_pull_merged_as(website, pull, *, number, head_sha, source_sha):
         and head.get("sha") == head_sha and _pull_from_selected_repository(website, head, base))
 
 
-def _commit_tree_sha(website, sha, headers):
+def commit_tree_sha(website, sha, headers=None):
     """Read the tree of one exact commit in the selected repository."""
     from integrations import http_client
     from .website_contract import SHA_PATTERN
-    response = http_client.get(f"https://api.github.com/repos/{website.github_repo}/git/commits/{sha}",
-        headers=headers, timeout=(3, 15))
+    url = f"https://api.github.com/repos/{website.github_repo}/git/commits/{sha}"
+    if headers is None:
+        from integrations.services.github_connections import read_bound_repository
+        response = read_bound_repository(website, url)
+    else:
+        response = http_client.get(url, headers=headers, timeout=(3, 15))
     response.raise_for_status()
     commit = response.json()
     tree = commit.get("tree") if isinstance(commit, dict) else None
@@ -170,7 +175,7 @@ def _find_owner_merged_setup(website, rows, source_sha, identity):
                     continue
                 for sha in (source_sha, head_sha):
                     if sha not in trees:
-                        trees[sha] = _commit_tree_sha(website, sha, headers)
+                        trees[sha] = commit_tree_sha(website, sha, headers)
                 if trees[source_sha] != trees[head_sha]:
                     # Merged with other changes (a moved base or an edited merge):
                     # that source was never previewed, so it is scanned as external.
@@ -270,6 +275,9 @@ def _owner_merge_recordable(website, run, evidence):
     commit is never replaced.
     """
     from .vibe_marketing_views import _pull_request_number_from_run
+    from .website_content_files import requires_independent_verification
+    if requires_independent_verification(run.result):
+        return False
     result = run.result if isinstance(run.result, dict) else {}
     setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
     response = result.get("merge_response") if isinstance(result.get("merge_response"), dict) else {}
@@ -342,6 +350,16 @@ def revoke_installation(installation_id, *, repository_ids=None, reason="github_
     return count
 
 
+def _never_verified(website):
+    """Whether nothing about this connection's current generation was ever verified.
+
+    Conservative: any verified commit, a publishing-ready capability or a target
+    with a verification stamp keeps the push-time lock.
+    """
+    return (not website.verified_sha and not (website.capabilities or {}).get("publishingReady")
+        and not website.targets.filter(generation=website.generation, verified_at__isnull=False).exists())
+
+
 def handle_website_github_event(event_type, payload):
     """Process verified lifecycle events using immutable IDs, fail closed on loss."""
     action = str(payload.get("action") or "")
@@ -352,6 +370,16 @@ def handle_website_github_event(event_type, payload):
     elif event_type == "installation_repositories" and action == "removed" and installation_id:
         ids = [r["id"] for r in payload.get("repositories_removed", []) if isinstance(r, dict) and isinstance(r.get("id"), int)]
         result["revoked"] = revoke_installation(installation_id, repository_ids=ids, reason="github_repository_removed")
+    elif (event_type, action) in {("installation", "created"), ("installation_repositories", "added")}:
+        # An organisation owner approved a founder's request: connect that founder.
+        from integrations.services.github_owner_requests import pick_up
+        try:
+            result["owner_requests_connected"] = pick_up(event_type, payload)
+        except Exception:
+            logger.exception("github_owner_request_pickup_failed installation_id=%s", installation_id)
+    elif event_type == "repository" and action in identity.IDENTITY_ACTIONS and identity.enabled():
+        # Same repository id, new name, owner or visibility: refresh, never revoke.
+        result.update(identity.handle_repository_event(action, payload))
     elif event_type == "repository" and action in {"deleted", "transferred", "renamed", "archived", "privatized"}:
         repository_id = (payload.get("repository") or {}).get("id")
         if repository_id:
@@ -371,6 +399,10 @@ def handle_website_github_event(event_type, payload):
             if payload.get("ref") != f"refs/heads/{website.branch}" or website.verified_sha == source_sha:
                 continue
             owned_merge = _find_owned_merge(website, config.organization_id, source_sha)
+            # One read-only compare, outside the authority locks: a push that
+            # leaves MLAI's articles files alone keeps the current proof.
+            from .website_source_carry import apply_carry, carry_decision
+            carry = carry_decision(website, config, source_sha, owned_merge=bool(owned_merge))
             from organizations.models import Organization
             with transaction.atomic():
                 Organization.objects.select_for_update().get(pk=config.organization_id)
@@ -390,25 +422,52 @@ def handle_website_github_event(event_type, payload):
                     website.configuration_version += 1
                     from .website_goal_scope import record_source_transition
                     record_source_transition(website, previous_revision=previous_revision, source_sha=source_sha)
-                    if not owned_merge:
+                    carried_from = carry.get("from_sha") if apply_carry(
+                        website, config.default_publish_target_id, source_sha, carry) else ""
+                    never_verified = not owned_merge and _never_verified(website)
+                    if carried_from:
+                        result["carried"] = result.get("carried", 0) + 1
+                    elif never_verified:
+                        # Nothing was ever verified, so a push revokes nothing:
+                        # no lock, no dropped capability, no paid source check.
+                        # The observed head (snapshot above) is what preparation
+                        # scans next (Studio Narrm, Pawshare, Examon; 18 Nov 2026).
+                        website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"]
+                        result["never_verified"] = result.get("never_verified", 0) + 1
+                    elif not owned_merge:
                         website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
-                    WebsiteConnectionOperation.objects.get_or_create(
-                        idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
-                            "connection": website, "generation": website.generation, "action": "source-reverify",
-                            "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
-                                "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
-                                "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "", "scan_required": not bool(owned_merge)},
-                            "receipt": {"status": "verification_queued", "repository_modified": False}})
-                    if not owned_merge:
+                    if not never_verified:
+                        queued = WebsiteConnectionOperation.objects.get_or_create(
+                            idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
+                                "connection": website, "generation": website.generation, "action": "source-reverify",
+                                "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
+                                    "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
+                                    "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "",
+                                    # A carried proof is re-checked in the background
+                                    # for free: no paid scan of unchanged setup files.
+                                    "scan_required": not bool(owned_merge or carried_from),
+                                    "carried_from": carried_from},
+                                "receipt": {"status": "verification_queued", "repository_modified": False}})
+                        check, check_created = queued if isinstance(queued, tuple) else (None, False)
+                        if check_created:
+                            # B13b: this check is now the one that chases the head.
+                            from .website_source_sync import coalesce
+                            superseded = coalesce(website, check)
+                            if superseded:
+                                result["superseded"] = result.get("superseded", 0) + superseded
+                    if not owned_merge and not carried_from and not never_verified:
                         website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
-                    website.save(update_fields=["configuration_version", "capabilities", "blockers", "updated_at"])
-                    result["invalidated"] += 1
-                    prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else ""))
+                    website.save(update_fields=["configuration_version", "capabilities", "blockers", "verified_sha", "updated_at"])
+                    if not never_verified:
+                        result["invalidated"] += 1
+                    prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else "",
+                        bool(carried_from)))
         # Run no provider calls while the webhook transaction owns authority
         # locks. Both MLAI merges and customer pushes resume the same journey.
-        for identifier, organization_id, owned_merge_run_id in prepare_wakes:
+        for identifier, organization_id, owned_merge_run_id, carried in prepare_wakes:
             from .website_prepare import wake_prepare_for_source
-            wake_prepare_for_source(identifier, organization_id=organization_id, owned_merge_run_id=owned_merge_run_id)
+            wake_prepare_for_source(identifier, organization_id=organization_id, owned_merge_run_id=owned_merge_run_id,
+                source_sha=source_sha, carried=carried)
     else:
         result["ignored"] = True
     return result
@@ -754,6 +813,11 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
     excluded = ["workflow"] if notices_enabled else ["workflow", notice_action]
+    # The live-status watch is advanced only by its own sweep; the generic
+    # cancellation branch below would close it and restart its clock.
+    from .website_live_status import ACTION as live_status_action
+    from .repo_health_operations import ACTION as probe_action
+    excluded.extend((live_status_action, probe_action))
     if not accounting_enabled():
         excluded.append(usage_action)
     if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
@@ -766,6 +830,12 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     except Exception as exc:
         # Freshness upkeep must never stop cancellation, cleanup or preparation.
         logger.warning("website_verification_refresh_sweep_failed error_type=%s", type(exc).__name__)
+    try:
+        # B13b: an hourly head read heals a push webhook GitHub never delivered.
+        from .website_source_sync import sweep as source_sync_sweep
+        source_sync_sweep(now=now, limit=limit, connection_id=connection_id)
+    except Exception as exc:
+        logger.warning("website_source_sync_sweep_failed error_type=%s", type(exc).__name__)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
         Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
         Q(action=usage_action, state="running") |
@@ -782,6 +852,23 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        from .article_preview_recovery import ACTION as recovery_action
+        from .article_preview_recovery_worker import advance as advance_recovery
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action=recovery_action).exists():
+            outcome = advance_recovery(identifier, now=now)
+            if outcome:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                result["operations"].append({"id":str(identifier),"action":recovery_action,"outcome":outcome})
+            continue
+        from .reviewed_article_pr_worker import ACTION as reviewed_pr_action, advance as advance_reviewed_pr
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action=reviewed_pr_action).exists():
+            outcome = advance_reviewed_pr(identifier, now=now)
+            if outcome:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                result["operations"].append({"id": str(identifier), "action": reviewed_pr_action, "outcome": outcome})
+            continue
         from .article_publication_observation import ACTION as publication_action, advance as advance_publication
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action=publication_action).exists():
             outcome = advance_publication(identifier, now=now)
@@ -1325,8 +1412,18 @@ def _refresh_target(connection, config):
     accepted = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
         payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-updated_at").first()
     if accepted is None or mapping(accepted.receipt).get("attestation_origin") != "authenticated_ci":
-        return None
+        # A site Ready on merge on MLAI's own build proof (no live or CI proof)
+        # renews that proof the same way, without the founder's host.
+        return target if _renews_build_proof_only(connection, target) else None
     return target
+
+
+def _renews_build_proof_only(connection, target):
+    """Whether ``target``'s accepted proof is MLAI's build proof alone, renewable under ARTICLES_READY_ON_MERGE_ENABLED."""
+    from .website_live_status import enabled as ready_on_merge
+    from .website_live_verification import build_proof
+    from .website_sealed_workflow import required
+    return bool(ready_on_merge() and build_proof(target) and not required(connection, target))
 
 
 def queue_verification_refreshes(*, limit=20, now=None, connection_id=None):
@@ -1471,6 +1568,22 @@ def _renews_by_live_url(website, target):
     return selected(website.organization) and applicable(target)
 
 
+def _renew_while_host_lags(exc, config, target, source_sha):
+    """Renew MLAI's own proof when only the founder's host failed the check; ``None`` otherwise.
+
+    With ``ARTICLES_READY_ON_MERGE_ENABLED`` the host is a background status
+    (``website_live_status``), so a same-source check whose live fetch fails
+    keeps the build proof current instead of letting it age out after
+    ``VERIFICATION_MAX_AGE``. A changed source or a sealed target still needs
+    the full check.
+    """
+    from .website_prepare import HOST_WAIT_CODES
+    from .website_verification import renew_build_proof
+    if exc.code not in HOST_WAIT_CODES:
+        return None
+    return renew_build_proof(config, target, source_sha=source_sha)
+
+
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
@@ -1480,6 +1593,7 @@ def _process_source_reverification(identifier, now):
         _require_roo_points_for_ai_agent, _mark_roo_points_gate_authorized, founder_actor_id_for_user)
     from .contract import CONTENT_FACTORY_REQUEST_SOURCE
     from .website_operations import reserve_workflow_operation, bind_operation_run
+    from .website_prepare_sticky_stop import ScanHeld
     from integrations import http_client
     with transaction.atomic():
         op = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").filter(pk=identifier, state="pending").first()
@@ -1493,6 +1607,7 @@ def _process_source_reverification(identifier, now):
         "connection_generation": getattr(op, "generation", op.connection.generation),
         "github_repo": op.connection.github_repo, "expected_source_sha": op.payload["source_sha"]}
     state, receipt = "pending", dict(op.receipt)
+    source_moved = False
     try:
         with authority_guard(binding, action="read") as website:
             pinned = op.payload.get("target_id")
@@ -1525,23 +1640,39 @@ def _process_source_reverification(identifier, now):
                     record_owner_setup_merge(current, owned_merge)
         if scan_required and not receipt.get("scan_run_id"):
             require_unlocked_remote_call()
+            # A stopped preparation this push cannot help, or a spent daily
+            # scan budget, settles the check without a paid scan (plan B3).
+            from .website_prepare_sticky_stop import check_source_scan
+            check_source_scan(website, op, now=now)
             remote = _content_factory_remote_config()
             if not remote["enabled"]:
                 raise WebsiteAuthorityError("source_reverification_unavailable", "Repository scanning is unavailable.", retryable=True)
             owner = website.authorized_by
-            if owner is None:
-                raise WebsiteAuthorityError("website_owner_review_required", "The website owner must verify the current integration.", retryable=True)
-            points_error, balance = _require_roo_points_for_ai_agent(owner,
-                domain=website.organization.domain, action="repo_scan")
-            if points_error is not None:
-                raise WebsiteAuthorityError("roo_points_required", "The website owner needs sufficient Roo points to verify this integration.", retryable=True)
-            request_id, prior = _source_rescan_request(op, website, attempt)
-            scan_payload = {**binding, "client_request_id": request_id, "force_refresh": True,
-                "request_source": CONTENT_FACTORY_REQUEST_SOURCE, "slack_user_id": founder_actor_id_for_user(owner),
-                "scan_purpose": "setup", "scaffold_if_missing": False,
-                "auto_setup_preview": False, "generate_components": False}
-            _mark_roo_points_gate_authorized(scan_payload, domain=website.organization.domain,
-                action="repo_scan", current_balance=balance)
+            from . import website_source_sync as source_sync
+            service_rescan = source_sync.enabled()
+            if service_rescan:
+                # B13b (D5): MLAI's own service rescans; the founder's account,
+                # points and presence are not needed and nothing is charged.
+                if source_sync.cap_reached(website, now=now, exclude_pk=op.pk):
+                    receipt["sync_wait"] = "daily_scan_cap"
+                    raise WebsiteAuthorityError("source_reverification_unavailable",
+                        "Today's automatic rescans for this website are used up. It continues tomorrow.", retryable=True)
+                request_id, prior = _source_rescan_request(op, website, attempt)
+                scan_payload = source_sync.service_scan_payload(binding, website, request_id=request_id, owner=owner)
+            else:
+                if owner is None:
+                    raise WebsiteAuthorityError("website_owner_review_required", "The website owner must verify the current integration.", retryable=True)
+                points_error, balance = _require_roo_points_for_ai_agent(owner,
+                    domain=website.organization.domain, action="repo_scan")
+                if points_error is not None:
+                    raise WebsiteAuthorityError("roo_points_required", "The website owner needs sufficient Roo points to verify this integration.", retryable=True)
+                request_id, prior = _source_rescan_request(op, website, attempt)
+                scan_payload = {**binding, "client_request_id": request_id, "force_refresh": True,
+                    "request_source": CONTENT_FACTORY_REQUEST_SOURCE, "slack_user_id": founder_actor_id_for_user(owner),
+                    "scan_purpose": "setup", "scaffold_if_missing": False,
+                    "auto_setup_preview": False, "generate_components": False}
+                _mark_roo_points_gate_authorized(scan_payload, domain=website.organization.domain,
+                    action="repo_scan", current_balance=balance)
             try:
                 scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
             except WebsiteAuthorityError as exc:
@@ -1552,8 +1683,11 @@ def _process_source_reverification(identifier, now):
                         "Waiting for the earlier repository scan to settle.", retryable=True) from exc
                 raise
             from .dispatch_admission import post_dispatch, reserve_user_dispatch
-            admitted = reserve_user_dispatch(payload=scan_payload, workflow="repo_scan", domain=website.organization.domain,
-                actor_id=founder_actor_id_for_user(owner), user=owner)
+            if service_rescan:
+                admitted = source_sync.reserve_service_dispatch(scan_payload, website)
+            else:
+                admitted = reserve_user_dispatch(payload=scan_payload, workflow="repo_scan", domain=website.organization.domain,
+                    actor_id=founder_actor_id_for_user(owner), user=owner)
             response = post_dispatch(admitted, http_client.post, f"{remote['base_url']}/api/runs/scan", json=scan_payload,
                 headers=_content_factory_headers(), timeout=(3, 30))
             response.raise_for_status()
@@ -1564,6 +1698,8 @@ def _process_source_reverification(identifier, now):
                 github_repo=website.github_repo, payload=scan_payload, remote_data=remote_run)
             bind_operation_run(scan_op, run)
             receipt["scan_run_id"] = run.run_id
+            if service_rescan:
+                receipt[source_sync.SERVICE_RESCAN_KEY] = True
         if target is None and op.receipt.get("scan_run_id") and _source_rescan_finished(op, website):
             # An earlier attempt's rescan finished without recording the pinned
             # or the selected target, so no row this check could verify will
@@ -1582,10 +1718,38 @@ def _process_source_reverification(identifier, now):
                 # The rescan has not recorded this source's build proof yet.
                 raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
             config = OrganizationContentConfig.objects.get(website_connection=website)
-            verified = verify_live_url(config, target, setup_run_id=op.payload.get("owned_merge_run_id") or "")
+            try:
+                verified = verify_live_url(config, target, setup_run_id=op.payload.get("owned_merge_run_id") or "")
+            except WebsiteAuthorityError as exc:
+                renewed = _renew_while_host_lags(exc, config, target, op.payload["source_sha"])
+                if renewed is None:
+                    raise
+                verified = {"operation_id": ""}
+                receipt.update(method="build_proof", host_code=exc.code)
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": "live_url",
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": receipt.get("method") or "live_url",
                 "deployment_operation_id": verified["operation_id"], "repository_modified": False}
+        elif op.payload.get("carried_from") and target.source_sha == op.payload["source_sha"]:
+            # A push that left MLAI's articles files alone carried the build
+            # proof forward (website_source_carry); re-check it for free.
+            from .website_source_carry import recheck_carried
+            checked = recheck_carried(website, target, op.payload["source_sha"])
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, **checked,
+                "deployment_operation_id": "", "repository_modified": False}
+        elif (op.payload.get("purpose") == VERIFICATION_REFRESH_PURPOSE and getattr(website, "verified_sha", None) == op.payload["source_sha"]
+                and target.source_sha == op.payload["source_sha"] and _renews_build_proof_only(website, target)
+                and not website.operations.filter(generation=website.generation, action="ci-verify", state="completed",
+                    payload__source_sha=op.payload["source_sha"], payload__target_id=target.target_key).exists()):
+            # A same-source refresh with no CI proof to read again: MLAI's own
+            # build proof is renewed (ARTICLES_READY_ON_MERGE_ENABLED).
+            from .website_verification import renew_build_proof
+            config = OrganizationContentConfig.objects.get(website_connection=website)
+            if renew_build_proof(config, target, source_sha=op.payload["source_sha"]) is None:
+                raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": "build_proof",
+                "deployment_operation_id": "", "repository_modified": False}
         else:
             ci, attested = None, None
             if op.payload.get("renew") == "deployment":
@@ -1597,10 +1761,19 @@ def _process_source_reverification(identifier, now):
                 ci = record_ci_attestation(proof)
                 attested = ci.receipt
             config = OrganizationContentConfig.objects.get(website_connection=website)
-            deployment = verify_live_deployment(config, data=attested)
+            try:
+                deployment_id = str(verify_live_deployment(config, data=attested).pk)
+            except WebsiteAuthorityError as exc:
+                if _renew_while_host_lags(exc, config, target, op.payload["source_sha"]) is None:
+                    raise
+                deployment_id = ""
+                receipt.update(method="build_proof", host_code=exc.code)
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
                 "target_id": target.target_key, "ci_operation_id": str(ci.pk) if ci else "", "ci_reused": ci is None,
-                "deployment_operation_id": str(deployment.pk), "repository_modified": False}
+                "deployment_operation_id": deployment_id, "repository_modified": False}
+    except ScanHeld as held:
+        state = held.state
+        receipt.update(held.receipt)
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
@@ -1609,6 +1782,7 @@ def _process_source_reverification(identifier, now):
             # GitHub's branch has moved past this source, and that newer push
             # queued its own verification. Retrying this one can never succeed.
             state = "cancelled"
+            source_moved = True
             receipt.update(status="superseded", retryable=False)
         elif exc.authority_code == "operation_key_conflict":
             # A settled rescan already moved to a fresh identity, so this key
@@ -1626,6 +1800,18 @@ def _process_source_reverification(identifier, now):
         # re-check reports the cause instead of an hourly retry forever.
         state = "needs_attention"
         receipt.update(status="needs_attention", retryable=False)
+    if op.payload.get("carried_from") and state in {"pending", "needs_attention"}:
+        from .website_source_carry import lock_carried_source, recheck_failed
+        if recheck_failed(op, receipt, now=now):
+            # The background re-check of a carried proof failed for good: only
+            # now do articles lock, as every push did before.
+            lock_carried_source(op)
+            state = "needs_attention"
+            receipt.update(status="needs_attention", retryable=False)
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
         state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
+    if source_moved:
+        # B13b: GitHub's branch moved past this source; make sure its head has a check.
+        from .website_source_sync import after_superseded
+        after_superseded(op)
     return state

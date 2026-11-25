@@ -117,7 +117,12 @@ def _scope(value):
 def _admission(value):
     fields = {"schema_version", "dispatch_key", "organization_id", "principal", "workflow", "domain",
               "github_repo", "request_digest", "scope", "event_protocol"}
-    if (not isinstance(value, dict) or set(value) != fields or type(value["schema_version"]) is not int
+    # B16: an organization-research admission also carries its stamped scope.
+    stamped = isinstance(value, dict) and "authority_scope" in value
+    if stamped and value["authority_scope"] != "organization_research":
+        return False
+    if (not isinstance(value, dict) or set(value) != (fields | {"authority_scope"} if stamped else fields)
+            or type(value["schema_version"]) is not int
             or value["schema_version"] != 1 or type(value["event_protocol"]) is not int or value["event_protocol"] != 1
             or not _text(value["dispatch_key"], 255) or not _text(value["organization_id"], 100)
             or not _text(value["workflow"], 50) or not _text(value["domain"], 255, blank=True)

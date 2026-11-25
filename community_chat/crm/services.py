@@ -265,9 +265,13 @@ def save_mailbox(mailbox: Optional[SenderMailbox], data: dict, *, actor) -> Send
     creating = mailbox is None
     # Existing pre-stream mailboxes stay editable by admins exactly as on main
     # (limits, switching off and on). New mailboxes always follow the stream rules.
+    # Switching an existing sender off is always allowed, even on a protected
+    # domain: after the legacy path ends, that is how the old root mailboxes retire.
+    only_switching_off = not creating and set(data) == {"enabled"} and data["enabled"] is False
     if not (not creating and legacy_mailbox(mailbox)):
         domain = sending_domains.domain_of(data["email"]) if creating else mailbox.domain
-        if protected_domain(domain) or (mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email))):
+        if not only_switching_off and (protected_domain(domain) or (
+                mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email)))):
             raise CrmError("mailbox_domain_protected")
         if not is_owner(actor):
             raise CrmError("owner_required", 403)
@@ -316,7 +320,10 @@ def _set_audience(blast: Blast, data: dict) -> None:
             raise CrmError('invalid_audience_preset')
         if preset == 'city' and data.get('city_id') not in CITY_OPTIONS:
             raise CrmError('city_required')
-        blast.event, blast.segment, blast.quick_segment, blast.purpose = None, None, '', 'marketing'
+        # An invite keeps its event: the preset only says who is invited to it.
+        if blast.message_type != Blast.MessageType.INVITE:
+            blast.event = None
+        blast.segment, blast.quick_segment, blast.purpose = None, '', 'marketing'
         definition = ({'version': 2, 'include': {'kind': 'rule', 'rule': {'type': 'location_affinity',
             'op': 'has_any', 'city_ids': [data['city_id']]}}, 'exclude': None} if preset == 'city' else
             {'match': 'all', 'rules': [], 'exclude': []})
@@ -366,6 +373,10 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
             raise CrmError('reconfirmation_audience_fixed')
     if "purpose" in data:
         blast.purpose = data["purpose"]
+    if "message_type" in data:
+        if blast.message_type == Blast.MessageType.REMINDER:
+            raise CrmError("reminder_type_fixed")
+        blast.message_type = data["message_type"]
     if "event_id" in data:
         blast.event = (
             None if data["event_id"] is None else _found(CrmEvent, data["event_id"], "event_not_found")

@@ -17,7 +17,7 @@ from .portable_drafts import explicit_portable_request, original_portable_run
 from .service_views import ContentFactoryOrgConfigView
 from .vibe_marketing_views import VibeMarketingArticleView, VibeMarketingRunControlView, _queue_content_factory_run, _setup_blocked_response_for_generation
 from .vibe_marketing_views import _sync_local_run_from_remote
-from .website_connections import authority_guard, contract_for
+from .website_connections import authority_guard, contract_for, observed_source_sha
 from .website_contract import WebsiteAuthorityError
 from .website_models import WebsiteConnection, WebsiteConnectionTarget, WebsiteScanSnapshot
 from .website_tokens import mint_website_token
@@ -103,7 +103,12 @@ class ActivationConnectionTests(TestCase):
             response = self.admission(delivery_mode='content_only', delivery_mode_confirmed='true', expected_source_sha=SHA.upper(), **binding)
             self.assertEqual(response.status_code, 200, response.data)
             self.assertEqual(response.data['expected_source_sha'], SHA)
-            with self.assertRaises(WebsiteAuthorityError) as error:
+            # A copy-ready run never touches the repository: with the source
+            # follow switch on a newer commit does not stop it, and no remote
+            # head check runs either. Off keeps the earlier stop.
+            with authority_guard({**binding, 'expected_source_sha': 'b' * 40}, action='portable'):
+                pass
+            with override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=False), self.assertRaises(WebsiteAuthorityError) as error:
                 with authority_guard({**binding, 'expected_source_sha': 'b' * 40}, action='portable'):
                     pass
             self.assertEqual(error.exception.code, 'website_source_changed')
@@ -116,6 +121,51 @@ class ActivationConnectionTests(TestCase):
             with authority_guard(binding, action='read'):
                 pass
 
+    def test_owner_preview_retry_follows_a_moved_site_commit(self):
+        # La Vie run 30c8dadc (20 Nov 2026): the site was fixed after the run's
+        # build failed, and the owner's preview retry was refused because the
+        # branch had a newer commit. Only that retry may pass a moved head,
+        # only with the follow switch on; Content Factory re-pins before building.
+        binding = {**contract_for(self.website()), 'expected_source_sha': SHA}
+        moved = WebsiteAuthorityError('website_source_changed', 'The repository changed since this verification.')
+        with patch('content_factory.website_connections.verify_repository_native_target'), \
+                patch('content_factory.website_rollout.require_repository_write_policy'), \
+                patch('content_factory.website_connections.verify_repository_head', side_effect=moved) as head:
+            with authority_guard(binding, action='preview', follow_moved_preview=True):
+                pass
+            head.assert_called_once()
+            # The retry's attempt fence (advance_workflow_attempt) reads under
+            # the same pin once GitHub's newer head has been observed. It may
+            # follow too, and must not record the stale pin as GitHub's head.
+            website = self.connection
+            WebsiteScanSnapshot.objects.create(connection=website, generation=website.generation,
+                run_id='head-check:moved', source_sha='c' * 40, detector_version='github_head',
+                fingerprint='synthetic', evidence={})
+            with authority_guard(binding, action='read', follow_moved_preview=True):
+                pass
+            self.assertEqual(observed_source_sha(website), 'c' * 40)
+            with self.assertRaises(WebsiteAuthorityError) as error:
+                with authority_guard(binding, action='read'):
+                    pass
+            self.assertEqual(error.exception.code, 'website_source_changed')
+            for kwargs, settings in (({'action': 'preview'}, {}),
+                                     ({'action': 'setup', 'follow_moved_preview': True, 'require_current_head': True}, {}),
+                                     ({'action': 'preview', 'follow_moved_preview': True},
+                                      {'ARTICLES_SOURCE_FOLLOW_ENABLED': False})):
+                with self.subTest(kwargs=kwargs, settings=settings), override_settings(**settings), \
+                        self.assertRaises(WebsiteAuthorityError) as error:
+                    with authority_guard(binding, **kwargs):
+                        pass
+                self.assertEqual(error.exception.code, 'website_source_changed')
+        other = WebsiteAuthorityError('github_source_unavailable', 'GitHub could not verify the source.', retryable=True)
+        with patch('content_factory.website_connections.verify_repository_native_target'), \
+                patch('content_factory.website_rollout.require_repository_write_policy'), \
+                patch('content_factory.website_connections.verify_repository_head', side_effect=other), \
+                self.assertRaises(WebsiteAuthorityError) as error:
+            with authority_guard(binding, action='preview', follow_moved_preview=True):
+                pass
+        self.assertEqual(error.exception.code, 'github_source_unavailable')
+
     def test_current_durable_target_replaces_legacy_scan_authority(self):
         website = self.website()
         # No legacy ready scan is needed once a durable target is verified.
@@ -125,7 +175,13 @@ class ActivationConnectionTests(TestCase):
         access = {'verified': True, 'branch': 'main', 'sha': SHA}
         caps = article_capabilities(self.config, domain=self.org.domain, account={'saved': True, 'owned': True}, evidence=evidence, repository_access=access)
         self.assertTrue(caps['canGenerateArticle'])
-        self.assertFalse(caps['canPublishArticle'])
+        # MLAI's verified target is the publishing proof (ARTICLES_READY_ON_MERGE_ENABLED);
+        # with that kill switch off, publishing still waits for the live site.
+        self.assertTrue(caps['canPublishArticle'])
+        with override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False):
+            evidence = integration_evidence(self.config)
+            caps = article_capabilities(self.config, domain=self.org.domain, account={'saved': True, 'owned': True}, evidence=evidence, repository_access=access)
+            self.assertFalse(caps['canPublishArticle'])
         for update in ({'state': 'disconnected'}, {'state': 'paused'}, {'generation': 2},
             {'verified_sha': 'b' * 40}, {'last_verified_at': timezone.now() - timedelta(days=8)}, {'app_root': 'apps/site'}):
             original = {key: getattr(website, key) for key in update}
@@ -189,7 +245,8 @@ class ActivationConnectionTests(TestCase):
         binding = contract_for(website)
         response = self.admission(github_repo=website.github_repo)
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data['code'], 'website_connection_required')
+        # B12: a protocol fault of the worker, never "Reconnect this website".
+        self.assertEqual(response.data['code'], 'callback_contract_missing')
         with patch('content_factory.vibe_marketing_views._article_capabilities_for_context', return_value={'canGenerateArticle': True, 'canPublishArticle': True}) as caps:
             self.assertEqual(self.admission(**binding).status_code, 200)
             self.assertTrue(caps.call_args.kwargs['force'])

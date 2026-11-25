@@ -273,7 +273,7 @@ class PrivateStrategyKeyTests(TestCase):
         "self_heal", "startup_team", "founder_notices", "founder_funnel",
         "first_article_commands", "paid_article_commands", "founder_run_commands_v1",
         "editorial_catalog_commands_v1", "founder_library_commands_v1", "founder_review_commands_v1",
-        "research_workspace_reset_v1",
+        "research_workspace_reset_v1", "test_organization",
     )
 
     def _strategy(self):

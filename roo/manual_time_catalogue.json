@@ -1,0 +1,433 @@
+{
+  "version": "volunteer-time-draft-v1",
+  "quick_actions": [
+    "event.setup",
+    "event.door",
+    "event.pack",
+    "event.lead",
+    "event.workshop",
+    "content.promo"
+  ],
+  "rules": {
+    "selection": "One or more actions across any groups describe one block of volunteer time. Apply its duration once.",
+    "other": "When other is selected, require a short description of the unlisted work.",
+    "badge_candidates": "An action may refer approved work to an existing badge rule. Each rule still requires its own evidence, thresholds and visibility checks.",
+    "cross_cutting_badges": [
+      "hello.deliver",
+      "hello.steady"
+    ],
+    "automatic_paths": "Introductions, inductions attended, event attendance, routine boosts, founder updates and existing programme rewards keep their own paths. Receiving a pass, purchase, refund, balance adjustment or level bonus is outside this time form."
+  },
+  "groups": [
+    {
+      "id": "events",
+      "label": "Events & workshops",
+      "actions": [
+        {
+          "id": "event.setup",
+          "label": "Set up the venue",
+          "badge_candidates": [
+            "event.crew",
+            "ops.logistics"
+          ]
+        },
+        {
+          "id": "event.door",
+          "label": "Staffed the door",
+          "badge_candidates": [
+            "event.crew"
+          ]
+        },
+        {
+          "id": "event.pack",
+          "label": "Packed down",
+          "badge_candidates": [
+            "event.crew"
+          ]
+        },
+        {
+          "id": "event.plan",
+          "label": "Coordinated event logistics",
+          "badge_candidates": [
+            "event.crew",
+            "ops.logistics"
+          ]
+        },
+        {
+          "id": "event.lead",
+          "label": "Led an event",
+          "badge_candidates": [
+            "event.lead",
+            "event.series"
+          ]
+        },
+        {
+          "id": "event.speak",
+          "label": "Gave a talk or MC’d",
+          "badge_candidates": [
+            "event.speak"
+          ]
+        },
+        {
+          "id": "event.workshop",
+          "label": "Taught a workshop",
+          "badge_candidates": [
+            "content.teach",
+            "event.speak"
+          ]
+        },
+        {
+          "id": "event.judge",
+          "label": "Judged entries",
+          "badge_candidates": []
+        },
+        {
+          "id": "event.train",
+          "label": "Trained an event lead",
+          "badge_candidates": [
+            "event.handoff"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "community",
+      "label": "Community & mentoring",
+      "actions": [
+        {
+          "id": "community.welcome",
+          "label": "Welcomed new members",
+          "badge_candidates": []
+        },
+        {
+          "id": "community.induction",
+          "label": "Ran a founder induction",
+          "badge_candidates": [
+            "community.induct"
+          ]
+        },
+        {
+          "id": "community.cover",
+          "label": "Covered a community shift",
+          "badge_candidates": [
+            "community.manage"
+          ]
+        },
+        {
+          "id": "community.connect",
+          "label": "Introduced two members",
+          "badge_candidates": [
+            "community.connect"
+          ]
+        },
+        {
+          "id": "community.mentor",
+          "label": "Mentored someone",
+          "badge_candidates": [
+            "mentor.session",
+            "mentor.repeat",
+            "mentor.successor"
+          ]
+        },
+        {
+          "id": "community.support",
+          "label": "Covered support or moderation",
+          "badge_candidates": [
+            "care.support"
+          ],
+          "restricted": true
+        },
+        {
+          "id": "community.access",
+          "label": "Arranged an event accommodation",
+          "badge_candidates": [
+            "care.access"
+          ],
+          "restricted": true
+        }
+      ]
+    },
+    {
+      "id": "content",
+      "label": "Content & promotion",
+      "actions": [
+        {
+          "id": "content.promo",
+          "label": "Ran event promotion",
+          "badge_candidates": []
+        },
+        {
+          "id": "content.recap",
+          "label": "Wrote an event recap",
+          "badge_candidates": [
+            "content.recap"
+          ]
+        },
+        {
+          "id": "content.newsletter",
+          "label": "Wrote for the newsletter",
+          "badge_candidates": [
+            "content.article"
+          ]
+        },
+        {
+          "id": "content.photo",
+          "label": "Photographed an event",
+          "badge_candidates": []
+        },
+        {
+          "id": "content.media",
+          "label": "Made a video or podcast",
+          "badge_candidates": [
+            "content.story"
+          ]
+        },
+        {
+          "id": "content.guide",
+          "label": "Wrote a member guide",
+          "badge_candidates": [
+            "content.guide",
+            "content.reuse"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "design",
+      "label": "Design & research",
+      "actions": [
+        {
+          "id": "design.artwork",
+          "label": "Made artwork or a poster",
+          "badge_candidates": []
+        },
+        {
+          "id": "design.interface",
+          "label": "Designed an interface",
+          "badge_candidates": [
+            "design.ux"
+          ]
+        },
+        {
+          "id": "design.interview",
+          "label": "Interviewed users",
+          "badge_candidates": [
+            "design.discovery"
+          ]
+        },
+        {
+          "id": "design.findings",
+          "label": "Summarised user research",
+          "badge_candidates": [
+            "design.finding"
+          ]
+        },
+        {
+          "id": "design.retest",
+          "label": "Retested a design with users",
+          "badge_candidates": [
+            "design.loop"
+          ]
+        },
+        {
+          "id": "design.access",
+          "label": "Fixed an accessibility barrier",
+          "badge_candidates": [
+            "design.access"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tech",
+      "label": "Tech & data",
+      "actions": [
+        {
+          "id": "tech.report",
+          "label": "Reported a reproducible bug",
+          "badge_candidates": [
+            "build.report"
+          ]
+        },
+        {
+          "id": "tech.website",
+          "label": "Fixed a website bug",
+          "badge_candidates": [
+            "build.bug",
+            "build.ship",
+            "build.durable"
+          ]
+        },
+        {
+          "id": "tech.test",
+          "label": "Tested a release",
+          "badge_candidates": [
+            "build.qa"
+          ]
+        },
+        {
+          "id": "tech.build",
+          "label": "Built a feature or tool",
+          "badge_candidates": [
+            "build.ship"
+          ]
+        },
+        {
+          "id": "tech.recovery",
+          "label": "Restored a live service",
+          "badge_candidates": [
+            "build.release"
+          ]
+        },
+        {
+          "id": "data.clean",
+          "label": "Cleaned a dataset",
+          "badge_candidates": [
+            "data.clean"
+          ]
+        },
+        {
+          "id": "data.evaluate",
+          "label": "Ran an evaluation",
+          "badge_candidates": [
+            "data.eval",
+            "data.reuse"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "operations",
+      "label": "Operations & finance",
+      "actions": [
+        {
+          "id": "ops.chair",
+          "label": "Chaired a committee meeting",
+          "badge_candidates": [
+            "ops.chair"
+          ]
+        },
+        {
+          "id": "ops.minutes",
+          "label": "Took meeting minutes",
+          "badge_candidates": []
+        },
+        {
+          "id": "ops.money",
+          "label": "Managed invoices or accounts",
+          "badge_candidates": [
+            "ops.money"
+          ]
+        },
+        {
+          "id": "ops.supplies",
+          "label": "Organised supplies or a delivery",
+          "badge_candidates": [
+            "ops.logistics"
+          ]
+        },
+        {
+          "id": "ops.cowork",
+          "label": "Ran a coworking shift",
+          "badge_candidates": [
+            "community.manage"
+          ]
+        },
+        {
+          "id": "ops.handover",
+          "label": "Handed over a process",
+          "badge_candidates": [
+            "ops.process",
+            "ops.continuity"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "partnerships",
+      "label": "Partnerships & projects",
+      "actions": [
+        {
+          "id": "partner.outreach",
+          "label": "Contacted a potential sponsor",
+          "badge_candidates": []
+        },
+        {
+          "id": "partner.intro",
+          "label": "Made a partner introduction",
+          "badge_candidates": [
+            "partner.intro"
+          ]
+        },
+        {
+          "id": "partner.benefit",
+          "label": "Delivered a sponsor benefit",
+          "badge_candidates": [
+            "partner.sponsor",
+            "partner.repeat"
+          ]
+        },
+        {
+          "id": "partner.grant",
+          "label": "Prepared a grant application",
+          "badge_candidates": []
+        },
+        {
+          "id": "project.milestone",
+          "label": "Delivered a project milestone",
+          "badge_candidates": [
+            "partner.ship"
+          ]
+        },
+        {
+          "id": "project.handover",
+          "label": "Handed over a project",
+          "badge_candidates": [
+            "partner.train"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unlisted",
+      "label": "Other work",
+      "actions": [
+        {
+          "id": "other",
+          "label": "Something else",
+          "badge_candidates": []
+        }
+      ]
+    }
+  ],
+  "duration_options": [
+    {
+      "value": "30",
+      "label": "30 min"
+    },
+    {
+      "value": "60",
+      "label": "1 hr"
+    },
+    {
+      "value": "90",
+      "label": "1 hr 30 min"
+    },
+    {
+      "value": "120",
+      "label": "2 hr"
+    },
+    {
+      "value": "180",
+      "label": "3 hours"
+    },
+    {
+      "value": "240",
+      "label": "4 hours"
+    },
+    {
+      "value": "other",
+      "label": "Other"
+    }
+  ]
+}

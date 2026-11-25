@@ -91,6 +91,286 @@
         }
       ]
     },
+    "FounderSetupState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "current": {
+          "enum": [
+            "github",
+            "readers",
+            "authors",
+            "articles_page",
+            "complete"
+          ]
+        },
+        "state": {
+          "enum": [
+            "your_turn",
+            "working",
+            "fixing",
+            "done"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "github"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "readers"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "authors"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "articles_page"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            }
+          ]
+        },
+        "ask": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "enum": [
+                    "add_website",
+                    "connect_github",
+                    "authorize_github",
+                    "choose_repository",
+                    "describe_customer",
+                    "add_authors",
+                    "set_up_articles_page",
+                    "approve_setup",
+                    "approve_on_github",
+                    "choose_articles_page",
+                    "deploy_site"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192
+                },
+                "url": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "url"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "current",
+        "state",
+        "steps",
+        "ask"
+      ]
+    },
+    "FounderRepoHealthItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "action"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "lockfile_out_of_sync",
+            "framework_build_blocked_by_advisory",
+            "type_error",
+            "missing_env",
+            "unsupported_node",
+            "build_failed_other",
+            "host_not_deploying",
+            "checks_permission_missing",
+            "sitemap_unreachable"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "blocking",
+            "warning"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      }
+    },
+    "FounderRepoHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headSha",
+        "buildStatus",
+        "hostStatus",
+        "blocking",
+        "items",
+        "checkedAt"
+      ],
+      "properties": {
+        "headSha": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "buildStatus": {
+          "enum": [
+            "passed",
+            "failed",
+            "not_checked"
+          ]
+        },
+        "hostStatus": {
+          "enum": [
+            "passed",
+            "failed",
+            "unknown",
+            "not_checked"
+          ]
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 9,
+          "items": {
+            "$ref": "#/$defs/FounderRepoHealthItem"
+          }
+        },
+        "checkedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
     "FounderJourney": {
       "type": "object",
       "additionalProperties": false,
@@ -179,7 +459,13 @@
                     "approve_setup",
                     "approve_on_github",
                     "buy_points",
-                    "approve_join_request"
+                    "approve_join_request",
+                    "choose_articles_page",
+                    "deploy_site",
+                    "waiting_github_owner_approval",
+                    "choose_repository",
+                    "send_pr_to_reviewer",
+                    "confirm_profile"
                   ]
                 },
                 "label": {
@@ -959,6 +1245,114 @@
               "type": "null"
             }
           ]
+        },
+        "setup": {
+          "$ref": "#/$defs/FounderSetupState"
+        },
+        "onboarding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "profile": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "confirmed": {
+                  "type": "boolean"
+                },
+                "read": {
+                  "enum": [
+                    "none",
+                    "running",
+                    "done"
+                  ]
+                }
+              },
+              "required": [
+                "confirmed",
+                "read"
+              ]
+            },
+            "website": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "githubLikely": {
+                  "enum": [
+                    "likely",
+                    "unlikely",
+                    "unknown"
+                  ]
+                },
+                "platformLabel": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "githubLikely",
+                "platformLabel"
+              ]
+            },
+            "searchTerms": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            },
+            "ideas": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "articleCost": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "balance": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "profile",
+            "website",
+            "searchTerms",
+            "ideas",
+            "articleCost",
+            "balance"
+          ]
+        },
+        "repoHealth": {
+          "$ref": "#/$defs/FounderRepoHealth"
         }
       },
       "required": [
@@ -1486,6 +1880,28 @@
           },
           "required": [
             "canStart"
+          ]
+        },
+        "profileIntake": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "missingFields": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "oneLiner",
+                  "targetAudience",
+                  "readerTask"
+                ]
+              }
+            }
+          },
+          "required": [
+            "missingFields"
           ]
         }
       },
@@ -2858,6 +3274,20 @@
           }
         },
         "reviewFindings": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FounderReviewFinding"
+              },
+              "maxItems": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "draftReviewFindings": {
           "anyOf": [
             {
               "type": "array",

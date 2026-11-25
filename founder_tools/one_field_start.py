@@ -12,9 +12,23 @@ On this path:
   24 h returns 200 with the same company, a first create returns 201;
 - the name may be omitted (derived from the website) and the website may be
   omitted (no website: ``shortDescription`` is then required while
-  ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` is on);
+  ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` or ``MY_STARTUP_ONBOARDING_V3_ENABLED``
+  is on, and onboarding v3 marks such a startup's details confirmed);
 - ``timezone`` is stored when it is a valid IANA zone and ignored otherwise;
-- website and LinkedIn input is normalised, never rejected.
+- website and LinkedIn input is normalised, never rejected;
+- plan E4: while the GitHub-first gate
+  (``ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE``) is on, a website is
+  required here, and only here (``ensure_company_organization`` and every
+  fundraising and connector create still make or bind domainless companies).
+  No website, or a placeholder ``.invalid`` one, is 400 ``website_required``.
+  While the website preflight (``MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED``) is
+  also on, the create re-runs it (cached per domain): an address that does
+  not exist is 400 ``website_not_found`` with any typo suggestion, unless the
+  founder pressed "Use it anyway" (``useAnyway: true``). That override is
+  never treated as a verified website: nothing here verifies anything;
+- plan E2: the name, when none is given, is the preflight's
+  ``suggestedName`` (the homepage's own name, else the one name rule in
+  ``website_hosts``).
 """
 from __future__ import annotations
 
@@ -36,7 +50,11 @@ CREATE_IN_PROGRESS = {"detail": "We're still saving your startup. Try again in a
 LOCK_SECONDS = 30
 REPLAY_WAIT_SECONDS = 10.0
 REPLAY_POLL_SECONDS = 0.1
-_IGNORED_KEYS = ("firstProfile", "first_profile", "timezone")
+_IGNORED_KEYS = ("firstProfile", "first_profile", "timezone", "useAnyway", "use_anyway", "notDuplicate",
+                 "not_duplicate")
+WEBSITE_REQUIRED = {"detail": "Enter your website's address, like yourstartup.com.", "reason": "website_required"}
+WEBSITE_NOT_FOUND = {"detail": "We couldn't find a website at this address. Check the spelling, or use it anyway.",
+                     "reason": "website_not_found"}
 
 
 def _truthy(value) -> bool:
@@ -76,19 +94,64 @@ def normalize_website(value) -> str:
     return host or normalize_company_domain(raw)
 
 
+def website_required() -> bool:
+    """E4: the one-field create needs a website while the GitHub-first gate is on."""
+    return bool(getattr(settings, "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE", False))
+
+
+def check_website(data):
+    """E4 and E1 at create: ``(error, preflight)``.
+
+    ``error`` is a 400 body, or None. ``preflight`` is the domain's preflight
+    answer while ``MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED`` is on, else None.
+    A preflight that fails on our side never blocks the create.
+    """
+    from .website_hosts import host_of
+    from . import website_preflight
+
+    data = data if hasattr(data, "get") else {}
+    domain = normalize_website(data.get("domain"))
+    preflight = None
+    if domain and website_preflight.enabled():
+        host = website_preflight.normalise(domain)
+        if host:
+            try:
+                preflight = website_preflight.cached_check(host)
+            except Exception:  # noqa: BLE001 - our fault is never the founder's
+                logger.warning("founder_company_create_preflight_failed", exc_info=True)
+    if not website_required():
+        return None, preflight
+    host = host_of(domain)
+    if not host or host.endswith(".invalid"):
+        return dict(WEBSITE_REQUIRED), None
+    if website_preflight.enabled() and not website_preflight.normalise(host):
+        return dict(WEBSITE_REQUIRED), None
+    if (preflight and preflight.get("reachable") == "no" and (preflight.get("check") or {}).get("outcome") == "nxdomain"
+            and not _truthy(data.get("useAnyway", data.get("use_anyway")))):
+        return {**WEBSITE_NOT_FOUND, "suggestion": preflight.get("suggestion")}, preflight
+    return None, preflight
+
+
+def add_anyway(data) -> bool:
+    """E5: the founder said a name-only match is a different startup."""
+    return hasattr(data, "get") and _truthy(data.get("notDuplicate", data.get("not_duplicate")))
+
+
 def create_key_sha256(request) -> str | None:
     """SHA-256 of the request's ``Idempotency-Key`` header, or None without one."""
     key = str(request.headers.get("Idempotency-Key") or "").strip()
     return hashlib.sha256(key.encode()).hexdigest() if key else None
 
 
-def prepare_body(data):
+def prepare_body(data, preflight=None):
     """The serializer body for a one-field create.
 
     Returns ``(body, error, derived_name)``: ``error`` is a 400 body when no
     website and no one-sentence description were given while
     ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` is on; ``derived_name`` is
-    the name made from the website when the founder gave none.
+    the name made from the website when the founder gave none: the
+    preflight's ``suggestedName`` for this domain when there is one (E2),
+    else the one name rule.
     """
     from .services import normalize_company_linkedin_url
 
@@ -101,7 +164,8 @@ def prepare_body(data):
     alias = body.pop("short_description", None)
     description = body.get("shortDescription") if body.get("shortDescription") is not None else alias
     description = " ".join(str(description or "").split())
-    if (not domain and getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+    if (not domain and (getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+                        or getattr(settings, "MY_STARTUP_ONBOARDING_V3_ENABLED", False))
             and not DESCRIPTION_MIN <= len(description) <= DESCRIPTION_MAX):
         # IF-P1-08: a no-website startup needs its one sentence. With that
         # flag off this is today's name-only create.
@@ -114,7 +178,8 @@ def prepare_body(data):
     derived = None
     if not name and domain:
         from content_factory.startup_first_profile import derive_company_name
-        derived = derive_company_name(domain) or None
+        suggested = preflight.get("suggestedName") if isinstance(preflight, dict) and preflight.get("normalised") == domain else None
+        derived = (" ".join(str(suggested).split())[:255] if suggested else "") or derive_company_name(domain) or None
         name = derived or domain
     if name:
         body["name"] = name

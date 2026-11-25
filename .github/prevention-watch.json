@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "description": "Prevention jobs watched by .github/workflows/prevention-watch.yml (plan step F3). mlai-backend has no scheduled prevention job, so the watch covers the CI checks that run on every push to main: a main branch whose checks stay red for stale_after_days alerts. cadence_days null means push-driven: only the red streak is checked. Add a scheduled prevention workflow here with its cadence_days when one is introduced. Override N with the PREVENTION_WATCH_STALE_DAYS repository variable.",
+  "stale_after_days": 2,
+  "workflows": [
+    {"id": "main-checks", "workflow": "deploy.yml", "events": ["push"], "branch": "main", "cadence_days": null}
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "nonfailure_sites": [
+    {
+      "path": "content_factory/replay_records.py",
+      "function": "export_record",
+      "field": "code",
+      "expression": "run_failure_code(run)",
+      "site_sha256": "66413b7d8b2dc15c1bbe8abe22fa6768692446c033d13548d893416e559f3aeb",
+      "adapter": "nonfailure_category",
+      "owner": "backend.replay_records",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "The read-only replay export copies the run's own stored failure code (error_code, failure.code or the preview quality blocker_code, code-shaped only) into a draft replay record for CI; nothing is written to the run and no failure is emitted.",
+      "test": "content_factory.tests_replay_export.ExportReplayRecordTests.test_secrets_personal_data_and_private_content_are_removed"
+    }
+  ]
+}

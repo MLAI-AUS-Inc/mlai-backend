@@ -897,6 +897,11 @@ class VolunteerTests(TestCase):
         self.assertEqual(
             PointsService.get_available_microroo(self.member), microroo("49")
         )
+        from community_chat.arcade import rounds_for
+        rounds = rounds_for(self.member)
+        self.assertEqual(rounds.filter(source__trigger="pulse").count(), 2)
+        self.assertEqual(list(rounds.filter(source__trigger="level").values_list("source", flat=True)),
+                         [{"trigger": "level", "level": 1}])
 
     def test_pending_learning_request_converges_with_verified_startup_update(self):
         from roo.services import StartupUpdateRewardService

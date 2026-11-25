@@ -1,2 +1,4 @@
 # Workflow contract tests only; excluded from runtime images.
 PyYAML==6.0.3
+# Carries a failing test's traceback back from a parallel test worker.
+tblib==3.2.2

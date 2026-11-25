@@ -50,6 +50,20 @@ def _differences(left, right, path=""):
     return [] if left == right else [path]
 
 
+def _without_article_live(paths, payload):
+    """Drop the one deliberate legacy change: plan C14's ``articleLive`` state.
+
+    ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED`` is one of the P1 switches and,
+    once on, reports each written article's live state for every cohort. Only
+    that key may move, and only to a founder-safe state.
+    """
+    for topic in payload.get("writtenTopics") or []:
+        live = topic.get("articleLive")
+        if live is not None:
+            assert live.get("state") in {"live", "checking", "not_live"}, live
+    return [path for path in paths if not path.endswith(".articleLive")]
+
+
 def _stable(value):
     if isinstance(value, dict):
         return {key: (_unsigned(item) if key == "connectUrl" else _stable(item))
@@ -140,13 +154,23 @@ class FounderJourneyBootstrapTests(_Client, TestCase):
         built = make_named_legacy_org(name, marker=marker)
         for view in ("summary", "full"):
             with self.subTest(view=view):
-                before = _stable(self.bootstrap(built, view, FLAGS_OFF))
-                after = _stable(self.bootstrap(built, view, ALL_P1_FLAGS_ON))
-                without_v2 = _stable(self.bootstrap(built, view, WITHOUT_V2))
+                # The new-journey P1 switches leave a legacy bootstrap as it was.
+                # Plan step 7's all-cohorts no-workflow switch is the one deliberate
+                # change, checked on its own below.
+                cohort_only = {"ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED": False}
+                before = _stable(self.bootstrap(built, view, {**FLAGS_OFF, **cohort_only}))
+                after = _stable(self.bootstrap(built, view, {**ALL_P1_FLAGS_ON, **cohort_only}))
+                without_v2 = _stable(self.bootstrap(built, view, {**WITHOUT_V2, **cohort_only}))
                 self.assertNotIn("founderJourney", before)
                 self.assertEqual(after.pop("founderJourney"), LEGACY_JOURNEY)
-                self.assertEqual(_differences(after, before), [])
-                self.assertEqual(_differences(without_v2, before), [])
+                self.assertEqual(_without_article_live(_differences(after, before), after), [])
+                self.assertEqual(_without_article_live(_differences(without_v2, before), without_v2), [])
+                # By default a legacy site is no longer asked for workflow grants;
+                # nothing else in its bootstrap moves.
+                no_workflow = _stable(self.bootstrap(built, view, ALL_P1_FLAGS_ON))
+                no_workflow.pop("founderJourney")
+                for path in _without_article_live(_differences(no_workflow, before), no_workflow):
+                    self.assertTrue(any(part in path for part in (".prerequisites.permissions.", ".proofContract.requirements", ".steps[")), path)
 
 
 def _named_org_test(name, marker):

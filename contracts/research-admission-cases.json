@@ -1,0 +1,4846 @@
+{
+  "cases": [
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/unstamped/merge_off/no_admission",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/unstamped/merge_off/None",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "599f4bda99c82c801701e0bc6b9b821b087185cb5d9399a47f54319b35f018ab",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "a96c1f9adf8041591dcc64451e5883cd7d285c8e56649d7557d74b6292206da8",
+          "execution_id": "admit:a96c1f9adf8041591dcc64451e5883cd7d285c8e56649d7557d74b6292206da8",
+          "generation": 0,
+          "request_digest": "599f4bda99c82c801701e0bc6b9b821b087185cb5d9399a47f54319b35f018ab",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/unstamped/merge_off/1",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "599f4bda99c82c801701e0bc6b9b821b087185cb5d9399a47f54319b35f018ab",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "ed44959da260989a2da12d62d13cd45cdf33d5e4cd1d7e5c497812bb01618032",
+          "execution_id": "admit:ed44959da260989a2da12d62d13cd45cdf33d5e4cd1d7e5c497812bb01618032",
+          "generation": 0,
+          "request_digest": "599f4bda99c82c801701e0bc6b9b821b087185cb5d9399a47f54319b35f018ab",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/legacy/merge_off/no_admission",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/legacy/merge_off/None",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "7484ec7dc66bb56b8763d27af8785ea30372cb1e4d558f20c1147cef2e82843f",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "5f6418986817c7360e680077864bd9496620ae2676fbb4157b36b8325c35134c",
+          "execution_id": "admit:5f6418986817c7360e680077864bd9496620ae2676fbb4157b36b8325c35134c",
+          "generation": 0,
+          "request_digest": "7484ec7dc66bb56b8763d27af8785ea30372cb1e4d558f20c1147cef2e82843f",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/legacy/merge_off/1",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "7484ec7dc66bb56b8763d27af8785ea30372cb1e4d558f20c1147cef2e82843f",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "e768b4e18418b5cc10567b73178c603ee725e40555577a1898e1479b3fc28369",
+          "execution_id": "admit:e768b4e18418b5cc10567b73178c603ee725e40555577a1898e1479b3fc28369",
+          "generation": 0,
+          "request_digest": "7484ec7dc66bb56b8763d27af8785ea30372cb1e4d558f20c1147cef2e82843f",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_pre_p2/merge_off/no_admission",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_pre_p2/merge_off/None",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "f9219f2c5646305988a16507dfca391c34adb68cd6f72b179c848dcb56fa01c4",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "5285ccc11fb2c3464a88d54f1999c08846f8e42ccb0f3422a9bdbafa9488fc92",
+          "execution_id": "admit:5285ccc11fb2c3464a88d54f1999c08846f8e42ccb0f3422a9bdbafa9488fc92",
+          "generation": 0,
+          "request_digest": "f9219f2c5646305988a16507dfca391c34adb68cd6f72b179c848dcb56fa01c4",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_pre_p2/merge_off/1",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "f9219f2c5646305988a16507dfca391c34adb68cd6f72b179c848dcb56fa01c4",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "20dd1a5d8289d04c6cb122f51daa480b6b6ad1b4e328e83843b78069d23947bc",
+          "execution_id": "admit:20dd1a5d8289d04c6cb122f51daa480b6b6ad1b4e328e83843b78069d23947bc",
+          "generation": 0,
+          "request_digest": "f9219f2c5646305988a16507dfca391c34adb68cd6f72b179c848dcb56fa01c4",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_v2/merge_off/no_admission",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_v2/merge_off/None",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "7bf5dfc7f6c7bf6f925abecd6332cabf4495feb55d96a6bc792bd59dab8a7bff",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "2ef6e810450c865bc5053fb8f8e5df0831f4dfb7ce98fd89bf1bb25934d0e998",
+          "execution_id": "admit:2ef6e810450c865bc5053fb8f8e5df0831f4dfb7ce98fd89bf1bb25934d0e998",
+          "generation": 0,
+          "request_digest": "7bf5dfc7f6c7bf6f925abecd6332cabf4495feb55d96a6bc792bd59dab8a7bff",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_v2/merge_off/1",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "7bf5dfc7f6c7bf6f925abecd6332cabf4495feb55d96a6bc792bd59dab8a7bff",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "53700cad04cef9d56018d971e405eed515788e7eb4723ce8e7ada7b95e3af225",
+          "execution_id": "admit:53700cad04cef9d56018d971e405eed515788e7eb4723ce8e7ada7b95e3af225",
+          "generation": 0,
+          "request_digest": "7bf5dfc7f6c7bf6f925abecd6332cabf4495feb55d96a6bc792bd59dab8a7bff",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "nightly_island_refresh/p2_v2/merge_on/no_admission",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "merge_policy": "backend_worker",
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_v2/merge_on/None",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "53c505298944ff14570414b4af73e6e5a20ef93af3c0d19da352acae37b31b84",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "0276cd0a099090f866ba4382cf6270d8c4394e5e0a6b9691bab380b131253d8d",
+          "execution_id": "admit:0276cd0a099090f866ba4382cf6270d8c4394e5e0a6b9691bab380b131253d8d",
+          "generation": 0,
+          "request_digest": "53c505298944ff14570414b4af73e6e5a20ef93af3c0d19da352acae37b31b84",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "merge_policy": "backend_worker",
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "nightly_island_refresh/p2_v2/merge_on/1",
+      "producer": "nightly_island_refresh",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "53c505298944ff14570414b4af73e6e5a20ef93af3c0d19da352acae37b31b84",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "9a3d64f101f84b5a9817c3d3121d3480b67eec51ee75e4b3cb962c0c25631204",
+          "execution_id": "admit:9a3d64f101f84b5a9817c3d3121d3480b67eec51ee75e4b3cb962c0c25631204",
+          "generation": 0,
+          "request_digest": "53c505298944ff14570414b4af73e6e5a20ef93af3c0d19da352acae37b31b84",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-refresh:lilia-planner.workers.dev:2026-11-19",
+        "domain": "lilia-planner.workers.dev",
+        "include_expansion": true,
+        "island_refresh_recovery_version": 1,
+        "merge_policy": "backend_worker",
+        "request_source": "mlai_backend_scheduler",
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/unstamped/merge_off/no_admission",
+      "producer": "founder_island_research",
+      "request": {
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/unstamped/merge_off/None",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "e7ede59f22b02ce205f1b16d79450eda11c8e2ee3cd8cf65813a96f5dccd642d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "a6814069f668079c397f28346c99b430c27cbc36cc533c8908929725bdae61fc",
+          "execution_id": "admit:a6814069f668079c397f28346c99b430c27cbc36cc533c8908929725bdae61fc",
+          "generation": 0,
+          "request_digest": "e7ede59f22b02ce205f1b16d79450eda11c8e2ee3cd8cf65813a96f5dccd642d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/unstamped/merge_off/1",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "e7ede59f22b02ce205f1b16d79450eda11c8e2ee3cd8cf65813a96f5dccd642d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "70ce6207b7f902dce0e5b3ca0a3c74c98dbc470eff6d28aa8e3771cf5df3f921",
+          "execution_id": "admit:70ce6207b7f902dce0e5b3ca0a3c74c98dbc470eff6d28aa8e3771cf5df3f921",
+          "generation": 0,
+          "request_digest": "e7ede59f22b02ce205f1b16d79450eda11c8e2ee3cd8cf65813a96f5dccd642d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/legacy/merge_off/no_admission",
+      "producer": "founder_island_research",
+      "request": {
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/legacy/merge_off/None",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "152eb226239552accb2ef092e368bafb61a8c59334342828997610ec69434d83",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "edfb3b60bfc7a598fc78a2050c3b73edce17e46b4e648209b428a5616fe6f4f1",
+          "execution_id": "admit:edfb3b60bfc7a598fc78a2050c3b73edce17e46b4e648209b428a5616fe6f4f1",
+          "generation": 0,
+          "request_digest": "152eb226239552accb2ef092e368bafb61a8c59334342828997610ec69434d83",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/legacy/merge_off/1",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "152eb226239552accb2ef092e368bafb61a8c59334342828997610ec69434d83",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "c18a9ec44cf88060fdbe3c0981c8915c7962132181b4eaa58c6c87b30cdcdb52",
+          "execution_id": "admit:c18a9ec44cf88060fdbe3c0981c8915c7962132181b4eaa58c6c87b30cdcdb52",
+          "generation": 0,
+          "request_digest": "152eb226239552accb2ef092e368bafb61a8c59334342828997610ec69434d83",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_pre_p2/merge_off/no_admission",
+      "producer": "founder_island_research",
+      "request": {
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_pre_p2/merge_off/None",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "05640a250d9b868bf104a98305328772bd39e382ffe2191638d96963e7b9f43c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "b66e842a935813c10696b87d3ce8d69e9cd941f75827aa2e788a3bcb2ec888ac",
+          "execution_id": "admit:b66e842a935813c10696b87d3ce8d69e9cd941f75827aa2e788a3bcb2ec888ac",
+          "generation": 0,
+          "request_digest": "05640a250d9b868bf104a98305328772bd39e382ffe2191638d96963e7b9f43c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_pre_p2/merge_off/1",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "05640a250d9b868bf104a98305328772bd39e382ffe2191638d96963e7b9f43c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "bccf5b653e6365c7d9e8d580eec004d61c78fca1b63398c77994689c8d3043c6",
+          "execution_id": "admit:bccf5b653e6365c7d9e8d580eec004d61c78fca1b63398c77994689c8d3043c6",
+          "generation": 0,
+          "request_digest": "05640a250d9b868bf104a98305328772bd39e382ffe2191638d96963e7b9f43c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_v2/merge_off/no_admission",
+      "producer": "founder_island_research",
+      "request": {
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_v2/merge_off/None",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "ad359a2a2c5418a50d24e0abd1f65c03d59f1b784edac498ed156583f83bacd3",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "bd1df16f09baf296531e044d7aac7fd374848433ba4051c631f5c194546d914e",
+          "execution_id": "admit:bd1df16f09baf296531e044d7aac7fd374848433ba4051c631f5c194546d914e",
+          "generation": 0,
+          "request_digest": "ad359a2a2c5418a50d24e0abd1f65c03d59f1b784edac498ed156583f83bacd3",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_v2/merge_off/1",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "ad359a2a2c5418a50d24e0abd1f65c03d59f1b784edac498ed156583f83bacd3",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "c67e1f6745a1ed000fa2d16f9f83f1981645e90133d5b8686cdd1581ccb1af62",
+          "execution_id": "admit:c67e1f6745a1ed000fa2d16f9f83f1981645e90133d5b8686cdd1581ccb1af62",
+          "generation": 0,
+          "request_digest": "ad359a2a2c5418a50d24e0abd1f65c03d59f1b784edac498ed156583f83bacd3",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "founder_island_research/p2_v2/merge_on/no_admission",
+      "producer": "founder_island_research",
+      "request": {
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "merge_policy": "backend_worker",
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": false,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_v2/merge_on/None",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "3c093f118da80836158bb7ec4ff0146ee94cca6788cb28cb82391bb2b2d99f80",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "b71772b6d5e8c1fc065df3f65981519e15616bb7cdd03f3332ced0c984ef0006",
+          "execution_id": "admit:b71772b6d5e8c1fc065df3f65981519e15616bb7cdd03f3332ced0c984ef0006",
+          "generation": 0,
+          "request_digest": "3c093f118da80836158bb7ec4ff0146ee94cca6788cb28cb82391bb2b2d99f80",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "merge_policy": "backend_worker",
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_island_research/p2_v2/merge_on/1",
+      "producer": "founder_island_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "3c093f118da80836158bb7ec4ff0146ee94cca6788cb28cb82391bb2b2d99f80",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "83af9357c469a8f238a293bd99882100eb96509bf8e50166e7a8983deb68a172",
+          "execution_id": "admit:83af9357c469a8f238a293bd99882100eb96509bf8e50166e7a8983deb68a172",
+          "generation": 0,
+          "request_digest": "3c093f118da80836158bb7ec4ff0146ee94cca6788cb28cb82391bb2b2d99f80",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "island-research:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "island_research_brief": {
+          "audience": "",
+          "description": "",
+          "focus": "",
+          "intent": "any",
+          "subject": "Daily planning for shift workers"
+        },
+        "merge_policy": "backend_worker",
+        "request_source": "roo_slackbot",
+        "requested_topic_count": 1,
+        "roo_points_action": "content_island_topic_generation",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "island_refresh"
+      },
+      "stamped": true,
+      "workflow": "island_refresh"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/unstamped/merge_off/no_admission",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/unstamped/merge_off/None",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "b1f27047ce639ca273ce8e099efd80bffa1b47952f5090106c920ae276fd957a",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "0899e10326c180a627c0e18cdd64cca603de513a0f580ff2ad0bb7c53fe9ccf0",
+          "execution_id": "admit:0899e10326c180a627c0e18cdd64cca603de513a0f580ff2ad0bb7c53fe9ccf0",
+          "generation": 0,
+          "request_digest": "b1f27047ce639ca273ce8e099efd80bffa1b47952f5090106c920ae276fd957a",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/unstamped/merge_off/1",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "b1f27047ce639ca273ce8e099efd80bffa1b47952f5090106c920ae276fd957a",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "63b3e66978f1cb2d08e7354811c5b39bfe9cab854fc963eca7b20f48839137f8",
+          "execution_id": "admit:63b3e66978f1cb2d08e7354811c5b39bfe9cab854fc963eca7b20f48839137f8",
+          "generation": 0,
+          "request_digest": "b1f27047ce639ca273ce8e099efd80bffa1b47952f5090106c920ae276fd957a",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/legacy/merge_off/no_admission",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/legacy/merge_off/None",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "9a7c0f13cb4561ec86a07c750c9f9e88f6157220e2e172bf5423be45a4b5cace",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "f47182f5bea3f160e003c0d28a480b999bdd745b8b42b13a738d000c0a3f21f7",
+          "execution_id": "admit:f47182f5bea3f160e003c0d28a480b999bdd745b8b42b13a738d000c0a3f21f7",
+          "generation": 0,
+          "request_digest": "9a7c0f13cb4561ec86a07c750c9f9e88f6157220e2e172bf5423be45a4b5cace",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/legacy/merge_off/1",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "9a7c0f13cb4561ec86a07c750c9f9e88f6157220e2e172bf5423be45a4b5cace",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "38e87874df94c07a207c4b6e914ac816eaffc574432f90f58d5c2b4005b25263",
+          "execution_id": "admit:38e87874df94c07a207c4b6e914ac816eaffc574432f90f58d5c2b4005b25263",
+          "generation": 0,
+          "request_digest": "9a7c0f13cb4561ec86a07c750c9f9e88f6157220e2e172bf5423be45a4b5cace",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_pre_p2/merge_off/no_admission",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_pre_p2/merge_off/None",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "3eb2e775307e1061cca8501c133bac07fbeea157b07a51dd75ddfb811a8efe47",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "6749646be218266467248117585b94fa33225a752a1af997e3c4bb99b90e7261",
+          "execution_id": "admit:6749646be218266467248117585b94fa33225a752a1af997e3c4bb99b90e7261",
+          "generation": 0,
+          "request_digest": "3eb2e775307e1061cca8501c133bac07fbeea157b07a51dd75ddfb811a8efe47",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_pre_p2/merge_off/1",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "3eb2e775307e1061cca8501c133bac07fbeea157b07a51dd75ddfb811a8efe47",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "86926b1043e059af9169cb66676fe649e4ca45d7a792f23ec37b283e8a9b9d4a",
+          "execution_id": "admit:86926b1043e059af9169cb66676fe649e4ca45d7a792f23ec37b283e8a9b9d4a",
+          "generation": 0,
+          "request_digest": "3eb2e775307e1061cca8501c133bac07fbeea157b07a51dd75ddfb811a8efe47",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_v2/merge_off/no_admission",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_v2/merge_off/None",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "77651c4a856850822ff6724d9682532b6c02b04363aa52c9f89e49c9c38397ac",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "d48f8d7b1064645f4391e7d2cd8157cfc9b140833b2c4bb114abde42fe47a54b",
+          "execution_id": "admit:d48f8d7b1064645f4391e7d2cd8157cfc9b140833b2c4bb114abde42fe47a54b",
+          "generation": 0,
+          "request_digest": "77651c4a856850822ff6724d9682532b6c02b04363aa52c9f89e49c9c38397ac",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_v2/merge_off/1",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "77651c4a856850822ff6724d9682532b6c02b04363aa52c9f89e49c9c38397ac",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "8d56fda89966e18abd9069a857b9aee7c3fc2ecc2895a6a7a8d16c137e073e62",
+          "execution_id": "admit:8d56fda89966e18abd9069a857b9aee7c3fc2ecc2895a6a7a8d16c137e073e62",
+          "generation": 0,
+          "request_digest": "77651c4a856850822ff6724d9682532b6c02b04363aa52c9f89e49c9c38397ac",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_v2/merge_on/no_admission",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "merge_policy": "backend_worker",
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_v2/merge_on/None",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "ea64dae2b86aee69b278c1f8f9fe87d02690df64c8a72ae6e1153337d4e41eaa",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "2d01dc1cdc3af49270f079b3babe81a9d5e8574eacb75b18c2a407f1c16fd1db",
+          "execution_id": "admit:2d01dc1cdc3af49270f079b3babe81a9d5e8574eacb75b18c2a407f1c16fd1db",
+          "generation": 0,
+          "request_digest": "ea64dae2b86aee69b278c1f8f9fe87d02690df64c8a72ae6e1153337d4e41eaa",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "merge_policy": "backend_worker",
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "founder_topic_discovery/p2_v2/merge_on/1",
+      "producer": "founder_topic_discovery",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "discovery:cccccccccccccccccccccccccccccccc",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "ea64dae2b86aee69b278c1f8f9fe87d02690df64c8a72ae6e1153337d4e41eaa",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "93664bb0e8725b8718edbcfa14b54a96f121f66c3d68127af61ed9e452f1e2b1",
+          "execution_id": "admit:93664bb0e8725b8718edbcfa14b54a96f121f66c3d68127af61ed9e452f1e2b1",
+          "generation": 0,
+          "request_digest": "ea64dae2b86aee69b278c1f8f9fe87d02690df64c8a72ae6e1153337d4e41eaa",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "discovery:cccccccccccccccccccccccccccccccc",
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "merge_policy": "backend_worker",
+        "request_source": "roo_slackbot",
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "slack_user_id": "mlai_user:7",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/unstamped/merge_off/no_admission",
+      "producer": "automation_research",
+      "request": {
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/unstamped/merge_off/None",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "6cfc3a5a9e4300895ca9bdc52e13a72aeb200f4a82fd45ae6cc6ea0e10cd58d2",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "e8043333dd4eb052c1b34ea15f5091597f5d21433ddb9faa1625173225457738",
+          "execution_id": "admit:e8043333dd4eb052c1b34ea15f5091597f5d21433ddb9faa1625173225457738",
+          "generation": 0,
+          "request_digest": "6cfc3a5a9e4300895ca9bdc52e13a72aeb200f4a82fd45ae6cc6ea0e10cd58d2",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/unstamped/merge_off/1",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "6cfc3a5a9e4300895ca9bdc52e13a72aeb200f4a82fd45ae6cc6ea0e10cd58d2",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "2f7ee5daff6d8d504c3599d2795042722fd9b82a1079fe02f554ce66a3f205ee",
+          "execution_id": "admit:2f7ee5daff6d8d504c3599d2795042722fd9b82a1079fe02f554ce66a3f205ee",
+          "generation": 0,
+          "request_digest": "6cfc3a5a9e4300895ca9bdc52e13a72aeb200f4a82fd45ae6cc6ea0e10cd58d2",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/legacy/merge_off/no_admission",
+      "producer": "automation_research",
+      "request": {
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/legacy/merge_off/None",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "0a4a91534da1ae99ae23d18d55491bfcbbab65d01545208ae77592be8106cbca",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "cf44dd086588c7c03bd94cbef26d5d5dc36a0e2f6d350bb2ad3fe40dc7379abe",
+          "execution_id": "admit:cf44dd086588c7c03bd94cbef26d5d5dc36a0e2f6d350bb2ad3fe40dc7379abe",
+          "generation": 0,
+          "request_digest": "0a4a91534da1ae99ae23d18d55491bfcbbab65d01545208ae77592be8106cbca",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/legacy/merge_off/1",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "0a4a91534da1ae99ae23d18d55491bfcbbab65d01545208ae77592be8106cbca",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "d75ae8739ce30015a06d68c97eca06c4cf7ba065751f92f3448113a25a43ee89",
+          "execution_id": "admit:d75ae8739ce30015a06d68c97eca06c4cf7ba065751f92f3448113a25a43ee89",
+          "generation": 0,
+          "request_digest": "0a4a91534da1ae99ae23d18d55491bfcbbab65d01545208ae77592be8106cbca",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_pre_p2/merge_off/no_admission",
+      "producer": "automation_research",
+      "request": {
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_pre_p2/merge_off/None",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "e1696b165a0a97b68b8f938963ace75367f2522471f5b9f88d156e1a2daeef6b",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "ba60e1e1f71045eabf413408fcd666aa813b9e91730382b4c402e97e907c3f60",
+          "execution_id": "admit:ba60e1e1f71045eabf413408fcd666aa813b9e91730382b4c402e97e907c3f60",
+          "generation": 0,
+          "request_digest": "e1696b165a0a97b68b8f938963ace75367f2522471f5b9f88d156e1a2daeef6b",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_pre_p2/merge_off/1",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "e1696b165a0a97b68b8f938963ace75367f2522471f5b9f88d156e1a2daeef6b",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "dff1882dcede9be9187d95f7ea151977d44700cc4cc670efbe7d2b66a2f48a0b",
+          "execution_id": "admit:dff1882dcede9be9187d95f7ea151977d44700cc4cc670efbe7d2b66a2f48a0b",
+          "generation": 0,
+          "request_digest": "e1696b165a0a97b68b8f938963ace75367f2522471f5b9f88d156e1a2daeef6b",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_v2/merge_off/no_admission",
+      "producer": "automation_research",
+      "request": {
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_v2/merge_off/None",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "e102b71d0f6f563d5579dc98933b40871299969e809b6874e161cbee326328ae",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "1af1270f1fef75f6c355588a16dafa1c97871cb1076ba0b760aca88b7a712844",
+          "execution_id": "admit:1af1270f1fef75f6c355588a16dafa1c97871cb1076ba0b760aca88b7a712844",
+          "generation": 0,
+          "request_digest": "e102b71d0f6f563d5579dc98933b40871299969e809b6874e161cbee326328ae",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_v2/merge_off/1",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "e102b71d0f6f563d5579dc98933b40871299969e809b6874e161cbee326328ae",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "2b191372e986aae319a429bc3f7212d623aa1463facb1339643079c4dc1c5ef8",
+          "execution_id": "admit:2b191372e986aae319a429bc3f7212d623aa1463facb1339643079c4dc1c5ef8",
+          "generation": 0,
+          "request_digest": "e102b71d0f6f563d5579dc98933b40871299969e809b6874e161cbee326328ae",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_v2/merge_on/no_admission",
+      "producer": "automation_research",
+      "request": {
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "merge_policy": "backend_worker",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_v2/merge_on/None",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "d2d7fb02aae322e57edf3e19d2c212f46f41d66ca1f81431b0c969528c6a88f7",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "8b15b154ce9aa27c93f15506c820d47041dd02165ef1a73b3d4b26f20ccf115f",
+          "execution_id": "admit:8b15b154ce9aa27c93f15506c820d47041dd02165ef1a73b3d4b26f20ccf115f",
+          "generation": 0,
+          "request_digest": "d2d7fb02aae322e57edf3e19d2c212f46f41d66ca1f81431b0c969528c6a88f7",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "merge_policy": "backend_worker",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "organization",
+      "name": "automation_research/p2_v2/merge_on/1",
+      "producer": "automation_research",
+      "request": {
+        "backend_run_admission_v1": {
+          "authority_scope": "organization_research",
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "d2d7fb02aae322e57edf3e19d2c212f46f41d66ca1f81431b0c969528c6a88f7",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "39968aa32569935d31cb44c4164177e9aa3f4fe582500f02e7ff4abb9ab6ebc6",
+          "execution_id": "admit:39968aa32569935d31cb44c4164177e9aa3f4fe582500f02e7ff4abb9ab6ebc6",
+          "generation": 0,
+          "request_digest": "d2d7fb02aae322e57edf3e19d2c212f46f41d66ca1f81431b0c969528c6a88f7",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "free_domain": false,
+        "merge_policy": "backend_worker",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "workflow": "auto_discovery"
+      },
+      "stamped": true,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/unstamped/merge_off/no_admission",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/unstamped/merge_off/None",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "7f099346ac365188a3574c75e25ce96632fa916ae71ee40bd949e60c96179605",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "1f57d5cf31f773f50e17b50696a14056262e3aa4f292ec48ab5f687b9d48ec17",
+          "execution_id": "admit:1f57d5cf31f773f50e17b50696a14056262e3aa4f292ec48ab5f687b9d48ec17",
+          "generation": 0,
+          "request_digest": "7f099346ac365188a3574c75e25ce96632fa916ae71ee40bd949e60c96179605",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/unstamped/merge_off/1",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "7f099346ac365188a3574c75e25ce96632fa916ae71ee40bd949e60c96179605",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "5ee465e062d6e68a9be5863a89e6f88f4f972e0ee8281e812f0e1d6650bcc9f9",
+          "execution_id": "admit:5ee465e062d6e68a9be5863a89e6f88f4f972e0ee8281e812f0e1d6650bcc9f9",
+          "generation": 0,
+          "request_digest": "7f099346ac365188a3574c75e25ce96632fa916ae71ee40bd949e60c96179605",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/legacy/merge_off/no_admission",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/legacy/merge_off/None",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "5737324f0bfded20e87d07aaa56bc3d50acaa925627c3bb8f6f11e6914d0163c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "f2ee13afe0af85ae3c1ddf1876ae2c487bc768f6da22d0580839b19d40c83439",
+          "execution_id": "admit:f2ee13afe0af85ae3c1ddf1876ae2c487bc768f6da22d0580839b19d40c83439",
+          "generation": 0,
+          "request_digest": "5737324f0bfded20e87d07aaa56bc3d50acaa925627c3bb8f6f11e6914d0163c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/legacy/merge_off/1",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "5737324f0bfded20e87d07aaa56bc3d50acaa925627c3bb8f6f11e6914d0163c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "45e5838a9ceda01530d06da0b368525f9e3c1740673c245ddd2db0a3fbae8d68",
+          "execution_id": "admit:45e5838a9ceda01530d06da0b368525f9e3c1740673c245ddd2db0a3fbae8d68",
+          "generation": 0,
+          "request_digest": "5737324f0bfded20e87d07aaa56bc3d50acaa925627c3bb8f6f11e6914d0163c",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "legacy",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_pre_p2/merge_off/no_admission",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_pre_p2/merge_off/None",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "eb14bfdcf3245762085863b33faa341e95550d14dbff5c58c56ac3db124b8180",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "5e91f4a3ad3bc35cb80f4d56e905d804c56d8392800a876053f9e7d7f540969d",
+          "execution_id": "admit:5e91f4a3ad3bc35cb80f4d56e905d804c56d8392800a876053f9e7d7f540969d",
+          "generation": 0,
+          "request_digest": "eb14bfdcf3245762085863b33faa341e95550d14dbff5c58c56ac3db124b8180",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_pre_p2/merge_off/1",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "eb14bfdcf3245762085863b33faa341e95550d14dbff5c58c56ac3db124b8180",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "e51f0c128ebece6c27266e031b8cca8f9cbd475d176c3533bce3e8b7cace9d95",
+          "execution_id": "admit:e51f0c128ebece6c27266e031b8cca8f9cbd475d176c3533bce3e8b7cace9d95",
+          "generation": 0,
+          "request_digest": "eb14bfdcf3245762085863b33faa341e95550d14dbff5c58c56ac3db124b8180",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "pre_p2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_v2/merge_off/no_admission",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_v2/merge_off/None",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "c1e3e53cbb005e96e9608237c86cec6dec409ae7c35cb440d1fac8615bee23b9",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "26b039618fa0657ede2f5d6e0c0a53e05549bd592cfce0953ce96900b11dbb3f",
+          "execution_id": "admit:26b039618fa0657ede2f5d6e0c0a53e05549bd592cfce0953ce96900b11dbb3f",
+          "generation": 0,
+          "request_digest": "c1e3e53cbb005e96e9608237c86cec6dec409ae7c35cb440d1fac8615bee23b9",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_v2/merge_off/1",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "c1e3e53cbb005e96e9608237c86cec6dec409ae7c35cb440d1fac8615bee23b9",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "f78b56f11ea2ab42a1630fa6c39d756be8d578fdd098bb7e77116ac110c6f73c",
+          "execution_id": "admit:f78b56f11ea2ab42a1630fa6c39d756be8d578fdd098bb7e77116ac110c6f73c",
+          "generation": 0,
+          "request_digest": "c1e3e53cbb005e96e9608237c86cec6dec409ae7c35cb440d1fac8615bee23b9",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_v2/merge_on/no_admission",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "merge_policy": "backend_worker",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_v2/merge_on/None",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": null,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "77d9a8e79b9c024d2456d121d06d2cb1d800336b07951559493525d2f12ada7d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "e5f63e05153929adba7f0defe4325e50bcc77715f5118f6af3c3d7db6a6f7025",
+          "execution_id": "admit:e5f63e05153929adba7f0defe4325e50bcc77715f5118f6af3c3d7db6a6f7025",
+          "generation": 0,
+          "request_digest": "77d9a8e79b9c024d2456d121d06d2cb1d800336b07951559493525d2f12ada7d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "merge_policy": "backend_worker",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    },
+    {
+      "expected_research_authority": "website",
+      "name": "automation_research_website_bound/p2_v2/merge_on/1",
+      "producer": "automation_research_website_bound",
+      "request": {
+        "app_root": "",
+        "backend_run_admission_v1": {
+          "dispatch_key": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "domain": "lilia-planner.workers.dev",
+          "event_protocol": 1,
+          "github_repo": "lilia/planner",
+          "organization_id": "209",
+          "principal": {
+            "actor_id": "mlai_user:7",
+            "kind": "user",
+            "user_id": "7"
+          },
+          "request_digest": "77d9a8e79b9c024d2456d121d06d2cb1d800336b07951559493525d2f12ada7d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "e68aaf6d1fda16a622413e273e035e4fedd4047ff8ab4581856ae6e832c03acb",
+          "execution_id": "admit:e68aaf6d1fda16a622413e273e035e4fedd4047ff8ab4581856ae6e832c03acb",
+          "generation": 0,
+          "request_digest": "77d9a8e79b9c024d2456d121d06d2cb1d800336b07951559493525d2f12ada7d",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": 3,
+            "connection_target_id": "target-209",
+            "deletion_epoch": null,
+            "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": 4242,
+            "source_run_id": null,
+            "website_connection_id": "2090c0de-0000-4000-8000-000000000209"
+          }
+        },
+        "branch": "main",
+        "client_request_id": "automation-research:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "connection_generation": 3,
+        "connection_target_id": "target-209",
+        "daily_topic_policy": {
+          "cooldown_days": 7,
+          "preferences": [],
+          "recent_topics": [],
+          "version": 1
+        },
+        "domain": "lilia-planner.workers.dev",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "free_domain": false,
+        "github_repo": "lilia/planner",
+        "merge_policy": "backend_worker",
+        "notification_context": {
+          "automation_id": "auto-1",
+          "automation_run_id": "slot-1",
+          "automation_trigger": "scheduled",
+          "channel_route_id": "chan-1",
+          "channel_type": "email",
+          "recipient_user_id": "7"
+        },
+        "recipient_user_id": "7",
+        "repository_id": 4242,
+        "request_source": "roo_slackbot",
+        "requested_by_slack_user_id": "mlai_user:7",
+        "requested_topic_count": 3,
+        "roo_points_action": "topic_discovery",
+        "roo_points_authorized": true,
+        "roo_points_balance": 20,
+        "roo_points_billing_status": "charged",
+        "roo_points_cost": 6,
+        "roo_points_ledger_id": "ledger-1",
+        "roo_points_required": 6,
+        "self_heal_policy_v1": {
+          "cohort": "p2",
+          "failure_policy": "v2",
+          "version": 1
+        },
+        "user_email": "founder@example.test",
+        "website_connection_id": "2090c0de-0000-4000-8000-000000000209",
+        "workflow": "auto_discovery"
+      },
+      "stamped": false,
+      "workflow": "auto_discovery"
+    }
+  ],
+  "schema_version": 1,
+  "source": "mlai-backend content_factory.tests_research_authority_contract"
+}

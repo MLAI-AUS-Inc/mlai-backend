@@ -1,6 +1,7 @@
 # Studio treasury schema
 
-Migration `integrations/0052_studio_meetings_treasury` adds three models.
+Migration `integrations/0053_studio_meetings_treasury` adds three models after
+`integrations/0052_managed_channel_sections`.
 
 - `StudioTreasuryLedger` has one row per organisation and a unique Slack
   workspace. Reviewed source configuration and opening evidence accompany the

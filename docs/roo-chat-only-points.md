@@ -135,3 +135,29 @@ Fixed two-point link-love ledger entries also classify contribution progress
 before a native receipt arrives. Starting member history before either route
 pays keeps new accounts known; mirroring the same ledger never counts it twice.
 Existing withdrawals and corrections remain enforced across both routes.
+
+
+## Roo Points channel
+
+The signed-in Chat clients read and update `/api/v1/community-chat/account/roo-points-mute/`.
+An account with no saved setting reads as muted. A normal PUT with boolean
+`muted` persists the member's choice. A PUT with `initialize: true` preserves
+an earlier explicit account choice when importing an older device preference.
+The endpoint applies the existing account and device session checks.
+
+Public Roo requests durable Slack confirmations for rooms authorized for public
+mirroring. Approval writes one ledger entry and queues the confirmation in the
+same transaction. The public Roo runtime claims the confirmation using its own
+service key. On a retry it checks the bridge receipt or Slack thread for the
+original Roo message before posting again. The celebration waits for that
+approval to arrive in the original Chat thread, then Roo posts the same text
+and mention as a new #roo-points thread.
+
+Apply the approved `roo.0048_roo_points_channel` and
+`roo.0049_roo_points_mute_preference` migrations before enabling this rollout.
+Provision the channel with its fixed ID, enroll the dedicated ordinary Roo
+relay signer and install its hex key in the worker-only `.roo-points-worker.env`
+with mode 0600 on the backend host. Set the repository variables
+`ROO_POINTS_NATIVE_ACTIVE_FROM` and `ROO_POINTS_LEVEL_UP_ENABLED` to enable
+the worker through the normal backend release. The first is a Unix timestamp
+that remains fixed between releases.

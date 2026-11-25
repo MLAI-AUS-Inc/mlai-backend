@@ -1,4 +1,5 @@
 from django.urls import path, include
+from .manual_time_views import SlackManualTimeView
 from .event_discount_views import EventDiscountQuoteView, EventDiscountRedeemView, EventDiscountRedemptionsView
 from rest_framework.routers import DefaultRouter
 from .views import (
@@ -8,7 +9,7 @@ from .views import (
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
     PointsPacksView, CurrentUserPurchaseView,
-    StripeWebhookView, SystemAwardView, BoostPostAdmissionView,
+    StripeWebhookView, SystemAwardView, BoostPostAdmissionView, BoostPostMirrorRemovalView,
     CommitteeCandidateEmailsView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
@@ -39,6 +40,8 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path("manual-time/", SlackManualTimeView.as_view()),
+    path("manual-time/<str:operation>/", SlackManualTimeView.as_view()),
     path('cybertest/', include('roo.cybertest_service_urls')),
     path('event-discounts/quote/', EventDiscountQuoteView.as_view(), name='event-discount-quote'),
     path('event-discounts/redeem/', EventDiscountRedeemView.as_view(), name='event-discount-redeem'),
@@ -50,6 +53,8 @@ urlpatterns = [
     path('kimi/calls/fail/', CodingCallFailView.as_view(), name='kimi-call-fail'),
     path('stripe/webhook/', StripeWebhookView.as_view(), name='points-stripe-webhook'),
     path('boost-posts/admissions/', BoostPostAdmissionView.as_view(), name='boost-post-admission'),
+    path('boost-posts/admissions/<int:admission_id>/mirror-removal/',
+         BoostPostMirrorRemovalView.as_view(), name='boost-post-mirror-removal'),
     path('', include(router.urls)),
     
     # ============================================================

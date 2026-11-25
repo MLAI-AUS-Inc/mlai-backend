@@ -84,6 +84,7 @@ cookies.txt
 !/docs/studio-report-source.md
 !/docs/studio-treasury.md
 !/docs/crm.md
+!/docs/mlai-arcade.md
 !/docs/system-email.md
 !/docs/roo-event-discounts.md
 !/docs/roo-event-discount-migration-proposal.md
@@ -111,6 +112,7 @@ cookies.txt
 !/docs/xero-statement-reconciliation.md
 !/docs/org-memory-review-summaries-digests.md
 !/docs/mlai-chat-bridge-contract.md
+!/docs/managed-channel-sections.md
 !/docs/slack-unfinished-conversation-recovery.md
 !/docs/slack-event-routing-phase8.md
 !/docs/slack-community-phase6-operations.md
@@ -289,3 +291,8 @@ medhack_backend/hospital/Eval_Labels.csv
 
 # Maintained Vibe Security phased purchase and settlement contract.
 !/docs/cybertest-two-phase.md
+
+# Dedicated Roo Points worker signing key
+.roo-points-worker.env
+
+.managed-channel-worker.env

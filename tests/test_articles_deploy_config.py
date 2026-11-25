@@ -1,6 +1,7 @@
 """Founder-journey Articles switches reach the host only when a release sets them."""
 
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = '[{"start": "2026-11-07T22:00:00Z", "end": "2026-11-08T03:00:00Z"}]'
 # The P1 founder journey keys that are neither switches nor counts.
 JOURNEY_VALUES = {
+    "ARTICLES_SAVED_PREVIEW_RECOVERY_DOMAINS": "mlai.au,fixture.example.com",
     "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T09:00:00+11:00",
+    "MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT": "2026-11-21T09:00:00+11:00",
     "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS": "123, pawshare.com.au",
     "COMMUNITY_CHAT_INVITE_RESOLVE_RATE": "30/minute",
     "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE": "2026-11-07T09:00:00+11:00",
@@ -35,6 +38,8 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                   **{key: "600" for key in POSITIVE_KEYS},
                   "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE": "2026-10-30",
                   "ARTICLES_WORKSHOP_WINDOWS": WINDOWS,
+                  "ARTICLES_RUN_CONTROL_MODEL_USD": "2.50",
+                  "ARTICLES_RUN_CONTROL_MODEL_TOKENS": "400000",
                   **JOURNEY_VALUES})
         validate({"MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T22:00Z",
                   "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE": "disabled",
@@ -47,6 +52,23 @@ class ArticlesDeployConfigTests(unittest.TestCase):
         validate({"ARTICLES_WORKSHOP_WINDOWS":
                   '[{"start":"2026-11-08T09:00+11:00","end":"2026-11-08T14:00+11:00"},'
                   '{"start":"2026-11-15T09:00:00+11:00","end":"2026-11-15T14:00:00+11:00"}]'})
+
+    def test_sdk_control_needs_a_positive_allowance_in_the_same_release(self):
+        # Plan B14: the switch never ships without the backend's model allowance.
+        for allowance in ({}, {"ARTICLES_RUN_CONTROL_MODEL_USD": "2.50"},
+                          {"ARTICLES_RUN_CONTROL_MODEL_TOKENS": "400000"}):
+            with self.subTest(allowance=allowance), self.assertRaisesRegex(ValueError, "needs positive"):
+                validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "true", **allowance})
+        for key, value in (("ARTICLES_RUN_CONTROL_MODEL_USD", "0"), ("ARTICLES_RUN_CONTROL_MODEL_USD", "0.0"),
+                           ("ARTICLES_RUN_CONTROL_MODEL_USD", "-1"), ("ARTICLES_RUN_CONTROL_MODEL_USD", "1e3"),
+                           ("ARTICLES_RUN_CONTROL_MODEL_TOKENS", "0"), ("ARTICLES_RUN_CONTROL_MODEL_TOKENS", "20000001")):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError) as caught:
+                validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "true", "ARTICLES_RUN_CONTROL_MODEL_USD": "2.50",
+                          "ARTICLES_RUN_CONTROL_MODEL_TOKENS": "400000", key: value})
+            self.assertTrue(str(caught.exception).startswith(key + " must be"))
+        validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "false"})
+        validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "true", "ARTICLES_RUN_CONTROL_MODEL_USD": "0.75",
+                  "ARTICLES_RUN_CONTROL_MODEL_TOKENS": "1"})
 
     def test_malformed_settings_fail_without_echoing_them(self):
         for key, value in (("ARTICLES_FREE_FIRST_ARTICLE_ENABLED", "yes-sensitive"),
@@ -162,6 +184,21 @@ class ArticlesDeployConfigTests(unittest.TestCase):
         self.assertIn('    if [ -n "${!articles_setting}" ]; then\n'
                       '        install_remote_env_value "$articles_setting" "${!articles_setting}"', install)
 
+
+    def test_every_founder_switch_can_be_set_by_a_release(self):
+        # A switch missing here can only be changed by hand on the host.
+        settings_source = (ROOT / "mlai/settings.py").read_text()
+        boolean_reads = re.compile(
+            r"""_env_is_true\(\s*["']((?:ARTICLES|MY_STARTUP|CONTENT_FACTORY|WEBSITE)_[A-Z0-9_]+)["']"""
+            r"""|getenv\(\s*["']((?:ARTICLES|MY_STARTUP|CONTENT_FACTORY|WEBSITE)_[A-Z0-9_]+)["']\s*,\s*["'](?:true|false)["']\s*\)\.lower\(\)""")
+        switches = {first or second for first, second in boolean_reads.findall(settings_source)}
+        self.assertGreater(len(switches), 50)
+        self.assertEqual(sorted(switches - set(FLAG_KEYS)), [])
+
+    def test_only_the_stuck_founder_alert_defaults_on(self):
+        settings_source = (ROOT / "mlai/settings.py").read_text()
+        self.assertIn("_env_is_true('ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED', True)", settings_source)
+        self.assertIn("ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", FLAG_KEYS)
 
 
 class StaffConsoleFlagReleaseTests(unittest.TestCase):
