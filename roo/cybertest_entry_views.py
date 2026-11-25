@@ -108,10 +108,10 @@ def entry_metadata():
     return {'local_test': not staging, 'entry_mode': 'staging' if staging else 'local'}
 
 
-def workspace_for_company(company):
+def workspace_for_company(company, *, provision=True):
     if getattr(settings, 'CYBERTEST_PERSISTENT_BINDINGS_ENABLED', False):
         binding = CybertestCompanyBinding.objects.filter(company_id=company.pk).first()
-        if binding is None and general_access():
+        if binding is None and provision and general_access():
             # Caller has already checked current company ownership. OneToOne
             # makes concurrent first visits converge. Never reactivate an
             # existing pending/revoked row or change its workspace/creator.
@@ -131,7 +131,7 @@ def workspace_for_company(company):
         raise EntryError('COMPANY_UNMAPPED', 'This local company has no test workspace mapping.', 409) from exc
 
 
-def authorize(session_id, company_id):
+def authorize(session_id, company_id, *, provision=True):
     local_origin()
     if getattr(settings, 'CYBERTEST_ENTRY_PRODUCTION_ENABLED', False) and not general_access() and company_id not in production_companies():
         raise EntryError('COMPANY_UNAVAILABLE', 'This company is not enabled for security scans.', 403)
@@ -146,10 +146,10 @@ def authorize(session_id, company_id):
         pk=company_id, profile__user=session.user).first()
     if not company or (company.organization_id and not user_may_use_organization(session.user, company.organization)):
         raise EntryError('COMPANY_UNAVAILABLE', 'This company is unavailable.', 403)
-    workspace_id = workspace_for_company(company)
+    workspace_id = workspace_for_company(company, provision=provision)
     result = dict(user_id=str(session.user_id), company_id=str(company.pk),
                   workspace_id=workspace_id, company_name=company.name)
-    if general_access(): result['workspace_provisioning'] = True
+    if provision and general_access(): result['workspace_provisioning'] = True
     return result
 
 

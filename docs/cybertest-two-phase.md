@@ -167,6 +167,19 @@ synthetic shared-ledger rows. A successful SQLite run must not be reported as
 evidence for these PostgreSQL locks. The disposable container/network must be
 removed after the run; do not point this runner at an existing shared service.
 
+## Native Security history
+
+`GET /api/v1/my-startup/cybertest/results/?company_id=<uuid>` returns the
+50 latest check receipts for the signed-in payer and active company workspace.
+`GET /api/v1/my-startup/cybertest/results/<audit_uuid>/?company_id=<uuid>`
+returns the exact receipt in the same scope, or 404. These private account
+reads verify approved community membership and company ownership and never
+create workspace bindings. The response includes repository, phase, receipt
+status, charge/refund amounts in micro-Roo, and verified delivery counts when
+available. The full report remains in the signed-in browser workspace.
+Receipts without a matching MLAI payer, company and workspace do not appear
+in native history.
+
 ## Founder report delivery
 
 New Basic plans use `basic-source-v2` and store one `backendAnswer` of
@@ -178,7 +191,10 @@ only an unaccepted quote. A previously approved or dispatched check returns
 A full, persisted report queues one private MLAI Chat message for the original
 payer when `CYBERTEST_COMPLETION_NOTICES_ENABLED=true` on the web service and
 discovery scheduler. Use the existing verified Chat notifier configuration.
-The default is off. Test receipts never send a private message.
+The default is off. Test receipts can send only through the separate staging notifier in
+`chat-staging`. This path requires test billing, an allowlisted company,
+`CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED` and a separately configured
+staging sender.
 
 After a free continuation, the authenticated scanner can post cumulative
 evidence to `/api/v1/points/cybertest/quotes/{checkout_id}/notify-complete/`

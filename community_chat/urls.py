@@ -8,6 +8,7 @@ from .device_management_views import AccountDevicesView, AccountDeviceView
 from .onboarding_views import InviteResolveView, MemberOnboardingView
 from .account_ban_views import AccountBanView
 from .client_events import ClientEventsView
+from .admin_member_progress_views import AdminMemberProgressView
 from .admin_views import AdminAccessView, AdminTeamMemberView, AdminTeamSearchView, AdminTeamView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
 
@@ -183,6 +184,7 @@ urlpatterns = [
     path("crm/", include("community_chat.crm.urls")),
     # MLAI Chat's Admin area; not Django's /admin/ site or the relay's /api/admin/v1.
     path("admin/access/", AdminAccessView.as_view(), name="community_chat_admin_access"),
+    path("admin/member-progress/", AdminMemberProgressView.as_view(), name="community_chat_admin_member_progress"),
     path("admin/team/", AdminTeamView.as_view(), name="community_chat_admin_team"),
     path("admin/team/search/", AdminTeamSearchView.as_view(), name="community_chat_admin_team_search"),
     path("admin/team/<int:member_id>/", AdminTeamMemberView.as_view(), name="community_chat_admin_team_member"),

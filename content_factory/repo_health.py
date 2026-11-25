@@ -86,7 +86,8 @@ _BUILD_INPUTS = re.compile(
 
 
 def enabled() -> bool:
-    return bool(getattr(settings, "ARTICLES_REPO_HEALTH_ENABLED", False))
+    return bool(getattr(settings, "ARTICLES_REPO_HEALTH_ENABLED", False)
+                and not getattr(settings, "ARTICLES_REPO_HEALTH_SHADOW_ENABLED", False))
 
 
 def fix_pr_enabled() -> bool:
@@ -130,7 +131,7 @@ def _store(connection, patch: dict) -> dict:
     from .website_models import WebsiteConnection
     with transaction.atomic():
         row = WebsiteConnection.objects.select_for_update().filter(pk=connection.pk).first()
-        if row is None:
+        if row is None or row.generation != connection.generation or row.state != "connected":
             return {}
         record = {**stored(row), **patch, "version": VERSION, "generation": row.generation}
         capabilities = {**_mapping(row.capabilities), KEY: record}
@@ -154,7 +155,7 @@ def record_head(connection, sha: str):
 
 def valid_build_result(value) -> bool:
     """The Content Factory build-probe result shape (``harness.repo_health``)."""
-    if not isinstance(value, dict) or value.get("schema") != BUILD_SCHEMA or value.get("status") not in {"passed", "failed"}:
+    if not isinstance(value, dict) or value.get("schema") != BUILD_SCHEMA or value.get("status") not in ("passed", "failed") or "code" not in value:
         return False
     tail = value.get("log_tail")
     if not isinstance(tail, list) or len(tail) > TAIL_LINES or not all(isinstance(row, str) for row in tail):
@@ -175,7 +176,7 @@ def record_build_probe(connection, result: dict, *, now=None):
     now = now or timezone.now()
     build = {key: result[key] for key in ("status", "code", "blocking", "commit_sha")}
     build.update(log_tail=[row[:500] for row in result["log_tail"]], checked_at=now.isoformat())
-    return _store(connection, {"build": build})
+    return _store(connection, {"build": build, "head_sha": result["commit_sha"]})
 
 
 # ---------------------------------------------------------------------------
@@ -325,21 +326,15 @@ def on_push(payload, *, reader_for=None, fetch=None, now=None) -> dict:
     sha = _sha(str(payload.get("after") or ""))
     if not isinstance(repository.get("id"), int) or not sha:
         return {}
-    changed = set()
-    for commit in payload.get("commits") or []:
-        for key in ("added", "modified", "removed"):
-            changed.update(str(path) for path in _mapping(commit).get(key) or [])
     refreshed = stale = 0
     for connection in WebsiteConnection.objects.filter(repository_id=repository["id"], state="connected"):
         if payload.get("ref") != f"refs/heads/{connection.branch}":
             continue
         try:
             record_head(connection, sha)
-            if build_probe_needed(changed):
-                # The stored build result is for an older head, so the charge
-                # gate already treats it as stale; mark it for the founder too.
-                _store(connection, {"build_probe_requested_for": sha})
-                stale += 1
+            from .repo_health_operations import queue
+            queue(connection, sha)
+            stale += 1
             refresh_host(connection, reader=reader_for(connection) if reader_for else None, fetch=fetch, now=now)
             refreshed += 1
         except Exception:  # noqa: BLE001 - a health probe never fails a webhook
@@ -375,7 +370,7 @@ def items(connection) -> list[dict]:
     return rows
 
 
-def journey_block(connection) -> dict | None:
+def journey_block(connection, *, target_key=None) -> dict | None:
     """The journey's ``repoHealth`` block, or ``None`` when there is nothing to show."""
     if not enabled() or connection is None:
         return None
@@ -385,10 +380,13 @@ def journey_block(connection) -> dict | None:
     head = current_head(connection)
     build = _build_for_head(record, head)
     rows = items(connection)
+    verified = verified_host_baseline(connection, head, target_key)
+    if verified:
+        rows = [row for row in rows if row["severity"] != "blocking"]
     return {
         "headSha": head or None,
-        "buildStatus": build.get("status") if build.get("status") in {"passed", "failed"} else "not_checked",
-        "hostStatus": _mapping(record.get("host")).get("status") if _mapping(record.get("host")).get("status") in
+        "buildStatus": "passed" if verified else build.get("status") if build.get("status") in {"passed", "failed"} else "not_checked",
+        "hostStatus": "passed" if verified else _mapping(record.get("host")).get("status") if _mapping(record.get("host")).get("status") in
         {"passed", "failed", "unknown"} else "not_checked",
         "blocking": any(row["severity"] == "blocking" for row in rows),
         "items": rows,
@@ -402,18 +400,31 @@ def setup_blocked(connection) -> bool:
     return enabled() and any(row["severity"] == "blocking" for row in items(connection))
 
 
-def require_green_build(connection):
+def verified_host_baseline(connection, head, target_key):
+    """Accept the selected target's exact current build and separately verified live deployment."""
+    if not target_key or not head or head != connection.verified_sha:
+        return False
+    from .website_live_verification import accepted
+    target = connection.targets.filter(target_key=target_key, generation=connection.generation,
+                                      source_sha=head, verified_at__isnull=False).first()
+    return target is not None and accepted(connection, target)
+
+
+def require_green_build(connection, *, target_key=None):
     """Before an article is charged, the current head must have a green build probe."""
     if not enabled():
         return
     from .website_contract import WebsiteAuthorityError
     head = current_head(connection)
     build = _build_for_head(stored(connection), head)
+    blocking = any(row["severity"] == "blocking" for row in items(connection))
+    if (build.get("status") != "passed" or blocking) and verified_host_baseline(connection, head, target_key):
+        return
     if build.get("status") != "passed":
         code = build.get("code") if build.get("status") == "failed" else None
         message = COPY[code][0] if code in COPY else "We need to check your site builds on its latest commit first."
         raise WebsiteAuthorityError("repo_health_build_not_green", message, retryable=code is None)
-    if any(row["severity"] == "blocking" for row in items(connection)):
+    if blocking:
         raise WebsiteAuthorityError("repo_health_blocked", COPY[HOST_NOT_DEPLOYING][0])
 
 

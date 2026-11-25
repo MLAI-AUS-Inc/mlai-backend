@@ -6,6 +6,21 @@ from rest_framework.response import Response
 MAX_CANDIDATE_FAILURES = 100
 
 
+def project_draft_findings(snapshot, *, opted_in):
+    """Project private draft annotations independently from exact approved preview findings."""
+    if not isinstance(snapshot, dict) or 'draftReviewFindings' not in snapshot:
+        return
+    rows = snapshot.pop('draftReviewFindings')
+    if not opted_in or not isinstance(rows, list):
+        return
+    snapshot['draftReviewFindings'] = [
+        {'fieldId': row['fieldId'], 'kind': row['kind'], 'message': row['message'][:8192]}
+        for row in rows[:200] if isinstance(row, dict)
+        and isinstance(row.get('fieldId'), str) and 0 < len(row['fieldId']) <= 200
+        and row.get('kind') in ('claim', 'style') and isinstance(row.get('message'), str)
+    ]
+
+
 def poll_after_ms(review):
     """Schedule only actual pending review work, without another provider read."""
     candidates = review.get('candidates')
@@ -71,6 +86,8 @@ def _current_access(run, *, user, organization, review, latest_run=None):
                     from .website_run_authority import event_owned
                     from .article_publish_approval import article_review_identity_is_complete
                     from .run_review_quality import verified_review_quality
+                    if any(isinstance(row, dict) and row.get('kind') == 'claim' for row in review.get('draftReviewFindings') or []):
+                        return access
                     access['canApprove'] = (verified_review_quality(current) if event_owned(current)
                         else article_review_identity_is_complete(current))
             except ValueError:

@@ -2,13 +2,25 @@ from django.urls import path
 
 from . import service_views as views
 from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
+from .repo_health_views import RepoHealthProbeView
 from .website_current import WebsiteCurrentConnectionView
 from .website_verification import WebsiteCiAttestationView
 from .website_runtime_observation import WebsiteRuntimeObservationView
 from .preview_domain_claim import PreviewDomainClaimServiceView
 from .run_execution_control_views import RunExecutionTicketView
 
+from .reviewed_article_pr_views import ReviewedArticlePRAuthorityView
+
+from .article_preview_recovery_views import PreviewRecoveryServiceView
+
 urlpatterns = [
+    path("runs/<str:run_id>/preview-recovery/authorize", PreviewRecoveryServiceView.as_view()),
+    path("runs/<str:run_id>/preview-recovery/token", PreviewRecoveryServiceView.as_view(operation="token")),
+    path("runs/<str:run_id>/preview-recovery/result", PreviewRecoveryServiceView.as_view(operation="result")),
+    path("reviewed-article-pr/authorize", ReviewedArticlePRAuthorityView.as_view()),
+    path("reviewed-article-pr/token", ReviewedArticlePRAuthorityView.as_view(credential=True)),
+    path("repo-health/authorize", RepoHealthProbeView.as_view()),
+    path("repo-health/result", RepoHealthProbeView.as_view(complete=True)),
     path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
     path('preview-domain-claim/', PreviewDomainClaimServiceView.as_view(), name='content_factory_preview_domain_claim'),
     path('preview-domain-claim', PreviewDomainClaimServiceView.as_view()),

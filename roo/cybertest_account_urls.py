@@ -1,6 +1,7 @@
 from django.urls import path
 from . import cybertest_views as views
 from . import cybertest_entry_views as entry
+from .cybertest_results import ResultsView
 
 urlpatterns=[
     path('entry/',entry.EntryView.as_view(),name='cybertest-entry'),
@@ -8,4 +9,6 @@ urlpatterns=[
     path('capture/',views.CaptureView.as_view(),name='cybertest-capture'),
     path('preview/',views.PreviewView.as_view(),name='cybertest-preview'),
     path('confirm/',views.ConfirmView.as_view(),name='cybertest-confirm'),
+    path('results/', ResultsView.as_view(), name='cybertest-results'),
+    path('results/<uuid:audit_id>/', ResultsView.as_view(), name='cybertest-result'),
 ]

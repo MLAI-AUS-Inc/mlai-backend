@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = '[{"start": "2026-11-07T22:00:00Z", "end": "2026-11-08T03:00:00Z"}]'
 # The P1 founder journey keys that are neither switches nor counts.
 JOURNEY_VALUES = {
+    "ARTICLES_SAVED_PREVIEW_RECOVERY_DOMAINS": "mlai.au,fixture.example.com",
     "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T09:00:00+11:00",
     "MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT": "2026-11-21T09:00:00+11:00",
     "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS": "123, pawshare.com.au",

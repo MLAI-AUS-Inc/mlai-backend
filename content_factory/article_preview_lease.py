@@ -72,14 +72,32 @@ def safe_preview_path(path):
 class ArticlePreviewLeaseView(APIView):
     """Mint a grant only after the existing company/run authorization check."""
 
-    @views.guarded_owner_operation("preview", run_operation=True)
     def post(self, request, run_id):
+        from . import article_preview_recovery as recovery
+        if recovery.enabled():
+            context,error = views._resolve_context_or_response(request,require_domain=False)
+            if error is not None:
+                return error
+            run=views.get_object_or_404(views.ContentFactoryRun,run_id=run_id)
+            if not views._run_belongs_to_context(run,context):
+                return Response({"detail":"Run not found."},status=404)
+            op=recovery.readable(run)
+            if op:
+                grant={"recovery_operation":str(op.pk),"review_revision":op.payload["wire"]["revision"]}
+                return self._issue(request,run,context,grant=grant)
+        return self._standard(request,run_id)
+
+    @views.guarded_owner_operation("preview", run_operation=True)
+    def _standard(self, request, run_id):
         context, error = views._resolve_context_or_response(request, require_domain=False)
         if error is not None:
             return error
         run = views.get_object_or_404(views.ContentFactoryRun, run_id=run_id)
         if not views._run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=404)
+        return self._issue(request,run,context,grant={})
+
+    def _issue(self, request, run, context, *, grant):
         portable = original_portable_run(run)
         team_grant = {}
         if getattr(context.company, "membership_policy", None) == VibeRaisingCompany.SHARED_ACCESS:
@@ -92,7 +110,7 @@ class ArticlePreviewLeaseView(APIView):
         token = signing.dumps({"run": run.run_id, "organization": context.organization.id,
                                "domain": context.organization.domain, "portable": portable,
                                "intent_digest": evidence_digest({key: (run.run_request or {}).get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")}) if portable else None,
-                               **connection_contract(run.run_request or {}), **team_grant}, salt=SALT, compress=True)
+                               **connection_contract(run.run_request or {}), **team_grant, **grant}, salt=SALT, compress=True)
         prefix = f"/api/v1/vibe-marketing/article-preview/{quote(token, safe='')}/{quote(run.run_id, safe='')}/"
         return Response({"url": request.build_absolute_uri(prefix + "?cfInspector=1"), "expiresIn": LIFETIME},
                         headers={"Cache-Control": "no-store"})
@@ -130,6 +148,13 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
             member = member_context(user, grant.get('member_company_id'), need='read') if user else None
             if member is None or member.organization.pk != run.organization_id or not member_may_use_run(user, run):
                 return None, None, Response({'detail': 'Preview not found.'}, status=404)
+        from . import article_preview_recovery as recovery
+        if "recovery_operation" in grant:
+            if not recovery.readable(run,operation_id=grant["recovery_operation"],revision=grant.get("review_revision")):
+                return None,None,Response({"detail":"Preview access expired."},status=409)
+            return context,run,None
+        if recovery.enabled() and run.status in {"denied","cancelled"}:
+            return None,None,Response({"detail":"Preview access expired."},status=409)
         if grant.get("portable") is True:
             if not original_portable_run(run) or grant.get("intent_digest") != evidence_digest({key: (run.run_request or {}).get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")}):
                 return None, None, Response({"code": "portable_preview_changed", "detail": "Preview access expired."}, status=409)

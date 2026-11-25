@@ -266,3 +266,49 @@ class ContributionProfilePublicationTests(TestCase):
         self.manifest["grants"] = []
         self.publish(apply=True)
         self.assertEqual(self.profiles().data["profiles"][self.key]["contributions"]["badges"], [])
+
+    def count_publication(self, rows, **options):
+        data = dict(community=self.scope, review_state="approved", rule_version="test-v1",
+                    source_manifest_sha256="a" * 64, rows=rows)
+        raw = json.dumps(data).encode()
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "badge-counts.json"
+            path.write_bytes(raw)
+            call_command("import_volunteer_badge_counts", str(path), sha256=hashlib.sha256(raw).hexdigest(),
+                         reviewer_id=self.admin.pk, stdout=output, **options)
+        return json.loads(output.getvalue())
+
+    def test_verified_counts_require_existing_grants_and_replay_without_changing_the_badge(self):
+        self.publish(apply=True)
+        grant = VolunteerSourceReceipt.objects.get(community=self.scope, kind="badge_grant")
+        original = self.profiles().data["profiles"][self.key]["contributions"]
+        self.assertEqual(original["badges"][0]["earn_count_status"], "unresolved")
+        row = dict(member_id=grant.actor_id, badge_id="event.lead", grant_id=str(grant.pk),
+                   grant_evidence_sha256=grant.metadata["evidence_sha256"], grant_evidence_ref=grant.metadata["evidence_ref"],
+                   count=3, status="at_least", progress={})
+        self.assertEqual(self.count_publication([row])["new"], 1)
+        self.assertEqual(self.profiles().data["profiles"][self.key]["contributions"], original)
+        stale = dict(row, badge_id="event.crew", grant_id="11111111-1111-4111-8111-111111111111")
+        with self.assertRaises(CommandError):
+            self.count_publication([row, stale], apply=True)
+        self.assertFalse(VolunteerSourceReceipt.objects.filter(kind="badge_earn_count").exists())
+        self.assertEqual(self.count_publication([row], apply=True)["new"], 1)
+        self.assertEqual(self.count_publication([row], apply=True)["unchanged"], 1)
+        self.assertEqual(self.publish(apply=True)["existing"], 1)
+        profiles = self.profiles().data["profiles"]
+        result = profiles[self.key]["contributions"]
+        self.assertNotIn("contributions", profiles[self.other_key])
+        self.assertEqual(result["rank"], original["rank"])
+        self.assertEqual(result["contribution_roo"], original["contribution_roo"])
+        self.assertEqual(result["badges"], [
+            dict(original["badges"][0], earn_count=3, earn_count_status="at_least"),
+        ])
+        with self.assertRaises(CommandError):
+            self.count_publication([dict(row, count=4)], apply=True)
+        self.assertEqual(self.count_publication([row], rollback=True)["withdraw"], 1)
+        self.assertEqual(self.count_publication([row], rollback=True, apply=True)["withdraw"], 1)
+        self.assertEqual(self.count_publication([row], rollback=True, apply=True)["unchanged"], 1)
+        self.assertEqual(self.profiles().data["profiles"][self.key]["contributions"], original)
+        with self.assertRaises(CommandError):
+            self.count_publication([row], apply=True)
