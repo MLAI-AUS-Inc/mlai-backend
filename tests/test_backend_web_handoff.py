@@ -98,10 +98,14 @@ class WebHandoffIntegrationTests(unittest.TestCase):
         self.vhost = self.config_dir / "mlai-backend-api.conf"
         real_ip_config = self.root / "cloudflare-real-ip.conf"
         real_ip_config.write_text("set_real_ip_from 203.0.113.1;\n")
-        self.web_port = free_port()
-        self.candidate_port = free_port()
-        self.proxy_port = free_port()
         self.servers = []
+        # Bind the two upstreams before selecting a listener for Nginx. An
+        # ephemeral port is free again as soon as the probing socket closes.
+        self.old = self.start_web(0, "old")
+        self.candidate = self.start_web(0, "new")
+        self.web_port = self.old.server_port
+        self.candidate_port = self.candidate.server_port
+        self.proxy_port = free_port()
         self.nginx_config = self.root / "nginx.conf"
         self.nginx_config.write_text(
             "worker_processes 2;\n"
@@ -216,8 +220,8 @@ class WebHandoffIntegrationTests(unittest.TestCase):
         self.fail(f"Proxy never routed to {expected_slot}/{expected_release}")
 
     def test_two_live_slots_flip_and_rollback_on_bad_config(self):
-        old = self.start_web(self.web_port, "old")
-        candidate = self.start_web(self.candidate_port, "new")
+        old = self.old
+        candidate = self.candidate
         self.switch("validate", "web")
         self.switch("switch", "web")
         payload = self.wait_route("old", "web")
@@ -259,8 +263,9 @@ class WebHandoffIntegrationTests(unittest.TestCase):
         self.assertIn("target=web", self.vhost.read_text())
 
     def test_first_adoption_stages_without_stealing_direct_port(self):
-        direct = self.start_web(self.proxy_port, "old")
-        self.start_web(self.candidate_port, "new")
+        direct = self.start_web(0, "old")
+        self.proxy_port = direct.server_port
+        self.env["MLAI_API_NGINX_LISTEN_PORT"] = str(self.proxy_port)
         self.switch("validate", "candidate")
         self.assertFalse(self.vhost.exists())
         self.assertEqual(self.request()[1]["release"], "old")

@@ -67,7 +67,7 @@ def _profile(user):
     return profile
 
 
-def begin_authorization(user, return_path='/mentoring/settings', *, account_session=None):
+def begin_authorization(user, return_path='/mentoring/settings', *, account_session=None, native_return=False):
     """Create a short-lived single-use authorisation bound to the signed-in owner."""
     _require_configured()
     _profile(user)
@@ -75,20 +75,25 @@ def begin_authorization(user, return_path='/mentoring/settings', *, account_sess
         raise MentoringError('invalid_return_path','Return to Mentoring settings.',400)
     if account_session is None or account_session.user_id!=user.pk:
         raise CalendarError('invalid_account_session')
+    native_return = native_return is True and getattr(account_session, 'platform', '') in ('ios', 'android')
     nonce=secrets.token_urlsafe(32)
     verifier=secrets.token_urlsafe(64)
     challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
-    state=signing.dumps({'uid':user.pk,'nonce':nonce,'return_path':return_path},salt=STATE_SALT)
+    state=signing.dumps({'uid':user.pk,'nonce':nonce,'return_path':return_path,
+                         'native_return':native_return},salt=STATE_SALT)
     key='mentoring:calendar:oauth:'+hashlib.sha256(nonce.encode()).hexdigest()
     cache.set(key,{'user_id':user.pk,'return_path':return_path,'verifier':verifier,
                    'account_session_id':str(account_session.pk),'origin':account_session.origin,
-                   'intent':'mentoring_calendar'},STATE_TTL)
+                   'intent':'mentoring_calendar','native_return':native_return},STATE_TTL)
     query={'client_id':_setting('MENTOR_CALENDAR_GOOGLE_CLIENT_ID'),
            'redirect_uri':_setting('MENTOR_CALENDAR_GOOGLE_REDIRECT_URI'),
            'response_type':'code','access_type':'offline','prompt':'consent select_account',
            'include_granted_scopes':'false','scope':' '.join(google.SCOPES),'state':state,
            'code_challenge':challenge,'code_challenge_method':'S256'}
-    return {'authorization_url':'https://accounts.google.com/o/oauth2/v2/auth?'+urlencode(query)}
+    result = {'authorization_url':'https://accounts.google.com/o/oauth2/v2/auth?'+urlencode(query)}
+    if native_return:
+        result['native_return'] = True
+    return result
 
 
 def _consume_state(raw):
@@ -99,7 +104,8 @@ def _consume_state(raw):
             raise ValueError
         key='mentoring:calendar:oauth:'+hashlib.sha256(nonce.encode()).hexdigest()
         expected=cache.get(key)
-        if not expected or expected['user_id']!=data['uid'] or data['return_path']!='/mentoring/settings':
+        if (not expected or expected['user_id']!=data['uid'] or data['return_path']!='/mentoring/settings'
+                or expected.get('native_return',False) != data.get('native_return',False)):
             raise ValueError
         if not cache.add(key+':used',True,STATE_TTL):
             raise ValueError
@@ -122,10 +128,14 @@ def _expires(data):
     return timezone.now()+timedelta(seconds=seconds)
 
 
-def finish_authorization(raw_state, code, *, denied=False):
-    """Verify Google identity and preserve tokens only for that same identity."""
+def consume_authorization(raw_state):
+    """Consume one callback for the account and its original return mode."""
     _require_configured()
-    state=_consume_state(raw_state)
+    return _consume_state(raw_state)
+
+
+def finish_authorization(state, code, *, denied=False):
+    """Verify Google identity and preserve tokens only for that same identity."""
     if denied:
         raise CalendarError('authorization_denied')
     if not isinstance(code,str) or not code or len(code)>4096:

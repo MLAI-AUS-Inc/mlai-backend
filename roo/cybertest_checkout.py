@@ -317,13 +317,15 @@ def settle_delivery(checkout_id, audit_id, evidence, costs):
 
 
 @transaction.atomic
-def recover_quote(intent, token, *, parent_checkout_id=None):
+def recover_quote(intent, token, *, parent_checkout_id=None, backend_answer=None):
     """Recover this payer's purchase; never authorize, debit or restart it."""
     normalized=binding(intent)
     if not normalized.get('mlai_user_id') or 'purchase' in normalized:
         raise CheckoutError('INVALID_QUOTE','An authenticated MLAI selection is required.',400)
     if not getattr(settings,'CYBERTEST_PHASED_SCANS_ENABLED',False):
         raise CheckoutError('BILLING_UNAVAILABLE','Phased scans are not enabled.',503)
+    if backend_answer is not None and (parent_checkout_id is not None or backend_answer not in ('yes', 'no', 'unsure')):
+        raise CheckoutError('INVALID_BACKEND_ANSWER', 'Choose a valid answer for the basic security check.', 400)
     test_mode=configured_mode()=='test'
     secret_hash=token_digest(token)
     if parent_checkout_id is None:
@@ -339,6 +341,12 @@ def recover_quote(intent, token, *, parent_checkout_id=None):
                          Q(status__in=['charged','started']))
     row=rows.select_for_update().order_by('-created_at','-id').first()
     if row is None:return None
+    if backend_answer is not None and row.phase_contract['executionPlan'].get('backendAnswer') != backend_answer:
+        if row.status != 'quoted':
+            raise CheckoutError('BACKEND_ANSWER_LOCKED', 'This check already has an approved plan. Open the existing check.')
+        row.status = 'cancelled'
+        row.save(update_fields=['status', 'updated_at'])
+        return None
     # An old, unconfirmed link is replaced, not duplicated. Confirmed receipts
     # retain their consent; recovery does not extend their expiry or revive work.
     if row.status=='quoted':

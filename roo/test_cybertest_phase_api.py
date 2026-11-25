@@ -40,6 +40,18 @@ class PhaseApiTests(SimpleTestCase):
         settle.assert_called_once_with(self.receipt, self.audit, self.body['evidence'], None)
         self.assertEqual(response['Cache-Control'], 'private, no-store')
 
+    def test_recovery_accepts_only_a_bounded_architecture_answer(self):
+        url = '/api/v1/points/cybertest/quotes/recover/'
+        key = {'HTTP_X_CYBERTEST_KEY': 'synthetic-phase-service-key-not-secret'}
+        with patch('roo.cybertest_checkout.recover_quote', return_value=None) as recover:
+            for value in (None, True, {}, 'anything'):
+                response = self.client.post(url, {'backend_answer': value}, format='json', **key)
+                self.assertEqual(response.status_code, 400)
+            recover.assert_not_called()
+            response = self.client.post(url, {'binding': {}, 'token': 't'*43, 'backend_answer': 'yes'}, format='json', **key)
+            self.assertEqual(response.status_code, 200)
+            recover.assert_called_once_with({}, 't'*43, backend_answer='yes')
+
     def test_service_can_recover_an_upgrade_for_one_specific_parent(self):
         with patch('roo.cybertest_checkout.recover_quote', return_value=None) as recover:
             response = self.client.post('/api/v1/points/cybertest/quotes/recover/',

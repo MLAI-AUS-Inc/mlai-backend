@@ -1,4 +1,5 @@
 """Explicit configuration applied after the isolated staging provider scrub."""
+import re
 from urllib.parse import urlsplit
 from uuid import UUID
 from .cybertest_paths import base_path
@@ -33,6 +34,8 @@ def staging_entry_settings(values):
         'CYBERTEST_APP_ORIGIN': '',
         'CYBERTEST_BASE_PATH': '',
         'CYBERTEST_STAGING_COMPANY_IDS': [],
+        'CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED': False,
+        'CYBERTEST_STAGING_NOTIFIER_PRIVATE_KEY': '',
     }
     if not _flag(values, 'CYBERTEST_ENTRY_STAGING_ENABLED'):
         return result
@@ -73,4 +76,15 @@ def staging_entry_settings(values):
                   CYBERTEST_APP_ORIGIN=origin.geturl().rstrip('/'),
                   CYBERTEST_BASE_PATH=prefix,
                   CYBERTEST_STAGING_COMPANY_IDS=companies)
+    if _flag(values, 'CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED'):
+        notifier = values.get('CYBERTEST_STAGING_NOTIFIER_PRIVATE_KEY', '')
+        other_names = ('ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY', 'COMMUNITY_CHAT_BRIDGE_PRIVATE_KEY',
+                       'MLAI_MCP_COMMUNITY_SIGNER_PRIVATE_KEY')
+        if (mode != 'test' or result['CYBERTEST_APP_ORIGIN'] != 'https://chat-staging.mlai.au'
+                or not re.fullmatch(r'[0-9a-f]{64}', notifier)
+                or notifier == '0' * 64
+                or any(values.get(name) == notifier for name in other_names)):
+            _refuse()
+        result.update(CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED=True,
+                      CYBERTEST_STAGING_NOTIFIER_PRIVATE_KEY=notifier)
     return result
