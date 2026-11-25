@@ -9,9 +9,127 @@ from unittest.mock import AsyncMock, Mock, patch
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
-from integrations.services.community_bridge import buzz, store, worker
+from integrations.services.community_bridge import buzz, member_delivery, store, worker
+from integrations.services.message_sync import delivery
 from integrations.services.message_sync.delivery import delivery_context
 from integrations.services.message_sync.scheduler import LeaseLost
+
+
+class PublicDeletionOrderTests(SimpleTestCase):
+    def test_slack_delete_without_original_message_targets_the_deleted_timestamp(self):
+        payload = {"team_id": "TBOOST", "event": {
+            "type": "message", "subtype": "message_deleted", "hidden": True,
+            "channel": "CBOOST", "ts": "1700000001.000001",
+            "deleted_ts": "1700000000.000001",
+        }}
+        event = store._normalize_slack_event(payload)
+
+        self.assertEqual(event["source_message_id"], "1700000000.000001")
+        self.assertEqual(event["source_author_id"], "")
+        self.assertEqual(event["delivery_type"], "delete")
+        self.assertIsNone(store._normalize_slack_event(
+            {**payload, "event": {**payload["event"], "channel_type": "group"}}
+        ))
+
+    def test_normalized_internal_delete_does_not_require_a_slack_callback_envelope(self):
+        normalized = {
+            "delivery_type": "delete", "source_channel_id": "CBOOST",
+            "source_message_id": "1700000000.000001", "source_author_id": "UPOSTER",
+        }
+        with (
+            patch.object(store, "_get_enabled_channel", return_value=SimpleNamespace(
+                slack_workspace_id="TBOOST", audience="community",
+            )),
+            patch.object(store, "_canonicalize_event", wraps=store._canonicalize_event) as canonicalize,
+            patch.object(store.transaction, "atomic", return_value=nullcontext()),
+            patch.object(store.CommunityBridgeReceipt.objects, "create",
+                         side_effect=RuntimeError("receipt write reached")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "receipt write reached"):
+                store.ingest_inbound_event.__wrapped__(
+                    source_platform="slack", source_channel_id="CBOOST",
+                    receipt_key="internal-delete", event_type="message",
+                    normalized_event=normalized, raw_payload={},
+                )
+        canonicalize.assert_called_once()
+
+    def test_delete_is_not_superseded_by_a_newer_completed_edit(self):
+        row = SimpleNamespace(
+            source_platform="slack", delivery_type="delete",
+            source_revision="1700000001.000001", lease_token=None,
+        )
+        with patch.object(delivery.CommunityBridgeDelivery.objects, "select_for_update") as query:
+            query.return_value.get.return_value = row
+            self.assertFalse(delivery.supersede_stale_mutation.__wrapped__(1))
+
+    def test_edit_of_deleted_mirror_is_completed_without_sending_it(self):
+        row = SimpleNamespace(
+            pk=1, channel_id=2, source_platform="slack", source_channel_id="CBOOST",
+            source_message_id="1700000000.000001", target_platform="buzz",
+            target_channel_id="room", delivery_type="edit",
+            source_revision="1700000002.000001", lease_token=None,
+        )
+        with (
+            patch.object(delivery.CommunityBridgeDelivery.objects, "select_for_update") as query,
+            patch.object(delivery.CommunityBridgeMessageLink.objects, "filter") as links,
+            patch.object(store, "complete_delivery") as complete,
+        ):
+            query.return_value.get.return_value = row
+            links.return_value.exists.return_value = True
+            self.assertTrue(delivery.supersede_stale_mutation.__wrapped__(row.pk))
+        self.assertFalse(links.call_args.kwargs["destination_deleted_at__isnull"])
+        self.assertEqual(links.call_args.kwargs["source_message_id"], row.source_message_id)
+        complete.assert_called_once_with(delivery_id=row.pk)
+
+    def test_members_delete_uses_the_linked_author(self):
+        channel = SimpleNamespace(destination_channel_id="room", slack_channel_id="CBOOST",
+                                  slack_workspace_id="TBOOST")
+        row = SimpleNamespace(
+            pk=3, source_platform="slack", target_platform="buzz", target_channel_id="room",
+            source_channel_id="CBOOST", source_message_id="1700000000.000001",
+            source_parent_message_id="", payload={}, delivery_type="delete",
+            created_at=timezone.now(), _member_display_user_ids=[],
+        )
+        link = SimpleNamespace(destination_message_id="a" * 64, destination_channel_id="room",
+                               destination_parent_message_id="", source_author_id="UPOSTER")
+        with (
+            patch.object(store.CommunityBridgeMessageLink.objects, "select_for_update") as query,
+            patch.object(member_delivery.CommunityBridgeIdentityLink.objects, "filter") as identities,
+            patch.object(member_delivery, "scope_for", return_value={}),
+        ):
+            query.return_value.filter.return_value.first.return_value = link
+            identities.return_value.exists.return_value = False
+            envelope = member_delivery._wire(row, channel, None, None, None)
+        self.assertEqual(envelope["target_message_id"], link.destination_message_id)
+        self.assertEqual(envelope["source_author_id"], link.source_author_id)
+
+
+class PublicDeletionDeliveryTests(IsolatedAsyncioTestCase):
+    async def test_community_delete_waits_for_the_link_and_then_uses_its_author(self):
+        row = {
+            "id": 3, "delivery_type": "delete", "created_at": 1700000001,
+            "source_platform": "slack", "source_channel_id": "CBOOST",
+            "source_message_id": "1700000000.000001", "target_channel_id": "room",
+            "channel": {"slack_workspace_id": "TBOOST"}, "payload": {},
+        }
+        client = SimpleNamespace(_freeze_and_send_buzz_delivery=AsyncMock())
+        with (
+            patch.object(worker, "verified_identity_for_slack", return_value=None),
+            patch.object(worker, "resolve_message_link") as lookup,
+        ):
+            lookup.return_value = None
+            with self.assertRaises(worker.ParentMappingPending):
+                await worker.CommunityBridgeDiscordClient._deliver_to_buzz(client, row)
+            client._freeze_and_send_buzz_delivery.assert_not_awaited()
+
+            lookup.return_value = {
+                "destination_channel_id": "room", "destination_message_id": "a" * 64,
+                "source_author_id": "UPOSTER",
+            }
+            await worker.CommunityBridgeDiscordClient._deliver_to_buzz(client, row)
+        command = client._freeze_and_send_buzz_delivery.await_args.kwargs
+        self.assertEqual(command["target_message_id"], "a" * 64)
+        self.assertEqual(command["source_author_id"], "UPOSTER")
 
 
 @override_settings(MESSAGE_SYNC_ENABLED=True)

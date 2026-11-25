@@ -595,6 +595,13 @@ class ContentFactoryOrgConfigView(APIView):
             response_data["publish_targets"] = worker_publish_targets(config)
             response_data["website_connection"] = {**contract_for(website), "state": website.state, "capabilities": website.capabilities}
             response_data.update(contract_for(website))
+            merge_sha = request.query_params.get("static_setup_source_sha")
+            if (merge_sha and domain and github_repo and self._normalize_domain(domain) == org.domain
+                    and github_repo.casefold() == website.github_repo.casefold()):
+                from .website_static_setup_review import current_review
+                review = current_review(website, merge_sha)
+                if review:
+                    response_data["static_setup_review"] = review
             latest_inventory = website.scan_snapshots.filter(generation=website.generation, evidence__has_key="repository_inventory").order_by("-created_at").first()
             response_data["repository_inventory"] = (latest_inventory.evidence or {}).get("repository_inventory") if latest_inventory else None
         return Response(response_data, status=status.HTTP_200_OK)
@@ -2845,6 +2852,13 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             existing_generation,
         )
         return existing_run
+    # Retain the worker rung across sparse preview/merge callbacks. A merge of a
+    # wiring-only PR or an unverified static section cannot mint a ready website.
+    incoming_ladder = setup_payload.get("setup_ladder") or data.get("setup_ladder")
+    if isinstance(incoming_ladder, dict):
+        result["setup_ladder"] = incoming_ladder
+    if data.get("setup_cache_approved") is False or setup_payload.get("setup_cache_approved") is False:
+        result["setup_cache_approved"] = False
     common_fields = _article_system_setup_common_callback_fields(data=data, setup_payload=setup_payload, result=result)
     preview_url_value = str(data.get("preview_url") or setup_payload.get("preview_url") or "").strip()
     fallback_preview_url_value = str(
@@ -3610,7 +3624,9 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
         codeReviewReason=result.get("code_review_reason"),
         code_review_reason=result.get("code_review_reason"),
     )
-    if event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged":
+    from .website_content_files import requires_independent_verification
+    if (event_type == "article_system_setup_completed" and str(result.get("merge_status") or "").strip().lower() == "merged"
+            and not requires_independent_verification(result)):
         _mark_article_system_setup_generation_ready_for_domain(
             result["domain"],
             pr_url=result.get("pr_url") or setup_payload.get("pr_url") or "",

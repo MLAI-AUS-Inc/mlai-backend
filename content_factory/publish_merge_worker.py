@@ -202,7 +202,11 @@ def _claims(run, identity):
     findings = review.get("reviewFindings")
     if not isinstance(findings, list) or any(not isinstance(item, dict) or item.get("kind") not in {"style", "claim"} for item in findings):
         return None
-    return sum(item["kind"] == "claim" for item in findings)
+    private_findings = review.get("draftReviewFindings", [])
+    if not isinstance(private_findings, list) or any(not isinstance(item, dict) for item in private_findings):
+        return None
+    return max(sum(item["kind"] == "claim" for item in findings),
+               sum(item.get("kind") == "claim" for item in private_findings))
 
 
 def _copy_article_approval(run):

@@ -245,6 +245,8 @@ def _decide(subject, *, now=None, prospective=False):
     if class_first and isinstance(subject, ContentFactoryRun) and settled_without_delivery(subject):
         # D16: refunded or released points end the run; its ask offers "start again".
         return Decision('none', None, 'terminal', attempt, None, mode)
+    if mapping(receipt.get('pending_action')).get('state') == 'reconciliation_required':
+        return Decision('none', None, 'reconciliation_required', attempt, None, mode)
     if receipt.get('last_action') == 'stop':
         return Decision('none', None, 'terminal', attempt, None, mode)
     if isinstance(subject, ContentFactoryRun) and (request.get('first_article_goal_operation_id') or request.get('strategy_goal_id')):
@@ -671,6 +673,7 @@ def apply(subject, decision, *, now=None):
                 receipt.pop('pending_action', None)
                 _write_locked_run(locked, receipt)
             return receipt
+    outcome = {}
     try:
         outcome = _execute_run(current, decision, now=now)
         uncertain = isinstance(outcome, dict) and (outcome.get('content_factory_transport_error')
@@ -686,6 +689,13 @@ def apply(subject, decision, *, now=None):
             pending = mapping(receipt.get('pending_action'))
             if pending.get('attempt') == decision.attempt and pending.get('claim') == lease_claim:
                 receipt['pending_action'] = {**pending, 'state': 'uncertain' if uncertain else 'accepted'}
+                if (uncertain and mapping(outcome).get('reconciliation_required') is True
+                        and outcome.get('reason') == 'policy_resume_dispatch_uncertain'):
+                    due = now + timedelta(hours=24)
+                    receipt['pending_action'].update(state='reconciliation_required', owner='staff',
+                                                     reconcile_by=due.isoformat())
+                    receipt.update(last_action='none', next_at=None)
+                    transaction.on_commit(lambda: _alert(organization, 'resume_reconciliation_required', run=locked))
                 _write_locked_run(locked, receipt)
     return receipt
 

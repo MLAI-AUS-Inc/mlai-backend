@@ -17,13 +17,14 @@ def validate(env):
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED must be true or false")
     if inventory_enabled == "true" and enabled != "true":
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
-    member_ids = env.get("SLACK_MEMBER_CHANNEL_ALLOWED_IDS", "")
-    if (not isinstance(member_ids, str) or len(member_ids) > 25000
-            or re.fullmatch(r"[A-Z0-9, \t]*", member_ids) is None
-            or member_ids and (len(member_ids.split(",")) > 1000 or not all(
-                re.fullmatch(r"C[A-Z0-9]{2,23}", value.strip()) for value in member_ids.split(",")
-            ))):
-        raise ValueError("SLACK_MEMBER_CHANNEL_ALLOWED_IDS must be empty or a bounded comma-separated channel list")
+    for name in ("SLACK_MEMBER_CHANNEL_ALLOWED_IDS", "SLACK_VOICE_UPLOAD_CHANNELS"):
+        channel_ids = env.get(name, "")
+        if (not isinstance(channel_ids, str) or len(channel_ids) > 25000
+                or re.fullmatch(r"[A-Z0-9, \t]*", channel_ids) is None
+                or channel_ids and (len(channel_ids.split(",")) > 1000 or not all(
+                    re.fullmatch(r"C[A-Z0-9]{2,23}", value.strip()) for value in channel_ids.split(",")
+                ))):
+            raise ValueError(f"{name} must be empty or a bounded comma-separated channel list")
     for key, default in (("MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", "true"), ("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false"), ("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false"), ("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false")):
         if env.get(key, default).lower() not in {"true", "false"}:
             raise ValueError(f"{key} must be true or false")

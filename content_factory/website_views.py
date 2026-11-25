@@ -431,7 +431,8 @@ class WebsiteMutationView(APIView):
                 # Historical operation_id was a patch hash. Preserve that key
                 # while deriving any workflow fence from the saved run.
                 authority.pop("operation_id", None)
-            with authority_guard(authority, action="config_write") as connection:
+            from .reviewed_article_pr_worker import mutation_guard
+            with mutation_guard(authority, data) as connection:
                 operation_id = mutation_id
                 files = data.get("files")
                 if not operation_id or len(operation_id) > 160 or not SHA_PATTERN.fullmatch(str(data.get("base_sha") or "")) or not isinstance(files, list) or len(files) > 1000:

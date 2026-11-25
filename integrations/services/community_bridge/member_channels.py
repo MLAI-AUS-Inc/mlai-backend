@@ -744,6 +744,10 @@ def process_refreshes_once(limit: int = REFRESH_BATCH) -> int:
                         slack_channel_id=channel_id, slack_workspace_id=workspace_id,
                     ).first()
                     if row is None:
+                        from integrations.services.managed_channels.slack import metadata_only
+                        if metadata_only(workspace_id, channel_id, state.name):
+                            complete_refresh(refresh)
+                            break
                         if not members or state.is_archived:
                             if final_reader or state.is_archived:
                                 complete_refresh(refresh)

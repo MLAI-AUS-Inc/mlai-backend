@@ -92,7 +92,21 @@ class FirstArticleCardView(_FirstArticleAccess):
     def get(self, request):
         if not self._applies():
             return _not_found()
-        return Response(first_articles.card_payload(self._context(), request.user))
+        return Response(first_articles.card_payload(self._context(), request.user,
+            include_profile_intake=request.query_params.get("profile_intake") == "1"))
+
+
+class FirstArticleProfileIntakeView(_FirstArticleAccess):
+    """Save the founder's missing article facts and return their refreshed card."""
+
+    def post(self, request):
+        from content_factory.article_profile_intake import save
+        if not self._applies():
+            return _not_found()
+        try:
+            return Response(save(self._context(), request.user, request.data))
+        except first_articles.FirstArticleRefusal as refusal:
+            return self._refused(refusal)
 
 
 class FirstArticleStartView(_FirstArticleAccess):
