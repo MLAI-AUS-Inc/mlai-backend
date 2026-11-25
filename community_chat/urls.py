@@ -88,7 +88,10 @@ from .mentoring_calendar_views import (
     MentorReadinessView,
     MentorSettingsView,
 )
-from .arcade_views import ArcadeAcknowledgeView, ArcadeRoundsView, ArcadeSpinView
+from .arcade_views import (
+    ArcadeAcknowledgeView, ArcadeRoundsView, ArcadeSpinView,
+    LevelUpAcknowledgeView, LevelUpView,
+)
 from .home_views import CommunityHomeView
 from .event_discount_views import MyEventDiscountsView
 from .member_perks_views import MemberPerksView
@@ -177,6 +180,8 @@ urlpatterns = [
     path("member-roles/", ChatMemberRolesView.as_view(), name="community_chat_member_roles"),
     path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
     path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
+    path("arcade/level-up/", LevelUpView.as_view()),
+    path("arcade/level-up/acknowledge/", LevelUpAcknowledgeView.as_view()),
     path("arcade/rounds/", ArcadeRoundsView.as_view()),
     path("arcade/rounds/<uuid:round_id>/spin/", ArcadeSpinView.as_view()),
     path("arcade/rounds/<uuid:round_id>/acknowledge/", ArcadeAcknowledgeView.as_view()),

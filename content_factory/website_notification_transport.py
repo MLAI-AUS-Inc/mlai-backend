@@ -20,26 +20,30 @@ class NotificationTransportError(RuntimeError):
         super().__init__(outcome)
 
 
-def notifier_key():
+def notifier_key(*, staging=False):
     """Use a dedicated registered Chat member, never a customer or bridge signing key."""
-    try:return native_crypto.signing_key(getattr(settings,"ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY",""))
+    setting = "CYBERTEST_STAGING_NOTIFIER_PRIVATE_KEY" if staging else "ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY"
+    try:return native_crypto.signing_key(getattr(settings,setting,""))
     except Exception as exc:raise NotificationTransportError("chat_unconfigured",retryable=False) from exc
 
 
-def relay_origin():
+def relay_origin(*, staging=False):
     """Restrict notification publishing to the configured first-party Chat origin."""
     try:
         parts=urlsplit(getattr(settings,"COMMUNITY_CHAT_RELAY_URL",""))
-        if parts.scheme not in {"wss","https"} or parts.hostname not in {"chat.mlai.au","www.chat.mlai.au"} or parts.port not in {None,443} or parts.path not in {"","/"} or parts.username or parts.password or parts.query or parts.fragment:raise ValueError()
+        allowed = {"chat-staging.mlai.au"} if staging else {"chat.mlai.au","www.chat.mlai.au"}
+        if staging and getattr(settings,"APP_ENV","") != "chat-staging":raise ValueError()
+        if parts.scheme not in {"wss","https"} or parts.hostname not in allowed or parts.port not in {None,443} or parts.path not in {"","/"} or parts.username or parts.password or parts.query or parts.fragment:raise ValueError()
         return "https://"+parts.netloc.rstrip("/")
     except ValueError as exc:raise NotificationTransportError("chat_unconfigured",retryable=False) from exc
 
 
-def post_event(event):
+def post_event(event, *, staging=False):
     """Publish a saved event ID with fresh payload-bound NIP-98 transport authentication."""
-    key=notifier_key()
+    options = {"staging": True} if staging else {}
+    key=notifier_key(**options)
     if event.get("pubkey") != native_crypto.public_key(key):raise NotificationTransportError("chat_signer_changed",retryable=False)
-    url=relay_origin()+"/events";body=native_crypto.canonical_json(event).encode()
+    url=relay_origin(**options)+"/events";body=native_crypto.canonical_json(event).encode()
     auth=native_crypto.sign_event(key,kind=27235,created_at=timezone.now().timestamp(),content="",
         tags=[["u",url],["method","POST"],["payload",hashlib.sha256(body).hexdigest()],["nonce",secrets.token_hex(16)]])
     require_unlocked_remote_call()
@@ -53,12 +57,13 @@ def post_event(event):
     return value
 
 
-def open_dm(pubkeys, notice_id):
+def open_dm(pubkeys, notice_id, *, staging=False):
     """Fresh open commands recover a lost response while the relay reuses participants' DM."""
-    key=notifier_key()
+    options = {"staging": True} if staging else {}
+    key=notifier_key(**options)
     event=native_crypto.sign_event(key,kind=41010,created_at=timezone.now().timestamp(),
         tags=[["p",pubkey] for pubkey in sorted(pubkeys)]+[["mlai-goal-notice",notice_id],["nonce",secrets.token_hex(16)]],content="")
-    result=post_event(event)
+    result=post_event(event, **options)
     try:
         message=result.get("message")
         if not isinstance(message,str) or not message.startswith("response:"):raise ValueError()

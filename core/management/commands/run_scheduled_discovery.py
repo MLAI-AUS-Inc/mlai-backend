@@ -52,6 +52,7 @@ from integrations.services.research_automations import run_research_automation_s
 from integrations.services.xero_reconciliation import run_daily_payout_reconciliation
 from jobs.services.job_pipeline import enqueue_daily_jobs as run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
+from roo.cybertest_notifications import drain as drain_security_review_notifications
 from roo.coding import reconcile_coding_reservations
 from mentoring.instant_booking import process_due_bookings
 from community_chat.intro_welcome import run_chat_intro_welcome_sweep
@@ -156,6 +157,7 @@ class Command(BaseCommand):
             # is restarted once (connected, consent unchanged) or keeps its
             # draft card with one Restart notice. A founder's cancel gives nothing.
             ("system_stopped_runs", run_system_stopped_run_sweep),
+            ("security_review_notifications", drain_security_review_notifications),
             # P1 founder-journey sweeps (first profile, draft-ready outbox).
             # Runs only while MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED is on;
             # each sweep checks its own flag and never raises.

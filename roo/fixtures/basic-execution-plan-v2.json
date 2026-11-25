@@ -1,0 +1,90 @@
+{
+  "algorithm": "basic-source-v2",
+  "commitSha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "sourceManifestSha256": "a1b7e5fbd61b7dcf2bd3c0fa90592b4184b2d719a33ca01d63a2a574956ff9b3",
+  "scope": "all",
+  "route": "frontend",
+  "model": "kimi-k3",
+  "pricing": {
+    "input": 3,
+    "cachedInput": 0.3,
+    "output": 15
+  },
+  "contextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "execution": {
+    "maxSourceBytes": 100000,
+    "maxFiles": 100,
+    "maxSourceBatches": 10,
+    "maxDurationMs": 60000,
+    "maxModelUsd": 20,
+    "reportReserveUsd": 2
+  },
+  "workload": {
+    "files": 2,
+    "sourceBytes": 59,
+    "sourceBatches": 1,
+    "inputTokenUpperBound": 6511,
+    "outputTokenLimit": 16384,
+    "sourceReserveUsd": 0.265293
+  },
+  "checks": [
+    {
+      "id": "basic:source:1",
+      "kind": "source_batch",
+      "required": true
+    },
+    {
+      "id": "basic:credentials",
+      "kind": "credential_patterns",
+      "required": true
+    },
+    {
+      "id": "basic:review",
+      "kind": "evidence_review",
+      "required": false
+    }
+  ],
+  "batchRanges": [
+    [
+      {
+        "file": "app/auth.js",
+        "start": 0,
+        "end": 31
+      },
+      {
+        "file": "desktop/home.js",
+        "start": 0,
+        "end": 28
+      }
+    ]
+  ],
+  "backendAnswer": "unsure",
+  "contract": {
+    "version": 1,
+    "phase": "basic",
+    "tier": "basic",
+    "parentCheckoutId": null,
+    "planId": "f69fda6b297fbf35611eea481583a90ccf5ea15dc88b03affc20e4187b4b04ff",
+    "checks": [
+      {
+        "id": "basic:credentials",
+        "kind": "credential_patterns",
+        "required": true
+      },
+      {
+        "id": "basic:review",
+        "kind": "evidence_review",
+        "required": false
+      },
+      {
+        "id": "basic:source:1",
+        "kind": "source_batch",
+        "required": true
+      }
+    ],
+    "totalPoints": 24,
+    "duePoints": 24,
+    "commitSha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "sourceManifestSha256": "a1b7e5fbd61b7dcf2bd3c0fa90592b4184b2d719a33ca01d63a2a574956ff9b3"
+  }
+}

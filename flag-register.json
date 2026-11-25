@@ -1378,6 +1378,13 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "CYBERTEST_COMPLETION_NOTICES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Controls enqueueing and sending private Chat notifications for completed security reviews."
+    },
+    {
       "name": "CYBERTEST_ENTRY_LOCAL_ENABLED",
       "default": "false",
       "owner": "platform",
@@ -1412,6 +1419,13 @@
       "default": "false",
       "owner": "platform",
       "expiry": "2027-02-28"
+    },
+    {
+      "name": "CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Allows private completion notices for allowlisted test receipts on the isolated staging Chat relay."
     },
     {
       "name": "DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED",
