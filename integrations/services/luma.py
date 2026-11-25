@@ -165,7 +165,7 @@ class LumaAttendeeReportService:
             },
         )
 
-    def list_crm_events(self) -> List[Dict[str, Any]]:
+    def list_crm_events(self, *, strict_pagination: bool = False) -> List[Dict[str, Any]]:
         """Read all approved calendar listings, including view-only and external events.
 
         Unlike the managed-only reconciliation catalogue, CRM visibility does
@@ -192,6 +192,8 @@ class LumaAttendeeReportService:
             entries = page.get("entries")
             if not isinstance(entries, list) or any(not isinstance(row, dict) for row in entries):
                 raise LumaAPIError("Luma returned an invalid calendar page.")
+            if strict_pagination and not isinstance(page.get("has_more"), bool):
+                raise LumaAPIError("Luma omitted its calendar pagination state.")
             events.extend(entries)
             if not page.get("has_more"):
                 return events

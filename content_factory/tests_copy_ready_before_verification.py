@@ -263,6 +263,16 @@ class LegacyDeliveryModeTests(_StartHarness, TestCase):
                     with self.subTest(name=name, marker=marker, flags=label), override_settings(**flags):
                         self.assertEqual(self.results(built), today)
 
+    @override_settings(ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED=True)
+    def test_legacy_founder_can_explicitly_choose_a_draft_with_an_unverified_site(self):
+        built = make_named_legacy_org("talathrive")
+        self.assertEqual(self.outcome(built, portable_request(built), unready("verification_required")),
+                         ("started", "content_only"))
+        self.assertEqual(self.queued_payload["github_repo"], "")
+        with patch.object(views, "_github_repo_operable", return_value=True):
+            self.assertEqual(self.outcome(built, {"topic": "Repository article"}, READY), ("started", None))
+        self.assertTrue(self.queued_payload["github_repo"])
+
     def test_a_confirmed_only_request_keeps_todays_preview_rule(self):
         for name in NAMED_LEGACY_ORGS:
             if name == "pawshare":

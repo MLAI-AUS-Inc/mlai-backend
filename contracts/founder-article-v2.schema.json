@@ -1881,6 +1881,28 @@
           "required": [
             "canStart"
           ]
+        },
+        "profileIntake": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "missingFields": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "oneLiner",
+                  "targetAudience",
+                  "readerTask"
+                ]
+              }
+            }
+          },
+          "required": [
+            "missingFields"
+          ]
         }
       },
       "required": [
@@ -3252,6 +3274,20 @@
           }
         },
         "reviewFindings": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FounderReviewFinding"
+              },
+              "maxItems": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "draftReviewFindings": {
           "anyOf": [
             {
               "type": "array",

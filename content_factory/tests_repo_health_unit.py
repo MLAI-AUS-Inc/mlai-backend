@@ -178,6 +178,21 @@ class ProjectionTests(SimpleTestCase):
         repo_health.require_green_build(connection({"build": build()}))
 
     @ON
+    def test_current_selected_host_build_and_verified_live_deployment_can_satisfy_the_gate(self):
+        from unittest.mock import Mock
+        site = connection({"build": build(repo_health.UNSUPPORTED_NODE)})
+        site.targets = Mock()
+        with patch("content_factory.website_live_verification.accepted", return_value=True) as accepted:
+            repo_health.require_green_build(site, target_key="main-blog")
+            site.targets.filter.assert_called_once_with(target_key="main-blog", generation=site.generation,
+                                                       source_sha=HEAD, verified_at__isnull=False)
+            accepted.assert_called_once()
+            site.capabilities[repo_health.KEY]["head_sha"] = OLD
+            with self.assertRaises(WebsiteAuthorityError):
+                repo_health.require_green_build(site, target_key="main-blog")
+            accepted.assert_called_once()
+
+    @ON
     def test_new_generation_starts_clean(self):
         site = connection({"build": build(repo_health.TYPE_ERROR)}, generation=2)
         site.generation = 3

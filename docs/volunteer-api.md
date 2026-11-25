@@ -376,6 +376,22 @@ The response includes `contributions` only for published, reconciled profiles.
 It contains qualifying Roo, the `mlai-volunteer-v6` ladder position, and reviewed
 badges with member-safe descriptions and optional public event links.
 
+Each awarded badge includes `earn_count` (positive integer or null),
+`earn_count_status` (`exact`, `at_least` or `unresolved`) and
+`earn_count_progress`. The progress object is empty for most badges.
+`hello.steady` may include `months` and `accepted_deliverables`.
+`event.series` may include `months` and `events_led`. An existing patch with
+unverified repeat history has a null count and an empty progress object.
+
+For count publication, provide the reviewed file and its independently approved
+SHA-256 digest to `manage.py import_volunteer_badge_counts <manifest> --sha256
+<digest> --reviewer-id <account>`. The preview validates the exact existing
+grant identities, evidence anchors, publication status and scoped account history.
+Add `--apply` to publish the complete batch atomically. Repeating it reports the
+existing rows. To withdraw that batch, preview with `--rollback` and add
+`--apply` when ready. A withdrawn count stays unresolved if a stale publisher
+retries. The original badge grant and its public reason survive withdrawal.
+
 Preview the reviewed batch with
 `manage.py import_volunteer_badges <manifest> --reviewer-id <account>`.
 The private manifest contains `community`, `evidence_sha256`, an explicit
@@ -389,3 +405,46 @@ To hide a profile, mark its publication receipt withdrawn. To hide a single
 badge, mark its grant revoked. To hide all contribution profiles, set
 `COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED=false`. This requires
 no database migration.
+
+## Admin Member progress
+
+`GET /api/v1/community-chat/admin/member-progress/` reads the current cohort of
+MLAI Slack and Chat members with qualifying earned Roo. It uses the same
+verified account and device binding as the Chat admin console. An active
+account-linked admin or superuser sees `member_progress` in Admin access.
+Locations and all requests with a region filter additionally require
+`member_progress_locations`. That section requires an active committee record
+or explicit committee-authorised enrolment in
+`COMMUNITY_CHAT_MEMBER_PROGRESS_LOCATION_ACCOUNT_IDS`. Report responses are
+private and use `Cache-Control: no-store`.
+
+| Query | Values |
+| --- | --- |
+| `view` | `overview` (default), `leadership`, `locations`, `members`, `member` |
+| `days`, `months` | `7`, `30` (default), `90` days, and `3` or `6` (default) calendar months |
+| `region` | `VIC`, `NSW`, `QLD`, `WA`, `SA`, `TAS`, `ACT`, `NT`, `OUT`, `UNKNOWN`. Locations starts with Victoria. |
+| `level`, `category`, `metric` | Exact level 0–200 or `pending`, a report category ID, and one of `movement`, `points`, `attendance`, `newBadge`, `recent`, `bookings` |
+| `sort`, `q`, `page` | Members can sort by `movement`, `points`, `attendance`, `badges`, `recent`, `name` or `bookings`, search by display name and select a one-based page |
+| `id`, `month` | Member detail requires a public Chat profile UUID. An optional `YYYY-MM` opens dated monthly detail. Overview also returns member records for the requested month, optionally narrowed to one category. |
+
+Dates use Australia/Melbourne. Calendar months include the current partial
+month. Level gain requires comparable evidence at each end of the rolling
+window. Numeric totals aggregate exact microroo before converting to Roo for
+the response. Approved manual-time actions map to report categories by their
+catalogue group. Combined or unclassified wallet entries remain visible
+under the appropriate residual.
+
+Current badge holdings read published reviewed grants. Dated reporting uses a
+trusted `awarded_on` value only. New reviewed import manifests may supply that
+optional `YYYY-MM-DD` achievement date beside the badge's reviewed evidence
+reference. The receipt's import time remains the publication timestamp.
+Historical grants with no verified date remain visible in holdings, and
+unknown badge periods are nullable. Emerging-leader entries require two
+different awards in the qualifying order within 90 calendar days.
+
+Co-working figures read `CoworkingBooking` on the booked-for date, using Roo's
+active `booked` status and including Office Manager reservations. Each person
+can contribute once per day. The overview uses the monthly chart's calendar
+range, and Locations uses the selected region and rolling window. A member's
+declared base supplies their region. The booking location is irrelevant to
+that attribution. Booking counts provide a separate activity measure.

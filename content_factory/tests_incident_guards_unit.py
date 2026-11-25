@@ -197,7 +197,7 @@ class IncidentAuthorityReplays(SimpleTestCase):
         binding = {"operation_id": str(identifier), "operation_attempt": 2, "deletion_epoch": 0}
         run = SimpleNamespace(run_id="finished-scan", workflow="repo_scan", organization_id=30,
             status="completed", run_request=binding, result={})
-        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 2}, generation=3)
+        op = SimpleNamespace(pk=identifier, action="workflow", state="completed", payload={"attempt": 2}, generation=3)
         manager = Mock(); manager.filter.return_value.first.return_value = op
         website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
         with patch.object(ContentFactoryRun.objects, "filter") as runs:
@@ -216,7 +216,7 @@ class IncidentAuthorityReplays(SimpleTestCase):
         binding = {"operation_id": str(identifier), "operation_attempt": 2, "deletion_epoch": 0}
         run = SimpleNamespace(run_id="finished-scan", workflow="repo_scan", organization_id=30,
             status="completed", run_request=binding, result={})
-        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 2}, generation=3)
+        op = SimpleNamespace(pk=identifier, action="workflow", state="completed", payload={"attempt": 2}, generation=3)
         manager = Mock(); manager.filter.return_value.first.return_value = op
         website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
         payload = {**binding, "run_id": run.run_id, "event_type": "scan_complete", "status": "success"}
@@ -255,7 +255,7 @@ class IncidentAuthorityReplays(SimpleTestCase):
         binding = {"operation_id": str(identifier), "operation_attempt": 26, "deletion_epoch": 0}
         run = SimpleNamespace(run_id="adopted-setup", workflow="article_system_setup", organization_id=30,
             status="completed", run_request=binding, result={})
-        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 26}, generation=3)
+        op = SimpleNamespace(pk=identifier, action="workflow", state="completed", payload={"attempt": 26}, generation=3)
         manager = Mock(); manager.filter.return_value.first.return_value = op
         website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
         with patch.object(ContentFactoryRun.objects, "filter") as runs:
@@ -276,7 +276,7 @@ class IncidentAuthorityReplays(SimpleTestCase):
         binding = {"operation_id": str(identifier), "operation_attempt": 1, "deletion_epoch": 0}
         run = SimpleNamespace(run_id="rejected-article", workflow="confirmed_topic", organization_id=30,
             status="blocked", run_request=binding, result={})
-        op = SimpleNamespace(pk=identifier, state="failed", payload={"attempt": 1}, generation=3)
+        op = SimpleNamespace(pk=identifier, action="workflow", state="failed", payload={"attempt": 1}, generation=3)
         manager = Mock(); manager.filter.return_value.first.return_value = op
         website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
         payload = {**binding, "run_id": run.run_id}
@@ -316,7 +316,7 @@ class IncidentAuthorityReplays(SimpleTestCase):
         binding = {"operation_id": str(identifier), "operation_attempt": 26, "deletion_epoch": 0}
         run = SimpleNamespace(run_id="adopted-setup", workflow="article_system_setup", organization_id=30,
             status="completed", run_request=binding, result={})
-        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 26}, generation=3)
+        op = SimpleNamespace(pk=identifier, action="workflow", state="completed", payload={"attempt": 26}, generation=3)
         manager = Mock(); manager.filter.return_value.first.return_value = op
         website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
         payload = {**binding, "run_id": run.run_id, "event": "scaffold_complete", "status": "success"}
@@ -615,7 +615,7 @@ class IncidentIntegratedReplays(SimpleTestCase):
 
     def test_terminal_operation_rejects_statusless_progress_callback(self):
         from .website_operations import validate_operation
-        op = SimpleNamespace(pk=uuid.uuid4(), state="completed", payload={"attempt": 2}, generation=3)
+        op = SimpleNamespace(pk=uuid.uuid4(), action="workflow", state="completed", payload={"attempt": 2}, generation=3)
         operations = Mock(); operations.filter.return_value.first.return_value = op
         connection = SimpleNamespace(operations=operations, blockers=[], generation=3)
         payload = {"operation_id": str(op.pk), "operation_attempt": 2, "deletion_epoch": 0}

@@ -88,6 +88,11 @@
       "grandfathered": true,
       "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_REGISTRY_REFUNDS_ENABLED."
     },
+    "self_heal:repo_health": {
+      "shadow_flag": "ARTICLES_REPO_HEALTH_SHADOW_ENABLED",
+      "history_horizon": "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE",
+      "reason": "Shadow mode counts eligible connections and due operations without creating jobs, contacting providers or sending alerts. The release history horizon bounds enrollment and dispatch."
+    },
     "self_heal:self_heal_report": {
       "grandfathered": true,
       "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_SELF_HEAL_REPORT_ENABLED."

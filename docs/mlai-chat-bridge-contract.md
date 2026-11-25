@@ -19,6 +19,33 @@ MLAI Chat is another client surface, not a one-time data migration.
 
 ## MVP scope
 
+### Voice messages in linked public Slack channels
+
+Slack-origin audio shares use the existing authenticated attachment preview and
+streaming path. MLAI Chat-origin voice messages can share one Slack-hosted WAV in
+the mapped channel or thread. Add that Slack channel ID to
+`SLACK_VOICE_UPLOAD_CHANNELS` after the adapter supports `POST /v1/voice-media`
+and the channel's existing posting actor has Slack `files:write`. The setting
+is empty by default. A member's existing grant needs the scope from a new
+authorization where it is missing. Keep the room's existing bridge identity and
+membership policy.
+
+Deploy the Chat adapter before the backend. Keep the backend workflow variable
+`SLACK_VOICE_UPLOAD_CHANNELS` empty for the first deployment. After the linked
+staging channel passes [voice acceptance](mlai-chat-bridge-staging.md#bidirectional-message-matrix),
+set the variable to the approved public Slack channel IDs for the canary.
+Clearing it stops new hosted voice uploads. Use the existing reconciliation
+path for any share already in flight.
+
+The adapter matches the signed create event, author, current channel
+registration and attachment hash before returning the WAV to the backend.
+The worker stores the Slack upload's file ID in its frozen command before
+sharing. A lost share response reconciles by the exact file ID in the
+destination, with the same author and thread. A second upload is never used to
+resolve an uncertain share. This upload path applies to linked public channels.
+
+Use [the staging matrix](mlai-chat-bridge-staging.md) before enabling a channel.
+
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
 - New messages, replies, edits, deletes, the full emoji-mart Unicode 15 reaction catalog
   (including Slack aliases, flags, ZWJ sequences and skin tones), and safe Slack shortcode reactions are mirrored after
@@ -29,6 +56,13 @@ MLAI Chat is another client surface, not a one-time data migration.
   General historical backfill is out of scope for mapped public channels. A
   bounded, operator-confirmed repair command exists only for pre-cutover messages
   whose retained Slack receipts still contain resolvable user/channel references.
+- For a mapped public MLAI Chat channel, Slack can delete a mirrored post by
+  workspace, channel and the original message timestamp. The bridge handles
+  deletion events with no original author payload. A later edit revision
+  cannot override the deletion or update a deleted mirror.
+- When Roo confirms a rejected Boost My Startup root is gone from Slack, it
+  also queues the deletion directly using the recorded admission. The bridge
+  can remove the mirror without a Slack callback. Retries use the same receipt.
 - Direct messages, private channels, huddles, workflow payloads, ephemeral
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments remain represented as safe provider-hosted links in the durable

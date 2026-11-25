@@ -47,6 +47,7 @@ ROUTES = (
     ("founder-journey/opt-in", journey.FounderJourneyOptInView),
     ("first-article", journey.FirstArticleCardView),
     ("first-article/start", journey.FirstArticleStartView),
+    ("first-article/profile-intake", journey.FirstArticleProfileIntakeView),
     ("first-article/switch-topic", journey.FirstArticleSwitchTopicView),
 )
 

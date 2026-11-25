@@ -5,6 +5,7 @@ import re
 from copy import deepcopy
 from uuid import UUID
 from django.db import transaction
+from django.utils import timezone
 from urllib.parse import quote
 
 from rest_framework.response import Response
@@ -15,7 +16,7 @@ from .article_export import article_export
 from .founder_article_review_contract import scoped_review_response
 
 
-def remote_review(run, *, payload=None, child_operation=False):
+def remote_review(run, *, payload=None, child_operation=False, include_content_files=False, preview_recovery=False):
     """Forward a scoped review operation without passing browser credentials.
 
     ``child_operation`` marks a payload carrying the separate operation that
@@ -85,6 +86,11 @@ def remote_review(run, *, payload=None, child_operation=False):
     if not config["enabled"]:
         return Response({"detail": "Article editing is temporarily unavailable."}, status=503)
     url = f"{config['base_url']}/api/runs/{quote(run.run_id, safe='')}/article-review"
+    if payload is None:
+        options = ([ "include_content_files=true" ] if include_content_files else []) + (
+            ["preview_recovery=1"] if preview_recovery else [])
+        if options:
+            url += "?" + "&".join(options)
     if payload is not None:
         from .founder_review_commands import require_current_effect, ReviewCommandRefusal
         try:
@@ -93,6 +99,10 @@ def remote_review(run, *, payload=None, child_operation=False):
             # No external request was made, so an image allocation can be
             # settled through the existing definite-rejection path.
             return Response({"detail": "The current article permission or execution changed."}, status=409)
+    if payload is not None and payload.get("action") in {"editText","editTextBatch","applyUpdate","applyReview","chooseImage","undo","discardImage"}:
+        from .article_preview_recovery import enabled as recovery_enabled, observed_edit
+        if recovery_enabled():
+            observed_edit(run,payload.get("expectedRevision"))
     try:
         response = views.http_client.request(
             "GET" if payload is None else "POST", url,
@@ -483,11 +493,35 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
     allows_accepted_update_retries = True
     """Read or edit the canonical article using the existing ownership boundary."""
 
+    def finalize_response(self, request, response, *args, **kwargs):
+        # The old canonical clients validate a closed schema, including command replays.
+        from .founder_article_review_contract import project_draft_findings
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            opted_in = request.query_params.get("draft_review_findings") == "1"
+            project_draft_findings(data, opted_in=opted_in)
+            data.pop("previewRecoverySupported", None)
+            data.pop("previewRecovery", None)
+            projection = getattr(request, "_article_preview_recovery", None)
+            if isinstance(projection, dict) and request.query_params.get("preview_recovery") == "1":
+                data["previewRecovery"] = projection
+            canonical = data.get("articleReview")
+            if isinstance(canonical, dict):
+                project_draft_findings(canonical.get("review"), opted_in=opted_in)
+                if isinstance(canonical.get("review"),dict):
+                    canonical["review"].pop("previewRecovery",None)
+                    canonical["review"].pop("previewRecoverySupported",None)
+                if isinstance(projection,dict) and projection["state"] != "site_ready":
+                    canonical["access"]["canApprove"] = False
+        return super().finalize_response(request, response, *args, **kwargs)
+
     def get(self, request, run_id):
         context, run, error = self._resolve_run(request, run_id)
         if error is not None:
             return error
-        result = remote_review(run)
+        opted_in = getattr(request,"query_params",{}).get("preview_recovery") == "1" and run.workflow in views.ARTICLE_WORKFLOWS
+        started = timezone.now()
+        result = remote_review(run, preview_recovery=True) if opted_in else remote_review(run)
         if isinstance(result, Response):
             return scoped_review_response(result, context=context, run=run, user=request.user)
         if run.workflow == "article_system_setup":
@@ -496,11 +530,22 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         from .article_review_billing import reconcile_image_charges
         reconcile_image_charges(user=request.user, run=run, snapshot=result)
         latest = views._latest_review_ready_component_revision(run, context)
+        from .article_preview_recovery_state import terminal
+        from .article_preview_recovery import applies as recovery_applies
+        show_recovery = opted_in and recovery_applies(run,result)
+        if show_recovery:
+            from .article_preview_recovery import presentation, remember_review
+            remember_review(run,result,started)
+            request._article_preview_recovery = presentation(run,result,request.user,auto=True,latest=latest is not None)
+        if terminal(run) and (not show_recovery or request._article_preview_recovery["state"] != "building"):
+            result = {**result,"previewPending":False}
         from .article_review_billing import image_regeneration_cost
         # New-journey founders (P1.10): copy while the preview rebuilds, the
         # copy formats and ``founderDraft``. Legacy orgs get today's payload.
         from .founder_draft_views import founder_draft_review
         export_options, founder_draft = founder_draft_review(context=context, run=run, user=request.user)
+        if show_recovery and request._article_preview_recovery.get("draftRevision") == result.get("revision"):
+            export_options = {**export_options,"allow_preview_pending": True}
         payload = {**result, "imageRegenerationCostPoints": image_regeneration_cost(context.organization.domain), "componentFeedback": views._component_feedback_from_run(run),
             "articleExport": article_export(result, run_id=run.run_id, latest_run_id=latest.run_id if latest else None, **export_options)}
         if founder_draft is not None:
@@ -513,6 +558,26 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         context, run, error = self._resolve_run(request, run_id)
         if error is not None:
             return error
+        if isinstance(request.data,dict) and request.data.get("action") in {"recoverPreview","confirmPreviewDestination"} and request.query_params.get("preview_recovery") == "1":
+            from . import article_preview_recovery as recovery
+            confirm = request.data["action"] == "confirmPreviewDestination"
+            expected = {"action","expectedRevision","offerId"} if confirm else {"action","expectedRevision"}
+            if set(request.data) != expected or (confirm and not isinstance(request.data["offerId"],str)):
+                return Response({"reason":"invalid_request"},status=400)
+            snapshot = remote_review(run,preview_recovery=True)
+            if isinstance(snapshot,Response):
+                return snapshot
+            if not isinstance(snapshot,dict) or not snapshot.get("revision") or snapshot["revision"] != request.data["expectedRevision"]:
+                return Response({"reason":"revision_changed"},status=409)
+            if not recovery.applies(run,snapshot) or views._latest_review_ready_component_revision(run,context) is not None:
+                return Response({"reason":"revision_changed"},status=409)
+            if snapshot.get("previewRecovery",{}).get("state") in ("ready","building","validation_pending") and not recovery.current(run):
+                return Response({"reason":"current_preview_available"},status=409)
+            try:
+                request._article_preview_recovery = recovery.presentation(run,snapshot,request.user,force=True,offer_id=request.data.get("offerId"))
+            except recovery.Refused as exc:
+                return Response({"reason":exc.reason},status=exc.status)
+            return Response({},status=202,headers={"Cache-Control":"private, no-store"})
         from .founder_review_commands import execute
         return execute(request=request, context=context, run=run,
             invoke=lambda: self._post_review(request, context, run),
@@ -562,6 +627,10 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
             rejected = isinstance(result, Response) and result.status_code in {400, 404, 409, 422}
             pending = isinstance(result, Response) and not rejected
             settle_image_charge(user=request.user, run=run, receipt=receipt, rejected=rejected, pending=pending)
+        if isinstance(result,dict) and getattr(request,"query_params",{}).get("preview_recovery")=="1":
+            from .article_preview_recovery import applies, presentation
+            if applies(run,result):
+                request._article_preview_recovery = presentation(run,result,request.user,latest=latest is not None)
         return scoped_review_response(result if isinstance(result, Response) else Response(result),
             context=context, run=run, user=request.user, latest_run=latest)
 

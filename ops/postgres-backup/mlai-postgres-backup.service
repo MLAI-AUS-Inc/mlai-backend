@@ -1,0 +1,23 @@
+[Unit]
+Description=Back up Backend PostgreSQL to its private off-host repository
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/mlai-postgres-backup/repository.env
+Environment=RESTIC_PASSWORD_FILE=/etc/mlai-postgres-backup/restic-password
+Environment=GOMAXPROCS=1
+Environment=RESTIC_CACHE_DIR=/var/cache/mlai-postgres-backup
+ExecStart=/usr/local/lib/mlai-postgres-backup/backup.py backup
+StateDirectory=mlai-postgres-backup
+StateDirectoryMode=0700
+CacheDirectory=mlai-postgres-backup
+CacheDirectoryMode=0700
+UMask=0077
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=75%
+MemoryMax=768M
+TimeoutStartSec=4h

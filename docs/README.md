@@ -10,6 +10,8 @@ subsystem-specific contracts and runbooks.
 
 ## Backend maintenance
 
+- [PostgreSQL off-host backup and restore](../ops/postgres-backup/README.md) — encrypted snapshots, the production timer and isolated restore verification
+
 - [26 September release integration](backend-refactor-release-2026-09-26.md) — current-main fixes, validation and pending migration approval
 - [26 September migration proposal](backend-refactor-migration-proposal-2026-09-26.md) — empty graph merge and exact disposable-test inventory
 - [15 September release preparation](backend-refactor-release-2026-09-15.md) — historical integration and test scope
@@ -211,3 +213,5 @@ identified as current by a maintained architecture document.
 - [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.
+
+- [Managed Chat channels](managed-channel-sections.md) covers scoped Linear, Plane and Luma sync, durable room identity and optional Slack event conversations.
