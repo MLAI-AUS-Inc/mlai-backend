@@ -239,14 +239,14 @@ def founder_draft_review(*, context, run, user):
     return {"allow_preview_pending": copy_while_pending, "copy_formats": copy_without_preview_enabled()}, founder_draft
 
 
-def current_export(context, run, *, content_files=False, clear_claims=False):
+def current_export(context, run, *, content_files=False, clear_claims=False, saved_draft=False):
     """``(export, error_response)``: the run's current export, read the way the review view reads it."""
     from .article_review_views import remote_review
     review = remote_review(run, include_content_files=True) if content_files else remote_review(run)
     if isinstance(review, Response):
         return None, review
     latest = views._latest_review_ready_component_revision(run, context)
-    allow_pending = copy_without_preview_enabled() and is_content_only(run)
+    allow_pending = saved_draft or copy_without_preview_enabled() and is_content_only(run)
     export = article_export(review, run_id=run.run_id, latest_run_id=latest.run_id if latest else None,
                             allow_preview_pending=allow_pending, copy_formats=True)
     if content_files and isinstance(review, dict) and "reviewedContentFilesV1" in review and export.get("status") == "ready":
@@ -371,9 +371,13 @@ def _refusal(detail, reason, status):
 class _FounderDraftToolView(APIView):
     """Shared gate: flag, company scope, run ownership, cohort, then the owner check."""
 
+    allows_retained_draft = False
+
     def _resolve(self, request, run_id):
+        from .article_preview_recovery import enabled as recovery_enabled, retained_private_draft
         from workflow_runs.models import ContentFactoryRun
-        if not tools_enabled():
+        recovery_download = self.allows_retained_draft and recovery_enabled()
+        if not tools_enabled() and not recovery_download:
             return None, None, Response({"detail": NOT_FOUND}, status=404)
         context, error = views._resolve_context_or_response(request, require_domain=False)
         if error is not None:
@@ -381,7 +385,8 @@ class _FounderDraftToolView(APIView):
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if run is None or not views._run_belongs_to_context(run, context):
             return None, None, Response({"detail": RUN_NOT_FOUND}, status=404)
-        if not cohort.is_new_journey(context.organization):
+        if (not tools_enabled() or not cohort.is_new_journey(context.organization)) and not (
+                recovery_download and retained_private_draft(run,request.user)):
             return None, None, Response({"detail": NOT_FOUND}, status=404)
         if not _is_owner(request.user, context.organization):
             return None, None, _refusal(NOT_OWNER, "not_owner", 403)
@@ -757,12 +762,18 @@ def _filename(export):
 class FounderDraftDownloadView(_FounderDraftToolView):
     """GET: the article and its images as one zip."""
 
+    allows_retained_draft = True
+
     def get(self, request, run_id):
         context, run, error = self._resolve(request, run_id)
         if error is not None:
             return error
         from .website_content_files import enabled
-        export, error = current_export(context, run, content_files=enabled())
+        from .article_preview_recovery import retained_private_draft
+        if retained_private_draft(run,request.user):
+            export,error = current_export(context,run,saved_draft=True)
+        else:
+            export,error = current_export(context, run, content_files=enabled())
         if error is not None or export.get("status") != "ready":
             return _refusal(NOT_READY_DOWNLOAD, "not_ready", 409)
         archive = article_zip(export)
