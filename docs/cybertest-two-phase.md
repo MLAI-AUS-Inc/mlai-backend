@@ -179,3 +179,33 @@ status, charge/refund amounts in micro-Roo, and verified delivery counts when
 available. The full report remains in the signed-in browser workspace.
 Receipts without a matching MLAI payer, company and workspace do not appear
 in native history.
+
+## Founder report delivery
+
+New Basic plans use `basic-source-v2` and store one `backendAnswer` of
+`yes`, `no` or `unsure`. Version 1 plans retain their original schema.
+Basic recovery accepts an optional `backend_answer`. A changed answer cancels
+only an unaccepted quote. A previously approved or dispatched check returns
+409 `BACKEND_ANSWER_LOCKED` and keeps its original scope.
+
+A full, persisted report queues one private MLAI Chat message for the original
+payer when `CYBERTEST_COMPLETION_NOTICES_ENABLED=true` on the web service and
+discovery scheduler. Use the existing verified Chat notifier configuration.
+The default is off. Test receipts can send only through the separate staging notifier in
+`chat-staging`. This path requires test billing, an allowlisted company,
+`CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED` and a separately configured
+staging sender.
+
+After a free continuation, the authenticated scanner can post cumulative
+evidence to `/api/v1/points/cybertest/quotes/{checkout_id}/notify-complete/`
+with `X-Cybertest-Key`. The body contains `audit_id` (the original audit) and
+`evidence` (as for settlement with that root audit's ID). History must have
+acknowledged the saved report. Every planned check, including evidence review
+when present, must be completed. The callback returns `queued` or `disabled`
+in its `status` field. Retrying it is safe. Charges and refunds continue to
+use only their existing settlement endpoint.
+
+The minute scheduler retries private messages for up to two days. The report
+link checks company, workspace and account access when opened. The sender
+rechecks recipient membership and verified devices immediately before delivery.
+The message contains only a fixed completion sentence and the report link.
