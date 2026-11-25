@@ -292,12 +292,15 @@ def scoped(run, user, *, confirmed=False):
     }
 
 
-def destination_offer(run, user, revision, scope):
+def destination_offer(run, user, revision, scope, *, failed_operation=None):
     # Scope includes the reviewed app root, selected recipe, configuration,
     # installation, generation, deletion watermark and independently verified SHA.
+    evidence = [run.organization_id, run.run_id, user.pk, revision, scope]
+    if failed_operation is not None:
+        evidence.append(str(failed_operation.pk))
     token = salted_hmac(
         "saved-preview-destination-v1",
-        evidence_digest([run.organization_id, run.run_id, user.pk, revision, scope]),
+        evidence_digest(evidence),
         algorithm="sha256",
     ).hexdigest()
     return {
@@ -328,6 +331,39 @@ def missing_deployment(run, snapshot):
     )
 
 
+def _failed_build(run, op, snapshot):
+    if (
+        op.state != "completed"
+        or op.receipt.get("status") != "settled"
+        or op.receipt.get("reason") != "build_failed"
+    ):
+        return False
+    wire = op.payload["wire"]
+    raw = mapping(snapshot.get("previewRecovery"))
+    return (
+        snapshot.get("previewRecoverySupported") is True
+        and raw.get("state") == "unavailable"
+        and raw.get("reason") == "site_build_failed"
+        and raw.get("runId") == run.run_id
+        and raw.get("revision") == snapshot.get("revision") == wire["revision"]
+        and raw.get("operationId") == str(op.pk)
+        and raw.get("sourceSha") == wire["source_sha"]
+        and type(raw.get("generation")) is int
+        and raw["generation"] == wire["generation"]
+        and type(raw.get("attempt")) is int
+        and raw["attempt"] == wire["attempt"]
+    )
+
+
+def _replacement_budget_available(site, run, revision):
+    return site.operations.filter(
+        action=ACTION,
+        payload__source_run_id=run.run_id,
+        payload__wire__revision=revision,
+        created_at__gte=timezone.now() - timedelta(days=1),
+    ).count() < 3
+
+
 def reserve(run, user, snapshot, *, automatic=False, offer_id=None, replaces=None):
     revision = snapshot.get("revision")
     if not enabled_for(run) or snapshot.get("previewRecoverySupported") is not True:
@@ -349,10 +385,15 @@ def reserve(run, user, snapshot, *, automatic=False, offer_id=None, replaces=Non
         raise Refused("pending_validation")
     confirmed = offer_id is not None
     site, scope = scoped(run, user, confirmed=confirmed)
+    failed = replaces if replaces and _failed_build(run, replaces, snapshot) else None
+    if failed and (not confirmed or any(failed.payload["wire"].get(k) != v for k, v in scope.items())):
+        raise Refused()
     if confirmed and (
         not isinstance(offer_id, str)
         or not DIGEST.fullmatch(offer_id)
-        or not constant_time_compare(offer_id, destination_offer(run, user, revision, scope)["offerId"])
+        or not constant_time_compare(
+            offer_id, destination_offer(run, user, revision, scope, failed_operation=failed)["offerId"]
+        )
     ):
         raise Refused()
     with transaction.atomic():
@@ -364,17 +405,22 @@ def reserve(run, user, snapshot, *, automatic=False, offer_id=None, replaces=Non
             raise Refused()
         previous = current(locked, lock=True)
         if replaces and previous and previous.pk != replaces.pk:
-            return previous
+            # Only a duplicate submission for this same successor is idempotent.
+            if (
+                previous.payload["wire"]["generation"] == replaces.payload["wire"]["generation"] + 1
+                and previous.payload["wire"]["revision"] == revision
+                and previous.payload.get("destination_offer") == offer_id
+                and all(previous.payload["wire"].get(k) == v for k, v in scope.items())
+            ):
+                return previous
+            raise Refused("revision_changed")
         if replaces and (
             not previous
-            or previous.receipt.get("status") != "expired"
-            or site.operations.filter(
-                action=ACTION,
-                payload__source_run_id=run.run_id,
-                payload__wire__revision=revision,
-                created_at__gte=timezone.now() - timedelta(days=1),
-            ).count()
-            >= 3
+            or not (
+                previous.receipt.get("status") == "expired"
+                or failed and _failed_build(locked, previous, snapshot)
+            )
+            or not _replacement_budget_available(site, locked, revision)
         ):
             raise Refused("recovery_exhausted")
         key = evidence_digest(
@@ -528,18 +574,29 @@ def presentation(run, snapshot, user, *, auto=False, force=False, latest=False, 
     else:
         try:
             # Current consent must still match even after a valid ready callback.
-            if offer_id is not None:
-                op = reserve(run, user, snapshot, offer_id=offer_id)
-            elif op and op.payload["wire"]["revision"] == revision:
-                _, scope = scoped(run, user, confirmed=bool(op.payload.get("destination_offer")))
+            if op and op.payload["wire"]["revision"] == revision:
+                site, scope = scoped(run, user, confirmed=bool(op.payload.get("destination_offer")))
                 if any(op.payload["wire"].get(k) != v for k, v in scope.items()):
                     raise Refused()
                 if auto or force:
                     observe_expiry(op, snapshot)
-                if (auto or force) and op.receipt.get("status") == "expired":
-                    op = reserve(
-                        run, user, snapshot, offer_id=op.payload.get("destination_offer"), replaces=op
-                    )
+                accepted_offer = op.payload.get("destination_offer")
+                if offer_id is not None:
+                    if not accepted_offer or not constant_time_compare(offer_id, accepted_offer):
+                        if not _failed_build(run, op, snapshot):
+                            raise Refused()
+                        op = reserve(run, user, snapshot, offer_id=offer_id, replaces=op)
+                elif _failed_build(run, op, snapshot):
+                    if _replacement_budget_available(site, run, revision):
+                        offer = destination_offer(run, user, revision, scope, failed_operation=op)
+                    else:
+                        refusal = "recovery_exhausted"
+                elif (auto or force) and op.receipt.get("status") == "expired":
+                    # A reaped, verified preview inherits consent for this exact scope.
+                    consent = destination_offer(run, user, revision, scope)["offerId"] if accepted_offer else None
+                    op = reserve(run, user, snapshot, offer_id=consent, replaces=op)
+            elif offer_id is not None:
+                op = reserve(run, user, snapshot, offer_id=offer_id)
             elif force or auto and missing_deployment(run, snapshot):
                 op = reserve(run, user, snapshot, automatic=not force)
             elif missing_deployment(run, snapshot):
@@ -558,7 +615,7 @@ def presentation(run, snapshot, user, *, auto=False, force=False, latest=False, 
             refusal = getattr(exc, "reason", "access_changed")
             if force:
                 raise Refused(refusal) from exc
-            if refusal == "destination_changed":
+            if refusal == "destination_changed" and (not op or op.payload["wire"]["revision"] != revision):
                 try:
                     if snapshot.get("previewRecoverySupported") is True:
                         _, selected = scoped(run, user, confirmed=True)
@@ -576,7 +633,10 @@ def presentation(run, snapshot, user, *, auto=False, force=False, latest=False, 
         and missing_deployment(run, snapshot)
     ):
         view["actions"].append("rebuild_preview")
+    if refusal == "recovery_exhausted":
+        view["reason"] = refusal
     if offer:
+        view["state"] = "destination_required"
         view["destinationOffer"] = offer
         view["actions"] = ["review_draft", "confirm_destination"]
     if (
