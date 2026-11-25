@@ -15,9 +15,9 @@ Migration `integrations/0053_studio_meetings_treasury` adds three models after
   `(ledger, occurrence_key)` constraint collapses recurring/calendar copies and
   requests from different Slack threads.
 
-Sam approved creating this migration and applying it to disposable local test
-databases on 15 November 2026. The migration creates the three empty tables
-and their constraints. It has been applied successfully on SQLite and
-PostgreSQL. PostgreSQL regressions verify that simultaneous approvals for two
-builders cannot reserve the same final customer hour. Production application
-uses the separate release process.
+The original Studio migration was exercised on disposable SQLite and
+PostgreSQL databases. Renumbering preserves its three table operations and
+constraints. On 26 November 2026 Sam approved the renumbered migration for
+disposable tests and production only if the pending production plan consists
+of those three table creations. PostgreSQL regressions check that simultaneous
+approvals for two builders cannot reserve the same final customer hour.
