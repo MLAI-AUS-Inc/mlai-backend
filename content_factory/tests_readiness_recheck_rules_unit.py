@@ -373,3 +373,124 @@ class LookAndCompareTests(SimpleTestCase):
         with self.assertRaises(WebsiteAuthorityError) as raised:
             rules.request_manual_check(config, now=NOW)
         self.assertEqual(raised.exception.authority_code, "source_reverification_unavailable")
+
+
+class UnsupportedBuildTests(SimpleTestCase):
+    """Non-static stacks (Next, Astro, React Router): Content Factory cannot build them in place."""
+
+    def answer(self, reason, *, build_status="not_run", status=200):
+        response = MagicMock(status_code=status)
+        response.json.return_value = {"status": "unavailable", "checks": {
+            "blog_files": {"status": "passed"}, "build_render": {"status": build_status, "evidence": {"reason": reason}}}}
+        return MagicMock(return_value=response)
+
+    def build(self, post):
+        with patch("content_factory.vibe_marketing_views._content_factory_remote_config",
+                   return_value={"enabled": True, "base_url": "https://cf.test"}):
+            return rules.check_build_render(website(), record_row(), SimpleNamespace(pk="op-9"), source_sha=PUSHED, now=NOW, post=post)[0]
+
+    def test_an_unsupported_stack_is_marked_with_a_plain_detail(self):
+        for reason in sorted(rules.UNSUPPORTED_BUILD_REASONS):
+            check = self.build(self.answer(reason))
+            self.assertEqual((check["status"], check["evidence"]["unsupported"], check["evidence"]["reason"]), ("not_run", True, reason))
+            self.assertEqual(check["detail"], rules.UNSUPPORTED_BUILD_DETAIL)
+            self.assertTrue(rules.build_unsupported(check))
+
+    def test_transient_answers_are_never_unsupported(self):
+        transient = [self.answer("no_static_materialization_contract", status=status) for status in (404, 409, 502, 503)]
+        transient += [self.answer(""), self.answer("no_contract"), MagicMock(side_effect=TimeoutError),
+                      self.answer("no_static_materialization_contract", build_status="unavailable")]
+        for post in transient:
+            check = self.build(post)
+            self.assertEqual(check["status"], "not_run")
+            self.assertFalse(rules.build_unsupported(check))
+
+    def checks(self, build, live="passed", files="passed"):
+        return {"blog_files": {"status": files}, "build_render": build, "live_page": {"status": live}}
+
+    def test_unsupported_promotes_on_blog_files_and_live_page_even_after_a_push(self):
+        unsupported = {"status": "not_run", "evidence": {"unsupported": True}}
+        self.assertEqual(rules.verify_outcome(self.checks(unsupported), require_build=True), "passed")
+        self.assertEqual(rules.verify_outcome(self.checks(unsupported), require_build=False), "passed")
+        self.assertEqual(rules.verify_outcome(self.checks(unsupported, live="not_run"), require_build=True), "unproven")
+        self.assertEqual(rules.verify_outcome(self.checks(unsupported, files="not_run"), require_build=True), "unproven")
+        self.assertEqual(rules.verify_outcome(self.checks(unsupported, live="failed"), require_build=True), "failed")
+
+    def test_a_transient_not_run_keeps_retrying_after_a_push(self):
+        for build in ({"status": "not_run", "evidence": {"reason": "verify_installed_unavailable", "httpStatus": 503}},
+                      {"status": "not_run", "evidence": {"reason": "no_static_materialization_contract"}},
+                      {"status": "not_run"}):
+            checks = self.checks(build)
+            self.assertEqual(rules.verify_outcome(checks, require_build=True), "unproven")
+            self.assertTrue(rules.retry_worthy("unproven", checks))
+
+
+class RunFailureRecheckTests(SimpleTestCase):
+    """Content Factory's article delivery failure callback queues one verify-only check (never a setup)."""
+
+    def run_row(self, **overrides):
+        values = {"run_id": "run-1", "workflow": "direct_generate", "domain": "talathrive.com",
+                  "run_request": {"website_connection_id": "conn-1"}}
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def call(self, run, code, *, site=None, row="checking", flags=RULES_ON):
+        from .website_models import WebsiteConnection
+        site = site or website()
+        objects = MagicMock()
+        objects.select_related.return_value.filter.return_value.first.return_value = site
+        with override_settings(**flags), patch.object(WebsiteConnection, "objects", objects), \
+                patch("django.db.transaction.on_commit") as later, \
+                patch("content_factory.website_readiness.stored", return_value=record_row(row) if row else None):
+            rules.queue_after_run_failure(run, code)
+        return later
+
+    def test_source_and_target_codes_queue_after_commit(self):
+        for code in ("SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED", "website_source_changed", "verified_target_required",
+                     "PUBLISH_TARGET_UNVERIFIED", "PUBLISHING_ADAPTER_REQUIRED"):
+            self.assertEqual(self.call(self.run_row(), code).call_count, 1, code)
+
+    def test_other_codes_setup_runs_and_foreign_domains_are_ignored(self):
+        self.call(self.run_row(), "INTERNAL_ERROR").assert_not_called()
+        self.call(self.run_row(), "").assert_not_called()
+        self.call(self.run_row(workflow="article_system_setup"), "SOURCE_CHANGED").assert_not_called()
+        self.call(self.run_row(workflow="repo_scan"), "SOURCE_CHANGED").assert_not_called()
+        self.call(self.run_row(run_request={}), "SOURCE_CHANGED").assert_not_called()
+        self.call(self.run_row(domain="other.example"), "SOURCE_CHANGED").assert_not_called()
+        self.call(None, "SOURCE_CHANGED").assert_not_called()
+
+    def test_flag_domain_and_record_gate(self):
+        self.call(self.run_row(), "SOURCE_CHANGED", flags={}).assert_not_called()
+        self.call(self.run_row(), "SOURCE_CHANGED", flags={**RULES_ON, "ARTICLES_READINESS_DOMAINS": "other.example"}).assert_not_called()
+        self.call(self.run_row(), "SOURCE_CHANGED", row=None).assert_not_called()
+        self.call(self.run_row(), "SOURCE_CHANGED", row="needs_user").assert_not_called()
+
+    def test_a_broken_lookup_never_raises(self):
+        from .website_models import WebsiteConnection
+        with override_settings(**RULES_ON), patch.object(WebsiteConnection, "objects", MagicMock(side_effect=RuntimeError)):
+            self.assertIsNone(rules.queue_after_run_failure(self.run_row(), "SOURCE_CHANGED"))
+
+
+class DirectSetupPinTests(SimpleTestCase):
+    """A founder's own POST to the setup view (not a prepare dispatch) forwards the pin too."""
+
+    def pin(self, data, *, route_path="/stories", row=None, **flags):
+        settings = {"ARTICLES_READINESS_PIN_ENABLED": True, "ARTICLES_READINESS_DOMAINS": "talathrive.com", **flags}
+        with override_settings(**settings), patch("content_factory.website_readiness.stored", return_value=row or record_row()):
+            return rules.direct_setup_pin(website(), data, route_path=route_path)
+
+    def test_the_pin_is_forwarded(self):
+        expected = {"pinned_setup_run_id": "e3f55f7e", "strategy_pin": "model_adapter"}
+        self.assertEqual(self.pin({}), expected)
+        self.assertEqual(self.pin({}, route_path="/stories/"), expected)
+        self.assertEqual(self.pin({}, route_path=""), expected)
+
+    def test_set_up_again_or_another_route_sends_no_pin(self):
+        for data in ({"set_up_again": True}, {"setUpAgain": "true"}, {"repair_setup": 1}, {"repairSetup": "yes"}):
+            self.assertEqual(self.pin(data), {}, data)
+        self.assertEqual(self.pin({}, route_path="/blog"), {})
+        self.assertEqual(self.pin({"set_up_again": False})["pinned_setup_run_id"], "e3f55f7e")
+
+    def test_flag_off_or_no_connection_sends_no_pin(self):
+        self.assertEqual(self.pin({}, ARTICLES_READINESS_PIN_ENABLED=False), {})
+        self.assertEqual(rules.direct_setup_pin(None, {}, route_path="/stories"), {})

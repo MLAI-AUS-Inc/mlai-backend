@@ -18374,6 +18374,11 @@ class VibeMarketingArticleSystemSetupView(APIView):
                           "pinned_setup_run_id"):
                 if field in request.data:
                     payload[field] = request.data[field]
+        else:
+            # A founder's own setup POST replays the pinned setup too (ARTICLES_READINESS_PIN_ENABLED),
+            # unless they chose to set up again or picked a different article route.
+            from .website_readiness_rules import direct_setup_pin
+            payload.update(direct_setup_pin(getattr(config, "website_connection", None), request.data, route_path=route_path))
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,

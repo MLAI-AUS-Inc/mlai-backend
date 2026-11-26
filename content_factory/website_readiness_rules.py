@@ -19,7 +19,8 @@ A verify-only check (:func:`process_verify_only`) runs ``blog_files`` (one git
 tree read at the new commit), ``live_page`` (one pinned fetch of the blog
 address) and ``build_render`` (Content Factory's
 ``POST /api/runs/{setupRunId}/verify-installed``, ``not_run`` when that
-answer is unavailable). Every check that ran passing moves the verified commit
+answer is unavailable). Blog files and a build passing (or, for a stack Content
+Factory cannot build in place, blog files and the live page) move the verified commit
 forward and clears ``repository_source_changed``; a failed check moves the
 record to ``fixing`` (``needs_user`` for access) with drafts still allowed and
 never dispatches a setup.
@@ -27,7 +28,8 @@ never dispatches a setup.
 The same verify-only check is queued by the owner's ``readiness-check``
 action, by the weekly look (:func:`run_weekly_look_sweep`, two failed looks in
 a row) and by an article start refused for a changed source
-(:func:`queue_after_delivery_failure`). Age alone is never a failure
+(:func:`queue_after_delivery_failure`) or reported failed by Content Factory
+(:func:`queue_after_run_failure`). Age alone is never a failure
 (:func:`age_waived`). :func:`setup_pin` sends the pinned setup to Content
 Factory under ``ARTICLES_READINESS_PIN_ENABLED``, and
 :func:`run_nightly_compare_sweep` reports, never changes, records whose saved
@@ -70,6 +72,12 @@ COMPARE_DAY_KEY = "website_readiness_nightly_compare:{day}"
 COMPARE_DAY_TTL = 26 * 3600
 MISSING_LIMIT = 20
 CF_VERIFY_TIMEOUT = (5, 180)
+# Content Factory's ``build_render`` ``evidence.reason`` values meaning "this stack is
+# not built in place by verify-installed" (setup_verify_installed.check_build_render),
+# as opposed to a transient failure.
+UNSUPPORTED_BUILD_REASONS = frozenset({"no_static_materialization_contract", "witness_not_required"})
+UNSUPPORTED_BUILD_DETAIL = ("This site's build can't be checked in place, so we checked the blog files "
+                            "and the live blog page instead.")
 STRATEGY_FOR_MODE = {"model_synthesized": "model_adapter", "agent": "agent", "native": "native_collection",
                      "deterministic": "deterministic"}
 
@@ -316,32 +324,102 @@ DELIVERY_FAILURE_CODES = frozenset({"website_source_changed", "verified_target_r
                                     "website_publish_verification_required"})
 
 
+# Content Factory's codes for an article run whose delivery or publish failed because
+# the website's source or publishing target no longer matches the verified setup.
+RUN_FAILURE_CODES = {"SOURCE_CHANGED": "website_source_changed", "WEBSITE_SOURCE_CHANGED": "website_source_changed",
+                     "website_source_changed": "website_source_changed",
+                     "verified_target_required": "verified_target_required",
+                     "website_publish_verification_required": "website_publish_verification_required",
+                     "PUBLISH_TARGET_UNVERIFIED": "verified_target_required",
+                     "PUBLISHING_ADAPTER_REQUIRED": "website_publish_verification_required"}
+# Only article delivery runs queue this check; a failed setup or scan is the prepare flow's to handle.
+ARTICLE_WORKFLOWS = frozenset({"article_generation", "auto_discovery", "confirmed_topic", "direct_generate",
+                               "article_revision", "publish_article", "island_refresh"})
+
+
 def queue_after_delivery_failure(website, exc):
     """An article start refused for a changed source queues one verify-only check per commit. Never raises."""
     try:
         codes = {getattr(exc, "code", ""), getattr(exc, "authority_code", "")}
-        if website is None or not codes & DELIVERY_FAILURE_CODES or not enabled_for(website):
-            return None
-        if rules_record(website) is None:
-            # Only a website the rules track (pinned, ready/checking/fixing) gets a verify-only check.
-            return None
-
-        def run():
-            try:
-                from .website_models import WebsiteConnection
-                current = WebsiteConnection.objects.select_related("organization").get(pk=website.pk)
-                op, created = queue_verify_only(current, trigger="delivery_failure", bucket="once")
-                if created:
-                    from .website_readiness import shadow
-                    shadow(current, "delivery_failure", source_sha=op.payload.get("source_sha", ""),
-                           detail={"refusal": sorted(code for code in codes if code)[0], "operation_id": str(op.pk)})
-            except Exception:  # noqa: BLE001 - the refusal answer stands
-                logger.warning("website_readiness_delivery_recheck_failed connection=%s", website.pk, exc_info=True)
-
-        transaction.on_commit(run)
-    except Exception:  # noqa: BLE001 - see above
+        _queue_delivery_recheck(website, codes, detail={})
+    except Exception:  # noqa: BLE001 - see _queue_delivery_recheck
         logger.warning("website_readiness_delivery_recheck_unavailable", exc_info=True)
     return None
+
+
+def queue_after_run_failure(run, error_code):
+    """Content Factory reported an article run's delivery/publish failure: one verify-only check per commit.
+
+    ``run`` is the backend's own ``ContentFactoryRun``; the website comes from
+    its saved request (``website_connection_id``), never from the callback
+    body, and must belong to the run's organisation domain. Setup and scan
+    runs are ignored. Never dispatches a setup; never raises.
+    """
+    try:
+        code = RUN_FAILURE_CODES.get(str(error_code or "").strip())
+        if run is None or code is None or str(getattr(run, "workflow", "") or "") not in ARTICLE_WORKFLOWS:
+            return None
+        identifier = str(_mapping(getattr(run, "run_request", None)).get("website_connection_id") or "")
+        if not identifier:
+            return None
+        from .website_models import WebsiteConnection
+        website = WebsiteConnection.objects.select_related("organization").filter(pk=identifier).first()
+        domain = str(getattr(run, "domain", "") or "").casefold()
+        if website is None or str(website.organization.domain or "").casefold() != domain:
+            return None
+        _queue_delivery_recheck(website, {code}, detail={"run_id": str(getattr(run, "run_id", "") or ""),
+                                                        "run_error_code": str(error_code)[:64]})
+    except Exception:  # noqa: BLE001 - the failure callback answer stands
+        logger.warning("website_readiness_run_failure_recheck_unavailable run=%s", getattr(run, "run_id", ""), exc_info=True)
+    return None
+
+
+def _queue_delivery_recheck(website, codes, *, detail):
+    """After commit, queue the ``delivery_failure`` verify-only check (bucket ``once``: once per commit)."""
+    if website is None or not codes & DELIVERY_FAILURE_CODES or not enabled_for(website):
+        return
+    if rules_record(website) is None:
+        # Only a website the rules track (pinned, ready/checking/fixing) gets a verify-only check.
+        return
+
+    def run():
+        try:
+            from .website_models import WebsiteConnection
+            current = WebsiteConnection.objects.select_related("organization").get(pk=website.pk)
+            op, created = queue_verify_only(current, trigger="delivery_failure", bucket="once")
+            if created:
+                from .website_readiness import shadow
+                shadow(current, "delivery_failure", source_sha=op.payload.get("source_sha", ""),
+                       detail={**detail, "refusal": sorted(code for code in codes if code)[0], "operation_id": str(op.pk)})
+        except Exception:  # noqa: BLE001 - the refusal answer stands
+            logger.warning("website_readiness_delivery_recheck_failed connection=%s", website.pk, exc_info=True)
+
+    transaction.on_commit(run)
+
+
+def direct_setup_pin(connection, data, *, route_path=""):
+    """:func:`setup_pin` for a founder's own POST to the setup view (not a prepare dispatch).
+
+    An explicit "set up again" (``set_up_again`` / ``repair_setup``) or a
+    different article route than the pinned one is a fresh setup, so no pin.
+    """
+    data = data if hasattr(data, "get") else {}
+    fresh = any(_truthy(data.get(key)) for key in ("set_up_again", "setUpAgain", "repair_setup", "repairSetup"))
+    pin = setup_pin(connection, fresh=fresh)
+    if not pin:
+        return {}
+    try:
+        from .website_readiness import stored
+        pinned_route = str(_mapping(getattr(stored(connection), "pinned_contract", None)).get("routePath") or "")
+    except Exception:  # noqa: BLE001 - unknown route means no pin
+        return {}
+    if pinned_route and route_path and pinned_route.rstrip("/") != str(route_path).rstrip("/"):
+        return {}
+    return pin
+
+
+def _truthy(value) -> bool:
+    return value is True or str(value).strip().lower() in {"1", "true", "yes"}
 
 
 # --- verify-only checks --------------------------------------------------------
@@ -436,11 +514,25 @@ def check_build_render(website, row, op, *, source_sha, attempt=0, now=None, pos
     checks = _mapping(answer.get("checks"))
     build = _mapping(checks.get("build_render"))
     status = build.get("status") if build.get("status") in {"passed", "failed"} else "not_run"
+    reason = str(_mapping(build.get("evidence")).get("reason") or "")
+    unsupported = build.get("status") == "not_run" and reason in UNSUPPORTED_BUILD_REASONS
     detail = {"passed": "Built and rendered at the latest commit.", "failed": "The blog page did not build or render at the latest commit."}
-    check = _check(status, detail.get(status, "The build check could not run for this site."), source_sha=source_sha,
-                   now=now, setupRunId=setup_run_id, answer=str(answer.get("status") or ""),
-                   durationMs=answer.get("durationMs"), reason=str(_mapping(build.get("evidence")).get("reason") or ""))
+    text = (UNSUPPORTED_BUILD_DETAIL if unsupported
+            else detail.get(status, "The build check could not run for this site."))
+    check = _check(status, text, source_sha=source_sha, now=now, setupRunId=setup_run_id,
+                   answer=str(answer.get("status") or ""), durationMs=answer.get("durationMs"), reason=reason,
+                   **({"unsupported": True} if unsupported else {}))
     return check, str(_mapping(checks.get("blog_files")).get("status") or "")
+
+
+def build_unsupported(check) -> bool:
+    """Whether ``build_render`` did not run because Content Factory cannot build this stack in place.
+
+    Only Content Factory's own answer marks this (``evidence.unsupported``):
+    timeouts, 5xx, 404/409 and a retryable witness stay plain ``not_run``.
+    """
+    check = _mapping(check)
+    return check.get("status") == "not_run" and _mapping(check.get("evidence")).get("unsupported") is True
 
 
 def verify_outcome(checks, *, require_build=False) -> str:
@@ -450,6 +542,12 @@ def verify_outcome(checks, *, require_build=False) -> str:
     the already-verified commit (``require_build`` False: manual, weekly or
     refused-article checks) may stand on the live blog page answering instead,
     because the live page is still served from the previous deploy after a push.
+
+    One exception: a stack Content Factory cannot build in place (Next, Astro,
+    React Router and other non-static sites, :func:`build_unsupported`) can
+    never pass ``build_render``, so there blog files in place plus the live
+    blog page answering is the best proof available and passes even after a
+    push. A transient ``not_run`` (timeout, 5xx, 404/409) stays unproven.
     """
     statuses = {key: _mapping(value).get("status") for key, value in checks.items()}
     if "failed" in statuses.values():
@@ -458,7 +556,7 @@ def verify_outcome(checks, *, require_build=False) -> str:
         return "unproven"
     if statuses.get("build_render") == "passed":
         return "passed"
-    if not require_build and statuses.get("live_page") == "passed":
+    if statuses.get("live_page") == "passed" and (not require_build or build_unsupported(checks.get("build_render"))):
         return "passed"
     return "unproven"
 
@@ -622,7 +720,8 @@ def process_verify_only(op, attempt, now):
     try:
         record(website, trigger=trigger, source_sha=source_sha, checks=checks, result=result, state=record_state,
                detail={"operation_id": str(op.pk), "outcome": outcome, "verify_only": True,
-                    "require_build": require_build}, now=now)
+                    "require_build": require_build,
+                    "build_unsupported": build_unsupported(checks.get("build_render"))}, now=now)
     except Exception:  # noqa: BLE001 - the operation outcome is already saved
         logger.warning("website_readiness_verify_only_record_failed operation=%s", op.pk, exc_info=True)
     return state

@@ -6248,11 +6248,15 @@ class ContentFactoryCallbackView(APIView):
                 'error_message': f"[{error_code}] {error_message}",
             }
         )
-        _sync_generation_callback_to_run(
+        synced_run = _sync_generation_callback_to_run(
             data=data,
             run_status=ContentFactoryRunStatus.FAILED,
             step_status=ContentFactoryStepStatus.FAILED,
         )
+        # ARTICLES_READINESS_RECHECK_RULES_ENABLED: a delivery/publish failure for a
+        # changed source queues one verify-only check per commit (never a setup).
+        from .website_readiness_rules import queue_after_run_failure
+        queue_after_run_failure(synced_run, error_code)
         scheduled_daily_job = is_scheduled_daily_job(job)
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
