@@ -18,6 +18,7 @@ from founder_tools.models import VibeRaisingCompany
 from organizations.models import Organization
 
 from . import vibe_marketing_views as views
+from .article_preview_stream import complete_streamed_markup
 from .website_connections import authority_guard
 from .website_contract import WebsiteAuthorityError, connection_contract
 from .portable_drafts import original_portable_run
@@ -41,6 +42,7 @@ def read_only_article_document(body):
     document = BeautifulSoup(text, "html.parser")
     if document.find("article") is None:
         return body
+    complete_streamed_markup(document)
     for script in document.find_all("script"):
         inert_type = str(script.get("type") or "").strip().lower()
         if (script.get("data-content-factory-inspector") == "true" and not script.get("src")):

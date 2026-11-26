@@ -11,7 +11,10 @@ grant at the existing preview-lease endpoint. Its URL stays under the registered
 `/api/v1/vibe-marketing/article-preview/` route and includes `cfInspector=1`.
 For server-rendered article documents the grant preserves the rendered article,
 styles, media, structured data and comment inspector while removing the site's
-hydration and analytics scripts. This prevents client routing at the capability
+hydration and analytics scripts. When React streams an article behind a loading
+placeholder, the grant places completed HTML fragments into their page slots
+before removing those scripts. Reopening the review displays the saved copy.
+This prevents client routing at the capability
 path and storage errors in the opaque-origin sandbox. The sandbox continues to
 allow scripts without granting same-origin access. Text updates and approval
 still require the separate authenticated owner operations.
