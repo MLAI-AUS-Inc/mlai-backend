@@ -42,6 +42,41 @@ class PrivatePreviewDocumentTests(SimpleTestCase):
         for body in (b'<main id="app"></main><script src="app.js"></script>', b'\xff'):
             self.assertEqual(read_only_article_document(body), body)
 
+    @patch.object(ArticlePreviewLeaseProxyView, '_proxy')
+    def test_streamed_article_is_visible_in_the_sandbox_on_every_open(self, proxy):
+        page = b'''<html><body><header>Brand</header><main><!--$?--><template id="B:0"></template>
+          <div style="min-height:100vh"><!--$--><p>Loading</p><!--/$--></div><!--/$--></main>
+          <footer>Footer</footer><div hidden id="S:0"><article><h1>Saved title</h1>
+          <!--$?--><template id="B:1"></template><i>Loading section</i><!--/$-->
+          <p><template id="P:2"></template></p></article></div>
+          <div hidden id="S:1"><h2>Saved heading</h2></div>
+          <div hidden id="S:2"><b data-cf-review-field="copy">Saved paragraph</b></div>
+          <script>$RC=function(a,b){};$RC("B:0","S:0")</script>
+          <script>$RS("S:2","P:2");$RC("B:1","S:1");</script>
+          <script data-content-factory-inspector="true">listen()</script></body></html>'''
+        proxy.side_effect = lambda *args: HttpResponse(page, content_type='text/html')
+        for grant in ('first-grant', 'later-grant'):
+            response = ArticlePreviewLeaseProxyView().get(RequestFactory().get('/preview'), 'draft-1', token=grant)
+            doc = BeautifulSoup(response.content, 'html.parser')
+            self.assertEqual(doc.select_one('main > article > h1').get_text(), 'Saved title')
+            self.assertEqual(doc.select_one('main > article > h2').get_text(), 'Saved heading')
+            self.assertEqual(doc.select_one('main article p [data-cf-review-field]').get_text(), 'Saved paragraph')
+            self.assertNotIn('Loading', doc.get_text())
+            self.assertEqual([s.string for s in doc.find_all('script')], ['listen()'])
+            self.assertIn('sandbox allow-scripts', response['Content-Security-Policy'])
+
+    def test_unfinished_boundaries_and_unrelated_hidden_content_are_preserved(self):
+        page = b'''<article><main><!--$?--><template id="B:0"></template>Fallback<!--/$-->
+          <!--$?--><template id="B:1"></template>Still loading</main></article>
+          <div hidden id="S:0">Unconfirmed</div><div hidden id="S:1">Incomplete</div>
+          <script type="application/json">"$RC(\\"B:0\\",\\"S:0\\")"</script>
+          <script>$RC("B:1","S:1")</script>'''
+        doc = BeautifulSoup(read_only_article_document(page), 'html.parser')
+        self.assertEqual(len(doc.select('main template')), 2)
+        self.assertEqual(len(doc.select('div[hidden]')), 2)
+        self.assertIn('Fallback', doc.main.get_text())
+        self.assertNotIn('Unconfirmed', doc.main.get_text())
+
     def test_authorized_grant_explicitly_enables_the_comment_inspector(self):
         run = SimpleNamespace(run_id='draft-1', organization_id=7, domain='company.test',
             run_request={'delivery_mode': 'content_only', 'delivery_mode_confirmed': True})
