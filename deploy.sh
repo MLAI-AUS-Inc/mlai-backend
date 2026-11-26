@@ -493,8 +493,6 @@ if [ -n "$SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET" ]; then
     install_remote_env_secret SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET "$SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET"
 fi
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
-install_remote_env_secret POINTS_SUPER_ADMIN_SLACK_ID "$POINTS_SUPER_ADMIN_SLACK_ID"
-install_remote_env_secret POINTS_SUPER_ADMIN_SLACK_TEAM_ID "$POINTS_SUPER_ADMIN_SLACK_TEAM_ID"
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
 case "${LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:-false}" in
@@ -527,6 +525,8 @@ install_remote_env_value APPROVED_MIGRATION_PLAN_SHA256 "$APPROVED_MIGRATION_PLA
 install_remote_env_value ROO_POINTS_LEVEL_UP_ENABLED "${ROO_POINTS_LEVEL_UP_ENABLED:-false}"
 install_remote_env_value ROO_POINTS_NATIVE_ACTIVE_FROM "${ROO_POINTS_NATIVE_ACTIVE_FROM:-}"
 install_remote_env_value ROO_MANUAL_TIME_ENABLED "${ROO_MANUAL_TIME_ENABLED:-false}"
+install_remote_env_value POINTS_SUPER_ADMIN_SLACK_ID "$POINTS_SUPER_ADMIN_SLACK_ID"
+install_remote_env_value POINTS_SUPER_ADMIN_SLACK_TEAM_ID "$POINTS_SUPER_ADMIN_SLACK_TEAM_ID"
 install_remote_env_value SYSTEM_EMAIL_RESEND_MESSAGES "$SYSTEM_EMAIL_RESEND_MESSAGES"
 for system_email_setting in $SYSTEM_EMAIL_DEPLOY_SETTINGS; do
     if [ -n "${!system_email_setting}" ]; then

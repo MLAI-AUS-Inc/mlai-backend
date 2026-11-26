@@ -287,6 +287,8 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "ROO_POINTS_LEVEL_UP_ENABLED": "false",
             "ROO_POINTS_NATIVE_ACTIVE_FROM": "",
             "ROO_MANUAL_TIME_ENABLED": "false",
+            "POINTS_SUPER_ADMIN_SLACK_ID": "U05QPB483K9",
+            "POINTS_SUPER_ADMIN_SLACK_TEAM_ID": "TPROD",
             "SYSTEM_EMAIL_RESEND_MESSAGES": "article_review_ready,monthly_update_7d",
         }
         keys = set(re.findall(r"^\s*install_remote_env_value ([A-Z0-9_]+)", (REPO_ROOT / "deploy.sh").read_text(), re.MULTILINE))
