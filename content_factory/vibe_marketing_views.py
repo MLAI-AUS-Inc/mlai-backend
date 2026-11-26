@@ -827,6 +827,7 @@ def _quoted_price_response(request, *, cost_points, require_quote=False):
 def _reserve_article_start_connection(context, payload, *, reserve_operation=True):
     """Bind the original snapshot; reserve its operation with the debit transaction."""
     if payload.get("delivery_mode") != "content_only":
+        website = None
         try:
             config = _get_config(context.organization)
             website = config.website_connection
@@ -848,6 +849,8 @@ def _reserve_article_start_connection(context, payload, *, reserve_operation=Tru
                 from .website_operations import reserve_workflow_operation
                 reserve_workflow_operation(website, workflow="article_generation", payload=payload)
         except WebsiteAuthorityError as exc:
+            from .website_readiness_rules import queue_after_delivery_failure
+            queue_after_delivery_failure(website, exc)
             return Response(exc.as_dict(), status=exc.status)
     return None
 
@@ -18333,7 +18336,8 @@ class VibeMarketingArticleSystemSetupView(APIView):
         payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("article_system_setup"))
         if getattr(request, "_website_prepare_dispatch", False):
             payload["retry_epoch"] = request.data.get("retry_epoch", "initial")
-            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget", "verification_mode"):
+            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget", "verification_mode",
+                          "pinned_setup_run_id"):
                 if field in request.data:
                     payload[field] = request.data[field]
         _mark_roo_points_gate_authorized(

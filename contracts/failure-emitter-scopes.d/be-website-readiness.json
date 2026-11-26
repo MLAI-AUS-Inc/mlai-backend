@@ -64,6 +64,33 @@
       "source": "Website readiness record: relays the stored reason code (a saved preparation or verification code, or a readiness state code) to founders and staff; a readiness projection, never a run failure code or recovery policy.",
       "test": "content_factory.tests_website_readiness_unit.CapabilityTests.test_fixing_record_allows_drafts_only",
       "category": "website readiness projection; not a causal Articles run failure"
+    },
+    {
+      "path": "content_factory/website_readiness_rules.py",
+      "function": "compare_row",
+      "field": "reasonCode",
+      "expression": "derived.get('reason_code', '')",
+      "site_sha256": "dd645652d8520cc5dfff0d4936dddde3e82f36a35a1a787ef4c25a6fb96b3620",
+      "adapter": "nonfailure_category",
+      "owner": "backend.website_readiness",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Website readiness nightly compare: reports the reason code today's derivation gives for a record whose stored state differs; a report-only readiness projection, never a run failure code or recovery policy.",
+      "test": "content_factory.tests_readiness_recheck_rules_unit.LookAndCompareTests.test_compare_reports_only_flips",
+      "category": "website readiness projection; not a causal Articles run failure"
+    }
+  ],
+  "dynamic_adapters": [
+    {
+      "adapter": "audited_v0_observation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "expression": "exc.code",
+      "field": "code",
+      "function": "process_verify_only",
+      "owner": "backend.website_readiness",
+      "path": "content_factory/website_readiness_rules.py",
+      "site_sha256": "8c5cb008f86ae65f8372c0a91a6b2c21928c6c78e13bb8d78b06616e7a041ef5",
+      "source": "Readiness verify-only check: records the WebsiteAuthorityError code that stopped the check on its own source-reverify receipt, as _process_source_reverification does; strict metadata goes through validate_failure/resolve_failure before policy",
+      "test": "content_factory.tests_readiness_recheck_rules_database.TalaThrivePushTests.test_an_unproven_check_retries"
     }
   ]
 }

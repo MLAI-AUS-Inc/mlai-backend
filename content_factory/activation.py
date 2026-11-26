@@ -213,8 +213,12 @@ def durable_integration_evidence(config, connection, *, now=None):
             or not connection.branch):
         return {**base, "reasonCode": "verification_required"}
     verified_at = connection.last_verified_at
-    if (not verified_at or verified_at > now + timedelta(minutes=5) or now - verified_at > VERIFICATION_MAX_AGE
-            or target.verified_at > now + timedelta(minutes=5) or now - target.verified_at > VERIFICATION_MAX_AGE):
+    # With the readiness recheck rules on, age alone is not a failure: the
+    # weekly look (website_readiness_rules) re-checks a ready website instead.
+    from .website_readiness_rules import age_waived
+    max_age = None if age_waived(connection) else VERIFICATION_MAX_AGE
+    if (not verified_at or verified_at > now + timedelta(minutes=5) or target.verified_at > now + timedelta(minutes=5)
+            or max_age is not None and (now - verified_at > max_age or now - target.verified_at > max_age)):
         return {**base, "reasonCode": "verification_stale"}
     from .website_sealed_workflow import required
     from .website_live_verification import accepted as live_url_accepted

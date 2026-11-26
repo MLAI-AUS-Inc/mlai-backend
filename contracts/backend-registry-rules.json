@@ -88,6 +88,16 @@
       "grandfathered": true,
       "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_REGISTRY_REFUNDS_ENABLED."
     },
+    "self_heal:readiness_nightly_compare": {
+      "digest": true,
+      "shadow_flag": "ARTICLES_READINESS_NIGHTLY_COMPARE_ENABLED",
+      "reason": "Website readiness nightly compare: report-only, once a day. It re-derives each stored record, logs one summary line and one check event per flip it finds today, and changes nothing. Operational alerts (ARTICLES_OPERATIONAL_ALERTS_ENABLED) cover only today's flips, capped per day, never historical rows."
+    },
+    "self_heal:readiness_weekly_look": {
+      "digest": true,
+      "shadow_flag": "ARTICLES_READINESS_RECHECK_RULES_ENABLED",
+      "reason": "Website readiness weekly look: off unless the recheck rules are on for a listed domain. One branch-head read and one live page fetch per ready website a week; it records a check event and, after two failed looks, queues one verify-only check. It never alerts, so it has no history to hold back."
+    },
     "self_heal:repo_health": {
       "shadow_flag": "ARTICLES_REPO_HEALTH_SHADOW_ENABLED",
       "history_horizon": "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE",

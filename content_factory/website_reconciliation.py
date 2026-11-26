@@ -402,7 +402,12 @@ def handle_website_github_event(event_type, payload):
             # One read-only compare, outside the authority locks: a push that
             # leaves MLAI's articles files alone keeps the current proof.
             from .website_source_carry import apply_carry, carry_decision
-            carry = carry_decision(website, config, source_sha, owned_merge=bool(owned_merge))
+            from . import website_readiness_rules as readiness_rules
+            # Readiness recheck rules (flagged): a website the stored record holds
+            # Ready is judged by its pinned footprint and never reopens preparation.
+            rule_plan = readiness_rules.push_plan(website, config, source_sha, owned_merge=bool(owned_merge))
+            carry = ({"carry": False, "reason": "readiness_rules"} if rule_plan is not None
+                else carry_decision(website, config, source_sha, owned_merge=bool(owned_merge)))
             from organizations.models import Organization
             with transaction.atomic():
                 Organization.objects.select_for_update().get(pk=config.organization_id)
@@ -422,6 +427,14 @@ def handle_website_github_event(event_type, payload):
                     website.configuration_version += 1
                     from .website_goal_scope import record_source_transition
                     record_source_transition(website, previous_revision=previous_revision, source_sha=source_sha)
+                    if rule_plan is not None:
+                        rule_trigger = readiness_rules.apply_push(website, config, rule_plan, source_sha,
+                            previous_revision=previous_revision)
+                        website.save(update_fields=["configuration_version", "capabilities", "blockers", "verified_sha", "updated_at"])
+                        readiness_rules.record_push(website, rule_trigger, rule_plan, source_sha)
+                        result[rule_trigger] = result.get(rule_trigger, 0) + 1
+                        result["invalidated"] += int(rule_trigger == "push_footprint")
+                        continue
                     carried_from = carry.get("from_sha") if apply_carry(
                         website, config.default_publish_target_id, source_sha, carry) else ""
                     never_verified = not owned_merge and _never_verified(website)
@@ -1606,6 +1619,11 @@ def _process_source_reverification(identifier, now):
         attempt = op.attempts
         op.next_attempt_at = now + timedelta(minutes=5)
         op.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+    if op.payload.get("verify_only"):
+        # Readiness verify-only check: blog files, build and live page at the
+        # new commit; never a scan or a setup (website_readiness_rules).
+        from .website_readiness_rules import process_verify_only
+        return process_verify_only(op, attempt, now)
     binding = {**contract_for(op.connection), "domain": op.connection.organization.domain,
         "connection_generation": getattr(op, "generation", op.connection.generation),
         "github_repo": op.connection.github_repo, "expected_source_sha": op.payload["source_sha"]}

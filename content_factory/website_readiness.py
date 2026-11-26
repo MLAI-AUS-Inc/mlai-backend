@@ -202,7 +202,12 @@ def _open_recheck(connection):
         op = prepare
     payload = _mapping(op.payload)
     reason = "verification_refresh" if payload.get("purpose") == "verification_refresh" else "source_changed"
-    return {"reason": reason, "trigger": "push_footprint" if reason == "source_changed" else "weekly_look",
+    trigger = "push_footprint" if reason == "source_changed" else "weekly_look"
+    if payload.get("verify_only") and payload.get("trigger") in TRIGGERS:
+        # A readiness verify-only check names what queued it (push, owner, weekly look, refused article).
+        trigger = payload["trigger"]
+        reason = "source_changed" if trigger == "push_footprint" else trigger
+    return {"reason": reason, "trigger": trigger,
             "sourceSha": str(payload.get("source_sha") or ""), "queuedAt": _iso(op.created_at), "operationId": str(op.pk)}
 
 
