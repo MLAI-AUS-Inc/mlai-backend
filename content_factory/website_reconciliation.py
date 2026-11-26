@@ -458,6 +458,9 @@ def handle_website_github_event(event_type, payload):
                     if not owned_merge and not carried_from and not never_verified:
                         website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
                     website.save(update_fields=["configuration_version", "capabilities", "blockers", "verified_sha", "updated_at"])
+                    from .website_readiness import shadow as readiness_shadow
+                    readiness_shadow(website, "owned_merge" if owned_merge else "push_no_footprint" if carried_from else "push_footprint",
+                        source_sha=source_sha, changed_files=carry.get("changed_setup_files") or (), detail={"carry": carry.get("reason", "")})
                     if not never_verified:
                         result["invalidated"] += 1
                     prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else "",
@@ -1814,4 +1817,7 @@ def _process_source_reverification(identifier, now):
         # B13b: GitHub's branch moved past this source; make sure its head has a check.
         from .website_source_sync import after_superseded
         after_superseded(op)
+    if state != "pending":
+        from .website_readiness import shadow_for_operation as readiness_shadow_for_operation
+        readiness_shadow_for_operation(op, "verification_recorded", state=state)
     return state

@@ -165,6 +165,12 @@ FLAG_KEYS = (
     "ARTICLES_STAFF_HOLD_ALERTS_ENABLED",
     "ARTICLES_AUTHOR_BIO_CHECK_ENABLED",
     "ARTICLES_HONEST_RETRY_STATUS_ENABLED",
+    # Website readiness record: shadow, founder reads, recheck rules, setup pin, nightly compare.
+    "ARTICLES_READINESS_SHADOW_ENABLED",
+    "ARTICLES_READINESS_READS_ENABLED",
+    "ARTICLES_READINESS_RECHECK_RULES_ENABLED",
+    "ARTICLES_READINESS_PIN_ENABLED",
+    "ARTICLES_READINESS_NIGHTLY_COMPARE_ENABLED",
 )
 # 0 means "no cap", "off" or, for the queue slots, "no ETA".
 COUNT_KEYS = (

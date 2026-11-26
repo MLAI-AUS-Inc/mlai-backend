@@ -1897,9 +1897,11 @@ class ContentIslandRefreshDispatch(models.Model):
 # Keep connection lifecycle records in a small domain-owned module while exposing
 # them through Django's normal models discovery and migration state.
 from .website_models import (  # noqa: E402,F401
+    WebsiteCheckEvent,
     WebsiteConnection,
     WebsiteConnectionOperation,
     WebsiteConnectionTarget,
+    WebsiteReadiness,
     WebsiteRepositoryMutation,
     WebsiteScanSnapshot,
     WebsiteTemplateRevision,

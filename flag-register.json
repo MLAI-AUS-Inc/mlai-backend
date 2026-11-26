@@ -576,6 +576,42 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "ARTICLES_READINESS_DOMAINS",
+      "default": "talathrive.com,la-vie.com.au,mlai.au",
+      "owner": "platform",
+      "expiry": "2027-04-30"
+    },
+    {
+      "name": "ARTICLES_READINESS_NIGHTLY_COMPARE_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-04-30"
+    },
+    {
+      "name": "ARTICLES_READINESS_PIN_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-04-30"
+    },
+    {
+      "name": "ARTICLES_READINESS_READS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-04-30"
+    },
+    {
+      "name": "ARTICLES_READINESS_RECHECK_RULES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-04-30"
+    },
+    {
+      "name": "ARTICLES_READINESS_SHADOW_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-04-30"
+    },
+    {
       "name": "ARTICLES_PUBLISHING_INPUTS_V3_ENABLED",
       "default": "false",
       "owner": "platform",

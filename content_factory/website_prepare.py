@@ -437,6 +437,9 @@ def _finish_prepare(op, *, now):
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
     saved = _persist_prepare(op, now=now)
+    if saved is not None and saved.state not in {"pending", "running"}:
+        from .website_readiness import shadow_for_operation as readiness_shadow_for_operation
+        readiness_shadow_for_operation(saved, "setup_completed", state=saved.state)
     if saved is not None and saved.state == "needs_attention" and counters.at_cap(saved.receipt):
         # The same failure stopped OWNER_RETRY_CAP times: Try again is no
         # longer offered, so staff hear of it now (the sweep's own slot).
@@ -485,6 +488,10 @@ def prepare_failure(op, step, error, *, now=None):
         message = decision["failure"]["user_message"]
     op.receipt = {**op.receipt, "step_failures": failures, "reason_code": code, "message": message,
         "failure_class": classification, "retryable": classification == "transient"}
+    # Only the stop being recorded now may offer another channel (the
+    # unsupported branch below sets it again); an earlier stop's offer would
+    # turn a repairable, owner-retryable stop into "can't be done yet".
+    op.receipt.pop("channel_options", None)
     if decision["failure"] is not None and (strict_policy or decision["versioned"]):
         op.receipt["failure"] = decision["failure"]
         op.receipt["failure_fingerprint"] = decision["failure"]["failure_fingerprint"]

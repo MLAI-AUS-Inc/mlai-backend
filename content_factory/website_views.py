@@ -148,7 +148,9 @@ class WebsiteConnectionView(APIView):
             return error
         from .website_journey import journey_for_context
         from .website_status import add_status
-        payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True)}
+        from .website_readiness import founder_payload
+        payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True),
+                   "websiteReadiness": founder_payload(config)}
         return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
 
     def post(self, request):
@@ -259,8 +261,9 @@ class WebsiteConnectionActionView(APIView):
             from .website_journey import journey_for_context
             from .website_operations import operation_summary
             from .website_status import add_status
+            from .website_readiness import founder_payload
             payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True),
-                "operation": operation_summary(operation) if operation else None}
+                "operation": operation_summary(operation) if operation else None, "websiteReadiness": founder_payload(config)}
             return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)

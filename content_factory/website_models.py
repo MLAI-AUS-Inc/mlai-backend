@@ -148,3 +148,69 @@ class WebsiteConnectionOperation(models.Model):
     class Meta:
         db_table = "content_factory_website_operation"
         indexes = [models.Index(fields=["state", "next_attempt_at"], name="cf_web_operation_due_idx")]
+
+
+class WebsiteReadiness(models.Model):
+    """The stored answer to "can this website take articles?" (website readiness record).
+
+    Written by ``content_factory.website_readiness.record`` only, from saved
+    facts and the outcome of named checks; readers never recompute it. ``legacy``
+    keeps today's computed answer beside it for the shadow comparison.
+    """
+
+    class State(models.TextChoices):
+        READY = "ready", "Ready to write"
+        CHECKING = "checking", "Checking a recent change"
+        NEEDS_USER = "needs_user", "Needs the founder"
+        FIXING = "fixing", "Fixing on our side"
+        NOT_SET_UP = "not_set_up", "Not set up"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    connection = models.OneToOneField(WebsiteConnection, on_delete=models.CASCADE, related_name="readiness")
+    generation = models.PositiveBigIntegerField(default=1)
+    state = models.CharField(max_length=20, choices=State.choices, default=State.NOT_SET_UP)
+    can_draft = models.BooleanField(default=False)
+    can_publish = models.BooleanField(default=False)
+    verified_sha = models.CharField(max_length=64, blank=True, default="")
+    verified_at = models.DateTimeField(null=True, blank=True)
+    pinned_contract = models.JSONField(default=dict, blank=True)
+    checks = models.JSONField(default=dict, blank=True)
+    recheck = models.JSONField(default=dict, blank=True)
+    reason_code = models.CharField(max_length=100, blank=True, default="")
+    reason = models.CharField(max_length=300, blank=True, default="")
+    last_known_good_at = models.DateTimeField(null=True, blank=True)
+    last_look = models.JSONField(default=dict, blank=True)
+    legacy = models.JSONField(default=dict, blank=True)
+    version = models.PositiveBigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "content_factory_website_readiness"
+
+
+class WebsiteCheckEvent(models.Model):
+    """One append-only line of a website's readiness history: what ran, on which commit, and what changed."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    connection = models.ForeignKey(WebsiteConnection, on_delete=models.CASCADE, related_name="check_events")
+    generation = models.PositiveBigIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    trigger = models.CharField(max_length=40)
+    source_sha = models.CharField(max_length=64, blank=True, default="")
+    changed_files = models.JSONField(default=list, blank=True)
+    checks = models.JSONField(default=dict, blank=True)
+    result = models.CharField(max_length=20, default="recorded")
+    state_before = models.CharField(max_length=20, blank=True, default="")
+    state_after = models.CharField(max_length=20, blank=True, default="")
+    code_version = models.CharField(max_length=64, blank=True, default="")
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = "content_factory_website_check_event"
+        indexes = [models.Index(fields=["connection", "created_at"], name="cf_web_check_event_idx")]
+
+    def save(self, *args, **kwargs):
+        """Append only: an existing event is never rewritten."""
+        if not self._state.adding:
+            raise ValueError("Website check events are append-only.")
+        super().save(*args, **kwargs)

@@ -222,6 +222,8 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
             "connection": website, "generation": website.generation, "action": "ci-verify", "state": "completed", "payload": dict(data), "receipt": receipt})
         from .website_prepare import wake_prepare_after_commit
         wake_prepare_after_commit(website.pk)
+        from .website_readiness import shadow as readiness_shadow
+        readiness_shadow(website, "verification_recorded", source_sha=proof["source_sha"], result="passed", detail={"origin": attestation_origin})
         if changed_source:
             from .website_wakeups import enabled as event_wakes_enabled
             if event_wakes_enabled():
@@ -604,6 +606,8 @@ def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
                 "state": "completed", "payload": binding, "receipt": receipt})
         from .website_prepare import wake_prepare_after_commit
         wake_prepare_after_commit(current.pk)
+        from .website_readiness import shadow as readiness_shadow
+        readiness_shadow(current, "verification_recorded", source_sha=source_sha, result="passed", detail={"origin": "live_url"})
     logger.info("website_live_url_verified org=%s connection=%s target=%s detail=%s", current.organization_id, current.pk,
         target.target_key, "compared" if detail is not None else "none")
     return {**receipt, "operation_id": str(operation.pk)}

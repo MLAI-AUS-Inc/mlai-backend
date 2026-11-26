@@ -12808,6 +12808,8 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
     payload["articleCapabilities"] = capabilities
     from .website_journey import journey_for_context
     payload["websiteJourney"] = journey_for_context(context, website_config, capabilities=capabilities, owner_view=True)
+    from .website_readiness import founder_payload as website_readiness_payload
+    payload["websiteReadiness"] = website_readiness_payload(website_config)
     from .website_status import add_status
     add_status(payload, context, website_config, journey=payload["websiteJourney"])
     # Older clients also consume these flags; keep per-user permissions live on
@@ -13512,13 +13514,18 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
         # a cached bootstrap overlay cannot promote an incomplete integration.
         evidence = {**evidence, "verified": False, "reasonCode": "integration_required"}
     access = _verify_github_repository_access(context, config, force=force, allow_probe=allow_probe) if account.get("saved") and getattr(config, "github_repo", "") else {}
-    if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
+    from .website_readiness import apply_to_capabilities, for_reads
+    readiness = for_reads(config, context.organization)
+    if readiness is None and evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
+        # With the readiness record read (ARTICLES_READINESS_READS_ENABLED), a
+        # new live HEAD is the push handler's to judge, not a read-time downgrade.
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
     user = getattr(getattr(context, "profile", None), "user", None)
     from .first_article_entitlement import entitlement_state
-    return article_capabilities(config, domain=context.organization.domain, user=user, account=account,
-                                evidence=evidence, repository_access=access,
-                                first_article=entitlement_state(context.organization, user, config=config))
+    capabilities = article_capabilities(config, domain=context.organization.domain, user=user, account=account,
+                                        evidence=evidence, repository_access=access,
+                                        first_article=entitlement_state(context.organization, user, config=config))
+    return apply_to_capabilities(capabilities, readiness, account=account) if readiness is not None else capabilities
 
 
 def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False, request_data=None):

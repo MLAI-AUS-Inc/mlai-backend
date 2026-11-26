@@ -3632,6 +3632,9 @@ def _sync_article_system_setup_callback_to_run(*, data: dict, event_type: str) -
             pr_url=result.get("pr_url") or setup_payload.get("pr_url") or "",
             preview_url=result.get("preview_url") or setup_payload.get("preview_url") or "",
         )
+    if event_type == "article_system_setup_completed":
+        from .website_readiness import shadow_for_run as readiness_shadow_for_run
+        readiness_shadow_for_run(run, "setup_completed", detail={"setup_run_id": run_id})
     return run
 
 
