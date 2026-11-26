@@ -269,6 +269,7 @@ def finish_goal(op, *, now=None):
             op.receipt = {**op.receipt, "goal": goal}
         except ValueError:
             op.state, op.next_attempt_at = "needs_attention", None
+            op.receipt.pop("channel_options", None)
             op.receipt = {**op.receipt, "status": "stopped", "reason_code": "prepare_no_progress", "retryable": False,
                 "message": "The goal occurrence journal is full. Review the recorded goal before starting a new one.",
                 "user_action": {"id": "open_run", "label": "Review goal", "run_id": op.receipt.get("setup_run_id")}}
@@ -348,6 +349,7 @@ def stop_goal(op, goal, *, reason, now):
         goal["budget_alert"] = {"id": goals.digest({"goal": goal["goal_id"], "reason": reason}),
             "reason": reason, "at": now.isoformat(), "state": "pending"}
     op.state, op.next_attempt_at = "needs_attention", None
+    op.receipt.pop("channel_options", None)
     op.receipt = {**op.receipt, "goal": goal, "status": "stopped", "budget_stop_reason": reason,
         "message": "The articles goal reached its execution budget. Review its recorded usage.",
         "user_action": {"id": "inspect_goal", "label": "Review goal budget"}}

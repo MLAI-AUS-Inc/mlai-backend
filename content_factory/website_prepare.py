@@ -437,6 +437,9 @@ def _finish_prepare(op, *, now):
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
     saved = _persist_prepare(op, now=now)
+    if saved is not None and saved.state not in {"pending", "running"}:
+        from .website_readiness import shadow_for_operation as readiness_shadow_for_operation
+        readiness_shadow_for_operation(saved, "setup_completed", state=saved.state)
     if saved is not None and saved.state == "needs_attention" and counters.at_cap(saved.receipt):
         # The same failure stopped OWNER_RETRY_CAP times: Try again is no
         # longer offered, so staff hear of it now (the sweep's own slot).
@@ -485,6 +488,10 @@ def prepare_failure(op, step, error, *, now=None):
         message = decision["failure"]["user_message"]
     op.receipt = {**op.receipt, "step_failures": failures, "reason_code": code, "message": message,
         "failure_class": classification, "retryable": classification == "transient"}
+    # Only the stop being recorded now may offer another channel (the
+    # unsupported branch below sets it again); an earlier stop's offer would
+    # turn a repairable, owner-retryable stop into "can't be done yet".
+    op.receipt.pop("channel_options", None)
     if decision["failure"] is not None and (strict_policy or decision["versioned"]):
         op.receipt["failure"] = decision["failure"]
         op.receipt["failure_fingerprint"] = decision["failure"]["failure_fingerprint"]
@@ -887,6 +894,13 @@ def _owner_request(op, context, config, step, *, user, journey=None):
             # setup writes no workflow file into the founder's repository.
             data["verification_mode"] = "hosted"
     if step == "setup":
+        # ARTICLES_READINESS_PIN_ENABLED: replay what worked last time unless
+        # the founder or staff chose to set up again (website_readiness_rules).
+        from .website_readiness_rules import setup_pin
+        pin = setup_pin(connection, fresh=bool(op.payload.get("repair_setup") or op.payload.get("set_up_again")))
+        if "strategy_pin" in data:
+            pin.pop("strategy_pin", None)  # A goal's own strategy pin wins.
+        data.update(pin)
         choice = {}
         mode, surface = _merged_setup_surface(op, config) or _superseded_setup_surface(op, config) or _setup_surface(
             config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"),
@@ -1505,6 +1519,11 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
     # source work. A new first article requires an explicit owner submission.
     if latest and terminal_first_article_goal(latest):
         return None
+    from .website_readiness_rules import holds_prepare
+    if not owned_merge_run_id and holds_prepare(connection):
+        # The readiness record holds this website Ready: its own verify-only
+        # check owns the source change; a full setup needs an explicit action.
+        return None
     if latest:
         from .website_run_authority import owned_goal_child
         if owned_goal_child(latest, include_completed=False) is not None:
@@ -1601,8 +1620,17 @@ def _source_recheck_values(op, *, message, merged_setup_run_id=""):
 
 
 def _adopt_source_checks(connection, op):
-    """The reopened preparation now owns any queued source check of this generation."""
-    connection.operations.filter(generation=connection.generation, action="source-reverify", state="pending").update(
+    """The reopened preparation now owns any queued source check of this generation.
+
+    Under the readiness recheck rules a verify-only check (``payload.verify_only``)
+    is never adopted: it is the cheap check the stored record waits on.
+    """
+    pending = connection.operations.filter(generation=connection.generation, action="source-reverify", state="pending")
+    from .website_readiness_rules import enabled_for
+    if enabled_for(connection):
+        adopted = [pk for pk, payload in pending.values_list("pk", "payload") if not (payload or {}).get("verify_only")]
+        pending = pending.filter(pk__in=adopted)
+    pending.update(
         state="completed", receipt={"status": "managed_by_prepare", "prepare_operation_id": str(op.pk),
             "repository_modified": False}, updated_at=timezone.now())
 

@@ -827,6 +827,7 @@ def _quoted_price_response(request, *, cost_points, require_quote=False):
 def _reserve_article_start_connection(context, payload, *, reserve_operation=True):
     """Bind the original snapshot; reserve its operation with the debit transaction."""
     if payload.get("delivery_mode") != "content_only":
+        website = None
         try:
             config = _get_config(context.organization)
             website = config.website_connection
@@ -848,6 +849,8 @@ def _reserve_article_start_connection(context, payload, *, reserve_operation=Tru
                 from .website_operations import reserve_workflow_operation
                 reserve_workflow_operation(website, workflow="article_generation", payload=payload)
         except WebsiteAuthorityError as exc:
+            from .website_readiness_rules import queue_after_delivery_failure
+            queue_after_delivery_failure(website, exc)
             return Response(exc.as_dict(), status=exc.status)
     return None
 
@@ -898,9 +901,39 @@ def _validate_article_start_reservation(context, payload, *, require_website=Fal
     # publishing proof can be recorded meanwhile without changing the website
     # generation, so recheck its stored authority before spending or dispatching.
     from .activation import durable_integration_evidence
-    if not durable_integration_evidence(config, website).get("verified"):
+    if (not durable_integration_evidence(config, website).get("verified")
+            and not _readiness_allows_draft_start(context.organization, website, payload)):
         raise WebsiteAuthorityError("website_publish_verification_required",
             "Verify the current articles integration before starting this article.")
+
+
+def _readiness_allows_draft_start(organization, website, payload):
+    """With ARTICLES_READINESS_READS_ENABLED for the organisation, a draft start stands on the stored record.
+
+    The start gate already answers ``canGenerateArticle`` from the record's
+    ``can_draft`` (ready, checking, fixing); this keeps the reservation re-check
+    in step for review drafts. A ``publish_code`` start keeps today's proof.
+    """
+    if payload.get("delivery_mode") == "publish_code":
+        return False
+    from .website_readiness import readiness_enabled, stored
+    if not readiness_enabled("reads", organization):
+        return False
+    row = stored(website)
+    return bool(row is not None and row.can_draft and row.verified_sha == website.verified_sha)
+
+
+def _queue_readiness_recheck_after_refusal(context, exc):
+    """An article start refused for its website proof queues one verify-only check (never raises)."""
+    if not isinstance(exc, WebsiteAuthorityError):
+        return
+    try:
+        website = getattr(_get_config(context.organization), "website_connection", None)
+        from .website_readiness_rules import queue_after_delivery_failure
+        queue_after_delivery_failure(website, exc)
+    except Exception:  # noqa: BLE001 - the refusal answer stands
+        logger.warning("website_readiness_refusal_recheck_failed organization=%s",
+                       getattr(context.organization, "pk", None), exc_info=True)
 
 
 class _FreeArticleUnavailable(Exception):
@@ -1080,6 +1113,9 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         )
 
     except (ArticleGenerationError, WebsiteAuthorityError) as exc:
+        # The reservation re-check refuses inside the rolled-back transaction;
+        # its verify-only check is queued here, after the rollback.
+        _queue_readiness_recheck_after_refusal(context, exc)
         return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "company_billing_founder_unavailable")}, status=409)
 
     return charged_user, charge_ledger, article_request, None
@@ -12808,6 +12844,8 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
     payload["articleCapabilities"] = capabilities
     from .website_journey import journey_for_context
     payload["websiteJourney"] = journey_for_context(context, website_config, capabilities=capabilities, owner_view=True)
+    from .website_readiness import founder_payload as website_readiness_payload
+    payload["websiteReadiness"] = website_readiness_payload(website_config)
     from .website_status import add_status
     add_status(payload, context, website_config, journey=payload["websiteJourney"])
     # Older clients also consume these flags; keep per-user permissions live on
@@ -13512,13 +13550,19 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
         # a cached bootstrap overlay cannot promote an incomplete integration.
         evidence = {**evidence, "verified": False, "reasonCode": "integration_required"}
     access = _verify_github_repository_access(context, config, force=force, allow_probe=allow_probe) if account.get("saved") and getattr(config, "github_repo", "") else {}
-    if evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
+    from .website_readiness import apply_to_capabilities, for_reads
+    readiness = for_reads(config, context.organization)
+    if readiness is None and evidence.get("verified") and access.get("verified") and (access.get("branch") != evidence.get("branch") or access.get("sha") != evidence.get("sha")):
+        # With the readiness record read (ARTICLES_READINESS_READS_ENABLED), a
+        # new live HEAD is the push handler's to judge, not a read-time downgrade.
         evidence = {**evidence, "verified": False, "reasonCode": "verification_stale"}
     user = getattr(getattr(context, "profile", None), "user", None)
     from .first_article_entitlement import entitlement_state
-    return article_capabilities(config, domain=context.organization.domain, user=user, account=account,
-                                evidence=evidence, repository_access=access,
-                                first_article=entitlement_state(context.organization, user, config=config))
+    capabilities = article_capabilities(config, domain=context.organization.domain, user=user, account=account,
+                                        evidence=evidence, repository_access=access,
+                                        first_article=entitlement_state(context.organization, user, config=config))
+    return (apply_to_capabilities(capabilities, readiness, account=account, repository_access=access)
+            if readiness is not None else capabilities)
 
 
 def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False, request_data=None):
@@ -18326,9 +18370,15 @@ class VibeMarketingArticleSystemSetupView(APIView):
         payload["client_request_id"] = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("clientRequestId") or _mint_dispatch_client_request_id("article_system_setup"))
         if getattr(request, "_website_prepare_dispatch", False):
             payload["retry_epoch"] = request.data.get("retry_epoch", "initial")
-            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget", "verification_mode"):
+            for field in ("strategy_pin", "strategy_goal_id", "strategy_revision", "strategy_binding", "goal_budget", "verification_mode",
+                          "pinned_setup_run_id"):
                 if field in request.data:
                     payload[field] = request.data[field]
+        else:
+            # A founder's own setup POST replays the pinned setup too (ARTICLES_READINESS_PIN_ENABLED),
+            # unless they chose to set up again or picked a different article route.
+            from .website_readiness_rules import direct_setup_pin
+            payload.update(direct_setup_pin(getattr(config, "website_connection", None), request.data, route_path=route_path))
         _mark_roo_points_gate_authorized(
             payload,
             domain=context.organization.domain,

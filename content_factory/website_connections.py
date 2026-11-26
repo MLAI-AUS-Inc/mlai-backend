@@ -1503,6 +1503,8 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         if watermark:
             connection.blockers.append({"code": "website_data_deleted", "deletion_epoch": watermark, "message": "Previous website data was removed."})
         connection.save()
+        from .website_readiness import shadow as readiness_shadow
+        readiness_shadow(connection, "access_change", detail={"action": action})
         config.publish_targets = []
         config.default_publish_target_id = None
         config.auto_publish = False
@@ -1950,6 +1952,8 @@ def record_scan_evidence(connection, data):
     caps["generationReady"] = bool(caps.get("publishingReady"))
     connection.capabilities = caps
     connection.save(update_fields=["capabilities", "verified_sha", "last_verified_at", "blockers", "updated_at"])
+    from .website_readiness import shadow as readiness_shadow
+    readiness_shadow(connection, "verification_recorded", source_sha=sha, detail={"source": "scan_evidence"})
 
 
 def validate_template_update(data):

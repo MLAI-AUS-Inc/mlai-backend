@@ -270,8 +270,12 @@ def ci_source_run(row, connection, operation):
         "connectionGeneration": connection.generation, "repositoryId": connection.repository_id}
 
 
-def build_proof_fresh(connection, target, capabilities, *, now=None):
-    """Check proof age and live source independently from publication policy."""
+def build_proof_fresh(connection, target, capabilities, *, now=None, ignore_age=False):
+    """Check proof age and live source independently from publication policy.
+
+    ``ignore_age`` (the journey under the readiness recheck rules) keeps the
+    source and future-stamp checks but not the seven-day age.
+    """
     now = now or timezone.now()
     if (target is None or target.source_sha != connection.verified_sha
             or capabilities.get("repositorySourceSha") not in (None, "", connection.verified_sha)
@@ -283,7 +287,7 @@ def build_proof_fresh(connection, target, capabilities, *, now=None):
         # no publication verified_at until that source reaches the main branch.
         from .incident_guards import proof_stamp
         target_stamp = proof_stamp(mapping(target.contract).get("verification"))
-    return all(stamp and now - VERIFICATION_MAX_AGE <= stamp <= now + timedelta(minutes=5)
+    return all(stamp and (ignore_age or now - VERIFICATION_MAX_AGE <= stamp) and stamp <= now + timedelta(minutes=5)
         for stamp in (target_stamp, connection.last_verified_at))
 
 
@@ -424,7 +428,8 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
         target = {"key": selected.target_key, "sourceSha": selected.source_sha, "adapter": selected.adapter, "contract": selected.contract, "deployment_receipt": deployment.receipt if deployment else {}} if selected else None
         preview_proof = mapping(mapping(preview_target.contract).get("verification")) if preview_target else {}
         prepared = bool(preview_target and preview_target.source_sha == connection.verified_sha and preview_proof.get("status") in {"passed", "verified", "preview_verified"})
-        fresh = prepared and build_proof_fresh(connection, preview_target, capabilities)
+        from .website_readiness_rules import age_waived
+        fresh = prepared and build_proof_fresh(connection, preview_target, capabilities, ignore_age=age_waived(connection))
         from .website_verification import current_ci_attestation
         from .website_live_verification import applicable as live_url_applicable, selected as live_url_selected
         # Live-URL proof stands in for CI only where activation accepts it: a

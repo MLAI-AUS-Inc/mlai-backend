@@ -336,6 +336,27 @@ def bind_operation_run(operation, run):
                 run.status, run.resume_available, run.error = current.status, current.resume_available, current.error
 
 
+CHANNEL_CHOICE_ACTION = "choose_article_channel"
+
+
+def without_stale_channel_options(receipt):
+    """A copy of ``receipt`` that offers ``channel_options`` only when its current stop asks for a channel.
+
+    Receipts saved before the write-side fix can still carry an earlier stop's
+    ``["portable"]`` beside a repairable, owner-retryable stop; clients read
+    that as "This site can't be done yet".
+    """
+    receipt = dict(receipt or {})
+    action = receipt.get("user_action") if isinstance(receipt.get("user_action"), dict) else {}
+    failure = receipt.get("failure") if isinstance(receipt.get("failure"), dict) else {}
+    klass = failure.get("failure_class") or receipt.get("failure_class")
+    offered = (action.get("id") == CHANNEL_CHOICE_ACTION or klass == "unsupported"
+               or receipt.get("status") == "cant_be_done_yet")
+    if "channel_options" in receipt and not offered:
+        receipt.pop("channel_options")
+    return receipt
+
+
 def prepare_receipt(op):
     """Describe saved preparation without promising an unscheduled retry.
 
@@ -343,7 +364,7 @@ def prepare_receipt(op):
     it never mutates the persisted receipt or writes the operation.
     """
     from .website_prepare_counters import at_cap, owner_can_retry, same_failure_stops
-    receipt = dict(op.receipt or {})
+    receipt = without_stale_channel_options(op.receipt)
     if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live", "handoff_prepared"}:
         # B11/B25: ours to fix, or an honest closed-list answer; never "Try again".
         # C7: delivered as content files, not yet live; a retry cannot change that.

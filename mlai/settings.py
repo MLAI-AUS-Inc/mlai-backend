@@ -2873,6 +2873,17 @@ ARTICLES_REPO_HEALTH_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_ENABLED", Fals
 # off until the owner approves a write to founder repositories.
 ARTICLES_REPO_HEALTH_FIX_PR_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_FIX_PR_ENABLED", False)
 
+# Website readiness record (content_factory.website_readiness). Shadow writes
+# the stored record and its check events beside today's computed answer and
+# never changes behaviour; reads, recheck rules and the setup pin apply only
+# to ARTICLES_READINESS_DOMAINS; nightly compare is report-only.
+ARTICLES_READINESS_SHADOW_ENABLED = _env_is_true("ARTICLES_READINESS_SHADOW_ENABLED", True)
+ARTICLES_READINESS_READS_ENABLED = _env_is_true("ARTICLES_READINESS_READS_ENABLED", False)
+ARTICLES_READINESS_RECHECK_RULES_ENABLED = _env_is_true("ARTICLES_READINESS_RECHECK_RULES_ENABLED", False)
+ARTICLES_READINESS_PIN_ENABLED = _env_is_true("ARTICLES_READINESS_PIN_ENABLED", False)
+ARTICLES_READINESS_NIGHTLY_COMPARE_ENABLED = _env_is_true("ARTICLES_READINESS_NIGHTLY_COMPARE_ENABLED", True)
+ARTICLES_READINESS_DOMAINS = os.getenv("ARTICLES_READINESS_DOMAINS", "talathrive.com,la-vie.com.au,mlai.au")
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an

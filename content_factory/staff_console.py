@@ -167,7 +167,9 @@ def startup_list(params, *, now=None):
         rows = [r for r in rows if (r["siteTier"] or "unknown") == tier]
     page = rows[offset:offset+50]
     cursor = signing.dumps({"offset": offset+50}, salt="staff-startups") if len(rows) > offset+50 else None
-    return {"results": page, "next": cursor, "overdueAlerts": overdue_count, "tierCounts": tier_counts}
+    from .website_readiness import readiness_fleet
+    return {"results": page, "next": cursor, "overdueAlerts": overdue_count, "tierCounts": tier_counts,
+            "readinessCounts": readiness_fleet()}
 
 
 def startup_detail(organization_id, *, now=None):
@@ -191,6 +193,10 @@ def startup_detail(organization_id, *, now=None):
     if website:
         from .website_capability_record import build as capability_record
         row["website"]["capability"] = capability_record(website, now=now)
+        # The stored readiness record and its newest 50 check events, newest first.
+        from .website_readiness import check_events, staff_readiness
+        row["website"]["readiness"] = staff_readiness(website)
+        row["website"]["checkEvents"] = check_events(website)
     receipts = _alerts(org)
     row["alerts"] = [a for a in receipts if open_alert(a)] + sorted([a for a in receipts if not open_alert(a)], key=lambda a: a.get("acknowledged_at", ""), reverse=True)[:20]
     if website and company:

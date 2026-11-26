@@ -148,7 +148,9 @@ class WebsiteConnectionView(APIView):
             return error
         from .website_journey import journey_for_context
         from .website_status import add_status
-        payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True)}
+        from .website_readiness import founder_payload
+        payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True),
+                   "websiteReadiness": founder_payload(config)}
         return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
 
     def post(self, request):
@@ -171,7 +173,7 @@ class WebsiteConnectionActionView(APIView):
     """Independent pause/disconnect/reconnect/reset/cleanup consent actions."""
 
     def post(self, request, action):
-        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup"}:
+        if action not in {"prepare", "pause", "disconnect", "reconnect", "reset", "cleanup", "purge", "cancel-operation", "reconcile", "verify-access", "verify", "custom-contract", "ci-attestation", "github-revoke", "verify-cleanup", "readiness-check"}:
             return Response({"code": "invalid_connection_action", "detail": "Unknown website action."}, status=400)
         context, config, error = _context(request)
         if error:
@@ -205,6 +207,10 @@ class WebsiteConnectionActionView(APIView):
                 operation = apply_revocation(request.user, config, data=request.data, idempotency_key=key)
                 if isinstance(operation, dict):
                     return Response({"githubRevocation": operation["githubRevocation"], "receipt": operation})
+            elif action == "readiness-check":
+                # Queue one verify-only check of the current commit (website_readiness_rules).
+                from .website_readiness_rules import request_manual_check
+                operation = request_manual_check(config)
             elif action == "verify-cleanup":
                 from .website_cleanup_verification import verify_cleanup_deployment
                 operation = verify_cleanup_deployment(config, data=request.data)
@@ -259,8 +265,9 @@ class WebsiteConnectionActionView(APIView):
             from .website_journey import journey_for_context
             from .website_operations import operation_summary
             from .website_status import add_status
+            from .website_readiness import founder_payload
             payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True),
-                "operation": operation_summary(operation) if operation else None}
+                "operation": operation_summary(operation) if operation else None, "websiteReadiness": founder_payload(config)}
             return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)

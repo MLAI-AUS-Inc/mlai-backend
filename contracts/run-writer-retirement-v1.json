@@ -1620,7 +1620,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "fada3312eead3ccf4ad4f1aaebdc34a604376334785c916e56b929a8902ba9f7",
+      "function_sha256": "75bb883aea39745df8b8527e70432ff7aeb60c2c6d88ca3bee42b834c4a29898",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py",
@@ -1812,7 +1812,7 @@
         "parent"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "fada3312eead3ccf4ad4f1aaebdc34a604376334785c916e56b929a8902ba9f7",
+      "function_sha256": "75bb883aea39745df8b8527e70432ff7aeb60c2c6d88ca3bee42b834c4a29898",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py",
@@ -3611,7 +3611,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5b2de2b5099125b424c164f5b2fa5372109856470ffc89d8de21cf47ac967a04",
+      "function_sha256": "f89ed93abe7c3f8248e80bc9a6a93b561317bf7cfb3652a076affc494d159b77",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_owned_cancellation.py"
@@ -6107,7 +6107,7 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_charge_roo_points_for_article",
-      "function_sha256": "d8e68ae9ab031575b879150262972c33ed769fbe10e5a30ea7a55dc5db05a207",
+      "function_sha256": "adc80a603a153be246d08432034ed07dd6ee374b3cbe6c4cf55a3c0eb2d685fe",
       "reason": "Normalize owned portable scope before first immutable admission and recheck trusted internal command consent inside its real debit transaction; legacy inputs remain exact. Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
       "test_refs": [
         "content_factory.tests_first_article_commands",
