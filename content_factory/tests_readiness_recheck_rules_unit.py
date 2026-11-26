@@ -378,11 +378,17 @@ class LookAndCompareTests(SimpleTestCase):
 class UnsupportedBuildTests(SimpleTestCase):
     """Non-static stacks (Next, Astro, React Router): Content Factory cannot build them in place."""
 
-    def answer(self, reason, *, build_status="not_run", status=200):
+    def answer(self, reason, *, build_status="not_run", status=200, **evidence):
         response = MagicMock(status_code=status)
         response.json.return_value = {"status": "unavailable", "checks": {
-            "blog_files": {"status": "passed"}, "build_render": {"status": build_status, "evidence": {"reason": reason}}}}
+            "blog_files": {"status": "passed"},
+            "build_render": {"status": build_status, "evidence": {"reason": reason, **evidence}}}}
         return MagicMock(return_value=response)
+
+    def cf_unsupported(self, cause, **overrides):
+        """Content Factory's exact answer for a stack it cannot build in place (setup_verify_installed._unsupported)."""
+        evidence = {"unsupported": True, "cause": cause, "framework": "nextjs", "runtime_family": "node", **overrides}
+        return self.answer(evidence.pop("reason", rules.RENDER_UNSUPPORTED_FOR_STACK), **evidence)
 
     def build(self, post):
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config",
@@ -390,11 +396,38 @@ class UnsupportedBuildTests(SimpleTestCase):
             return rules.check_build_render(website(), record_row(), SimpleNamespace(pk="op-9"), source_sha=PUSHED, now=NOW, post=post)[0]
 
     def test_an_unsupported_stack_is_marked_with_a_plain_detail(self):
-        for reason in sorted(rules.UNSUPPORTED_BUILD_REASONS):
-            check = self.build(self.answer(reason))
-            self.assertEqual((check["status"], check["evidence"]["unsupported"], check["evidence"]["reason"]), ("not_run", True, reason))
+        self.assertEqual(rules.RENDER_UNSUPPORTED_FOR_STACK, "render_unsupported_for_stack")
+        for cause in ("no_static_materialization_contract", "witness_not_required"):
+            check = self.build(self.cf_unsupported(cause))
+            self.assertEqual((check["status"], check["evidence"]["unsupported"], check["evidence"]["reason"]),
+                             ("not_run", True, rules.RENDER_UNSUPPORTED_FOR_STACK))
+            self.assertEqual((check["evidence"]["cause"], check["evidence"]["framework"]), (cause, "nextjs"))
             self.assertEqual(check["detail"], rules.UNSUPPORTED_BUILD_DETAIL)
             self.assertTrue(rules.build_unsupported(check))
+
+    def test_only_content_factorys_exact_signal_is_unsupported(self):
+        """The old reasons, a static site with an incomplete contract and half signals all keep retrying."""
+        not_the_signal = [
+            # Older Content Factory answers used these as the reason (also for an incomplete static contract).
+            self.answer("no_static_materialization_contract"), self.answer("witness_not_required"),
+            self.answer("static_contract_incomplete", unsupported=False),
+            self.answer("render_unavailable", transient=True),
+            self.answer("blog_files_not_passed"), self.answer("access_unconfirmed", transient=True),
+            self.answer("website_unreachable", transient=True),
+            # The reason without the flag, the flag without the reason, or a non-boolean flag.
+            self.answer(rules.RENDER_UNSUPPORTED_FOR_STACK),
+            self.answer("no_static_materialization_contract", unsupported=True),
+            self.cf_unsupported("witness_not_required", unsupported="true"),
+            # The exact signal on anything but not_run, or on a refused answer.
+            self.cf_unsupported("no_static_materialization_contract", build_status="unavailable"),
+            self.cf_unsupported("no_static_materialization_contract", status=409),
+        ]
+        for post in not_the_signal:
+            check = self.build(post)
+            self.assertEqual(check["status"], "not_run")
+            self.assertNotIn("unsupported", check["evidence"])
+            self.assertFalse(rules.build_unsupported(check))
+            self.assertEqual(rules.verify_outcome(self.checks(check), require_build=True), "unproven")
 
     def test_transient_answers_are_never_unsupported(self):
         transient = [self.answer("no_static_materialization_contract", status=status) for status in (404, 409, 502, 503)]

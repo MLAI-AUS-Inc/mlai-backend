@@ -72,10 +72,14 @@ COMPARE_DAY_KEY = "website_readiness_nightly_compare:{day}"
 COMPARE_DAY_TTL = 26 * 3600
 MISSING_LIMIT = 20
 CF_VERIFY_TIMEOUT = (5, 180)
-# Content Factory's ``build_render`` ``evidence.reason`` values meaning "this stack is
-# not built in place by verify-installed" (setup_verify_installed.check_build_render),
-# as opposed to a transient failure.
-UNSUPPORTED_BUILD_REASONS = frozenset({"no_static_materialization_contract", "witness_not_required"})
+# Content Factory's signal that verify-installed cannot build this stack in place
+# (setup_verify_installed.RENDER_UNSUPPORTED_FOR_STACK): ``build_render`` ``not_run``
+# with ``evidence.reason == "render_unsupported_for_stack"`` and ``evidence.unsupported``
+# True. ``evidence.cause`` (``no_static_materialization_contract`` or
+# ``witness_not_required``) is only the why. Those two strings were the reason in older
+# Content Factory answers, which also used them for a static site with an incomplete
+# contract, so on their own they stay unproven and retry.
+RENDER_UNSUPPORTED_FOR_STACK = "render_unsupported_for_stack"
 UNSUPPORTED_BUILD_DETAIL = ("This site's build can't be checked in place, so we checked the blog files "
                             "and the live blog page instead.")
 STRATEGY_FOR_MODE = {"model_synthesized": "model_adapter", "agent": "agent", "native": "native_collection",
@@ -514,14 +518,17 @@ def check_build_render(website, row, op, *, source_sha, attempt=0, now=None, pos
     checks = _mapping(answer.get("checks"))
     build = _mapping(checks.get("build_render"))
     status = build.get("status") if build.get("status") in {"passed", "failed"} else "not_run"
-    reason = str(_mapping(build.get("evidence")).get("reason") or "")
-    unsupported = build.get("status") == "not_run" and reason in UNSUPPORTED_BUILD_REASONS
+    evidence = _mapping(build.get("evidence"))
+    reason = str(evidence.get("reason") or "")
+    unsupported = (build.get("status") == "not_run" and reason == RENDER_UNSUPPORTED_FOR_STACK
+                   and evidence.get("unsupported") is True)
     detail = {"passed": "Built and rendered at the latest commit.", "failed": "The blog page did not build or render at the latest commit."}
     text = (UNSUPPORTED_BUILD_DETAIL if unsupported
             else detail.get(status, "The build check could not run for this site."))
     check = _check(status, text, source_sha=source_sha, now=now, setupRunId=setup_run_id,
                    answer=str(answer.get("status") or ""), durationMs=answer.get("durationMs"), reason=reason,
-                   **({"unsupported": True} if unsupported else {}))
+                   **({"unsupported": True, "cause": str(evidence.get("cause") or ""),
+                       "framework": str(evidence.get("framework") or "")} if unsupported else {}))
     return check, str(_mapping(checks.get("blog_files")).get("status") or "")
 
 

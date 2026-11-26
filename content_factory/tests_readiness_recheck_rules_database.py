@@ -362,8 +362,10 @@ class ReadinessGapTests(TalaThriveSite, TestCase):
     def test_an_unsupported_stack_promotes_on_blog_files_and_the_live_page(self):
         self.push_to(_compare("app/blog/page.tsx", "stories/index.html"))
         self.assertEqual(self.row().state, "checking")
-        unsupported = {"status": "not_run", "detail": "This site's build is checked by its preview build.",
-                       "evidence": {"reason": "no_static_materialization_contract"}}
+        unsupported = {"status": "not_run", "detail": "This site's build can't be checked in place; its preview build checks it instead.",
+                       "evidence": {"reason": "render_unsupported_for_stack", "unsupported": True,
+                                    "cause": "no_static_materialization_contract", "framework": "nextjs",
+                                    "runtime_family": "node"}}
         self.assertEqual(self.verify_with_cf(unsupported), "completed")
         self.connection.refresh_from_db()
         self.target.refresh_from_db()
@@ -378,8 +380,17 @@ class ReadinessGapTests(TalaThriveSite, TestCase):
 
     def test_an_unsupported_stack_still_waits_for_the_live_page(self):
         self.push_to(_compare("stories/index.html"))
-        unsupported = {"status": "not_run", "evidence": {"reason": "witness_not_required"}}
+        unsupported = {"status": "not_run", "evidence": {"reason": "render_unsupported_for_stack", "unsupported": True,
+                                                         "cause": "witness_not_required"}}
         self.assertEqual(self.verify_with_cf(unsupported, live="not_run"), "pending")
+        self.assertEqual(self.row().state, "checking")
+
+    def test_an_old_unsupported_reason_alone_keeps_retrying(self):
+        self.push_to(_compare("stories/index.html"))
+        old = {"status": "not_run", "evidence": {"reason": "no_static_materialization_contract"}}
+        self.assertEqual(self.verify_with_cf(old), "pending")
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.verified_sha, VERIFIED)
         self.assertEqual(self.row().state, "checking")
 
     def test_a_transient_build_answer_keeps_retrying(self):
