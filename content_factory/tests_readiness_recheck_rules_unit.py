@@ -81,9 +81,14 @@ class PushPlanTests(SimpleTestCase):
     def test_owned_merges_sealed_targets_and_unheld_sites_keep_todays_handling(self):
         self.assertIsNone(self.plan(owned=True)[0])
         self.assertIsNone(self.plan(sealed=True, comparison=compare("index.html"))[0])
-        self.assertIsNone(self.plan(row=record_row(state="fixing"))[0])
+        self.assertIsNone(self.plan(row=record_row(state="needs_user"))[0])
         self.assertIsNone(self.plan(row=record_row(setupRunId="", footprint=[]))[0])
         self.assertIsNone(self.plan(website(verified_sha=""))[0])
+
+    def test_a_fixing_site_checks_every_push_without_a_compare(self):
+        plan, read = self.plan(row=record_row(state="fixing"), comparison=compare("README.md"))
+        self.assertEqual((plan["rule"], plan["reason"]), ("footprint", "record_fixing"))
+        read.assert_not_called()
 
     def test_rules_off_or_another_domain_keep_todays_handling(self):
         with override_settings(ARTICLES_READINESS_RECHECK_RULES_ENABLED=False):
@@ -149,6 +154,13 @@ class VerifyOutcomeTests(SimpleTestCase):
 
     def test_blog_files_and_a_build_pass(self):
         self.assertEqual(rules.verify_outcome(self.checks(blog_files="passed", build_render="passed", live_page="not_run")), "passed")
+
+    def test_a_new_commit_needs_a_build_not_only_the_old_live_page(self):
+        checks = {"blog_files": {"status": "passed"}, "build_render": {"status": "not_run"}, "live_page": {"status": "passed"}}
+        self.assertEqual(rules.verify_outcome(checks, require_build=True), "unproven")
+        self.assertTrue(rules.retry_worthy("unproven", checks))
+        built = {**checks, "build_render": {"status": "passed"}}
+        self.assertEqual(rules.verify_outcome(built, require_build=True), "passed")
 
     def test_without_a_build_the_live_page_must_answer(self):
         self.assertEqual(rules.verify_outcome(self.checks(blog_files="passed", build_render="not_run", live_page="passed")), "passed")
@@ -257,10 +269,21 @@ class CheckTests(SimpleTestCase):
 
 class GateTests(SimpleTestCase):
     def test_holds_prepare_needs_rules_and_a_held_pinned_record(self):
-        with override_settings(**RULES_ON), patch("content_factory.website_readiness.stored", return_value=record_row()):
+        with override_settings(**RULES_ON), patch("content_factory.website_readiness.stored", return_value=record_row()), \
+                patch.object(rules, "sealed_for", return_value=False):
             self.assertTrue(rules.holds_prepare(website()))
             self.assertTrue(rules.age_waived(website()))
-        with override_settings(**RULES_ON), patch("content_factory.website_readiness.stored", return_value=record_row("fixing")):
+        with override_settings(**RULES_ON), patch("content_factory.website_readiness.stored", return_value=record_row("fixing")), \
+                patch.object(rules, "sealed_for", return_value=False):
+            # A fixing site keeps the push rules (no prepare wake) but not the age waiver.
+            self.assertTrue(rules.holds_prepare(website()))
+            self.assertFalse(rules.age_waived(website()))
+        with override_settings(**RULES_ON), patch("content_factory.website_readiness.stored", return_value=record_row("needs_user")), \
+                patch.object(rules, "sealed_for", return_value=False):
+            self.assertFalse(rules.holds_prepare(website()))
+        with override_settings(**RULES_ON), patch("content_factory.website_readiness.stored", return_value=record_row()), \
+                patch.object(rules, "sealed_for", return_value=True):
+            # Sealed-CI targets keep today's preparation re-verification.
             self.assertFalse(rules.holds_prepare(website()))
         with patch("content_factory.website_readiness.stored", return_value=record_row()) as read:
             self.assertFalse(rules.holds_prepare(website()))
@@ -272,11 +295,17 @@ class GateTests(SimpleTestCase):
         self.assertFalse(rules.is_verify_only(SimpleNamespace(payload={})))
 
     def test_delivery_failure_queues_only_for_source_codes_with_rules_on(self):
-        with override_settings(**RULES_ON), patch("django.db.transaction.on_commit") as later:
+        with override_settings(**RULES_ON), patch("django.db.transaction.on_commit") as later, \
+                patch("content_factory.website_readiness.stored", return_value=record_row("checking")):
             rules.queue_after_delivery_failure(website(), WebsiteAuthorityError("website_source_changed", "moved"))
+            rules.queue_after_delivery_failure(website(), WebsiteAuthorityError("website_publish_verification_required", "proof"))
             rules.queue_after_delivery_failure(website(), WebsiteAuthorityError("roo_points_required", "points"))
             rules.queue_after_delivery_failure(None, WebsiteAuthorityError("verified_target_required", "x"))
-        self.assertEqual(later.call_count, 1)
+        self.assertEqual(later.call_count, 2)
+        with override_settings(**RULES_ON), patch("django.db.transaction.on_commit") as later, \
+                patch("content_factory.website_readiness.stored", return_value=None):
+            rules.queue_after_delivery_failure(website(), WebsiteAuthorityError("website_source_changed", "moved"))
+        later.assert_not_called()
         with patch("django.db.transaction.on_commit") as later:
             rules.queue_after_delivery_failure(website(), WebsiteAuthorityError("website_source_changed", "moved"))
         later.assert_not_called()
@@ -297,6 +326,10 @@ class SetupPinTests(SimpleTestCase):
         for mode, rung in (("agent", "agent"), ("native", "native_collection"), ("deterministic", "deterministic")):
             self.assertEqual(self.pin(record_row(adapterMode=mode))["strategy_pin"], rung)
         self.assertEqual(self.pin(record_row(adapterMode="")), {"pinned_setup_run_id": "e3f55f7e"})
+
+    def test_a_pin_from_another_generation_is_never_sent(self):
+        self.assertEqual(self.pin(record_row(generation=1)), {})
+        self.assertEqual(self.pin(record_row(generation=2))["pinned_setup_run_id"], "e3f55f7e")
 
     def test_no_pin_when_off_fresh_or_unpinned(self):
         self.assertEqual(self.pin(record_row(), ARTICLES_READINESS_PIN_ENABLED=False), {})

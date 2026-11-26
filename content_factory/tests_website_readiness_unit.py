@@ -44,8 +44,17 @@ class ClassifyTests(SimpleTestCase):
     def test_verified_without_publishing_proof_is_checking(self):
         self.assertEqual(readiness.classify(connection(), legacy(True, publishing=False)), ("checking", "live_check_pending"))
 
-    def test_age_alone_keeps_ready(self):
-        self.assertEqual(readiness.classify(connection(), legacy(code="verification_stale")), ("ready", ""))
+    def test_stale_left_after_the_age_waiver_is_never_ready(self):
+        # derive() re-judges aged proof with the age bound waived; a stale code
+        # left over is a missing or future stamp, never age alone.
+        self.assertEqual(readiness.classify(connection(), legacy(code="verification_stale")), ("fixing", "verification_stale"))
+        self.assertEqual(readiness.classify(connection(last_verified_at=None), legacy(code="verification_stale"))[0], "not_set_up")
+
+    def test_a_verify_only_access_failure_stays_needs_user(self):
+        self.assertEqual(readiness.classify(connection(), legacy(code="integration_required"), failed_recheck="github_access_required"),
+                         ("needs_user", "github_access_required"))
+        self.assertEqual(readiness.classify(connection(), legacy(code="integration_required"), failed_recheck="failed"),
+                         ("fixing", "integration_required"))
 
     def test_disconnected_and_revoked_are_not_set_up(self):
         self.assertEqual(readiness.classify(connection(state="disconnected"), legacy())[0], "not_set_up")
@@ -109,10 +118,13 @@ class FlagTests(SimpleTestCase):
 
 
 class DeriveTests(SimpleTestCase):
-    def derive(self, evidence, **patches):
+    def derive(self, evidence, aged=None, **patches):
         target = SimpleNamespace(target_key="articles", adapter="static_dropin_v1", adapter_version="1", contract={},
                                  source_sha=SHA, verified_at=NOW - timedelta(days=9), capabilities={})
-        with patch.object(readiness, "_legacy", return_value=evidence), \
+
+        def legacy_answer(config, site, now, *, ignore_age=False):
+            return aged if ignore_age else evidence
+        with patch.object(readiness, "_legacy", side_effect=legacy_answer) as self.legacy_calls, \
                 patch.object(readiness, "_default_target", return_value=target), \
                 patch.object(readiness, "_latest_op", return_value=patches.get("prepare")), \
                 patch.object(readiness, "_open_recheck", return_value=patches.get("recheck", {})), \
@@ -122,12 +134,28 @@ class DeriveTests(SimpleTestCase):
             return readiness.derive(SimpleNamespace(), connection(), now=NOW)
 
     def test_stale_proof_derives_ready_and_notes_age_on_the_check(self):
-        record = self.derive(legacy(code="verification_stale"))
+        record = self.derive(legacy(code="verification_stale"), aged=legacy(True))
         self.assertEqual((record["state"], record["can_draft"], record["can_publish"]), ("ready", True, True))
         self.assertEqual(record["legacy"]["reasonCode"], "verification_stale")
         self.assertEqual(record["legacy"]["state"], "not_ready")
         self.assertTrue(record["checks"]["build_render"]["evidence"]["stale"])
         self.assertEqual(set(record["checks"]), set(readiness.CHECK_KEYS))
+
+    def test_aged_proof_still_meets_every_other_check(self):
+        # A sealed-CI target with no current attestation is not ready once its age is waived.
+        record = self.derive(legacy(code="verification_stale"), aged=legacy(code="verification_required"))
+        self.assertEqual((record["state"], record["can_publish"]), ("fixing", False))
+        # Aged proof that is not yet publishing-verified is only checking.
+        record = self.derive(legacy(code="verification_stale"), aged=legacy(True, publishing=False))
+        self.assertEqual((record["state"], record["can_publish"]), ("checking", False))
+        # A missing or future stamp stays stale even with the age waived: never ready.
+        record = self.derive(legacy(code="verification_stale"), aged=legacy(code="verification_stale"))
+        self.assertNotEqual(record["state"], "ready")
+        self.assertEqual(record["legacy"]["reasonCode"], "verification_stale")
+
+    def test_fresh_proof_is_judged_once(self):
+        self.derive(legacy(True))
+        self.assertEqual(self.legacy_calls.call_count, 1)
 
     def test_checking_keeps_drafts_and_pauses_publishing(self):
         recheck = {"reason": "source_changed", "sourceSha": NEW, "queuedAt": NOW.isoformat(), "operationId": "op-2"}
@@ -172,6 +200,16 @@ class RecordValuesTests(SimpleTestCase):
         self.assertEqual(failed["pinned_contract"]["setupRunId"], "e3f55f7e")
         repinned = readiness._next_values(stored, self.derived(), trigger="setup_completed", state=None, checks=None, now=NOW)
         self.assertEqual(repinned["pinned_contract"]["setupRunId"], "new")
+
+    def test_a_new_generation_drops_the_old_pin(self):
+        old = row(generation=3, pinned_contract={"setupRunId": "e3f55f7e", "generation": 3})
+        reset = {**self.derived(pin={"setupRunId": "", "footprint": []}), "generation": 4}
+        values = readiness._next_values(old, reset, trigger="access_change", state=None, checks=None, now=NOW)
+        self.assertEqual(values["pinned_contract"]["setupRunId"], "")
+        # A pin stamped with another generation is dropped even on a current-generation row.
+        stale = row(generation=4, pinned_contract={"setupRunId": "e3f55f7e", "generation": 3})
+        values = readiness._next_values(stale, reset, trigger="manual", state=None, checks=None, now=NOW)
+        self.assertEqual(values["pinned_contract"]["setupRunId"], "")
 
     def test_explicit_state_and_checks_for_rule_paths(self):
         values = readiness._next_values(row(), self.derived(), trigger="push_footprint", state="checking",
@@ -244,6 +282,23 @@ class CapabilityTests(SimpleTestCase):
         value = readiness.apply_to_capabilities(self.BASE, row(state="needs_user", can_draft=False, can_publish=False,
                                                                reason_code="github_access_required"), account={"owned": True})
         self.assertEqual(value["stage"], "github")
+
+    def test_a_definite_live_access_denial_keeps_todays_refusal(self):
+        for code in ("github_access_required", "repository_changed", "CONNECTION_READ_ONLY"):
+            value = readiness.apply_to_capabilities(self.BASE, row(), account={"owned": True},
+                                                    repository_access={"verified": False, "reasonCode": code})
+            self.assertFalse(value["canGenerateArticle"] or value["canPublishArticle"])
+            self.assertEqual(value["reasonCode"], "verification_stale")  # the legacy reason stands
+        read_only = readiness.apply_to_capabilities(self.BASE, row(), account={"owned": True},
+                                                    repository_access={"verified": True, "writable": False})
+        self.assertTrue(read_only["canGenerateArticle"])
+        self.assertFalse(read_only["canPublishArticle"])
+        self.assertEqual(read_only["publishingReasonCode"], "github_write_required")
+
+    def test_an_unknown_live_answer_leaves_the_record_answer(self):
+        value = readiness.apply_to_capabilities(self.BASE, row(), account={"owned": True},
+                                                repository_access={"verified": False, "reasonCode": "github_verification_required"})
+        self.assertTrue(value["canGenerateArticle"] and value["canPublishArticle"])
 
 
 class ArticleCapabilitiesReadTests(SimpleTestCase):

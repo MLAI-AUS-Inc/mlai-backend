@@ -12,6 +12,7 @@ from . import website_reconciliation as reconciliation
 from . import website_source_carry as carry
 from .tests_website_source_carry import CarriedSite, _compare
 from .website_models import WebsiteCheckEvent, WebsiteConnectionOperation, WebsiteReadiness
+from .website_prepare import wake_prepare_for_source as REAL_WAKE  # before the fixture patches it
 
 VERIFIED = "e204852e" + "0" * 32
 PUSHED = "14507e59" + "0" * 32
@@ -218,3 +219,117 @@ class TalaThriveRecheckTriggerTests(TalaThriveSite, TestCase):
         event = WebsiteCheckEvent.objects.get(connection=self.connection, trigger="nightly_compare")
         self.assertEqual((event.result, event.detail["from"], event.detail["to"]), ("failed", "fixing", "ready"))
         self.assertEqual(rules.run_nightly_compare_sweep(now=timezone.now()), {"skipped": "already_ran_today"})
+
+
+@override_settings(**RULES)
+class ReadinessReviewFixTests(TalaThriveSite, TestCase):
+    """Review fixes: no promotion on the old live page, sealed targets, draft starts, access, fixing, sweeps."""
+
+    def test_a_footprint_push_never_passes_on_the_old_live_page_alone(self):
+        self.push_to(_compare("stories/index.html"))
+        live_only = {"blog_files": {"status": "passed"}, "build_render": {"status": "not_run"}, "live_page": {"status": "passed"}}
+        op = self.checks_op()
+        self.assertEqual(self.process(op, live_only), "pending")
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.verified_sha, VERIFIED)
+        self.assertEqual(self.row().state, "checking")
+        WebsiteConnectionOperation.objects.filter(pk=op.pk).update(attempts=rules.VERIFY_ONLY_MAX_ATTEMPTS,
+                                                                    next_attempt_at=timezone.now() - timedelta(minutes=1))
+        self.assertEqual(self.process(op, live_only), "needs_attention")
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.verified_sha, VERIFIED)
+        self.assertEqual((self.row().state, self.row().can_publish), ("fixing", False))
+
+    def test_a_sealed_target_is_never_promoted_by_a_verify_only_check(self):
+        self.push_to(_compare("stories/index.html"))
+        with patch.object(rules, "sealed_for", return_value=True):
+            self.assertEqual(self.process(self.checks_op(), PASSED), "cancelled")
+            self.assertEqual(rules.queue_verify_only(self.connection, trigger="manual", bucket="x"), (None, False))
+        self.connection.refresh_from_db()
+        self.assertEqual(self.connection.verified_sha, VERIFIED)
+        self.assertEqual(self.checks_op().receipt["reason"], "sealed_workflow_required")
+        self.assertNotEqual(self.row().state, "ready")
+
+    def test_a_draft_starts_in_checking_with_reads_on(self):
+        from types import SimpleNamespace
+        from django.db import transaction
+        from .vibe_marketing_views import _validate_article_start_reservation
+        from .website_contract import WebsiteAuthorityError
+        self.push_to(_compare("stories/index.html"))
+        self.assertEqual(self.row().state, "checking")
+        payload = {"delivery_mode": "review_draft", "website_connection_id": str(self.connection.pk),
+                   "connection_target_id": self.config.default_publish_target_id, "expected_source_sha": VERIFIED}
+        context = SimpleNamespace(organization=self.config.organization)
+
+        def reserve(data):
+            with transaction.atomic(), patch("content_factory.website_contract.validate_authority"), \
+                    patch("content_factory.website_operations.validate_operation"):
+                _validate_article_start_reservation(context, data)
+
+        with override_settings(ARTICLES_READINESS_READS_ENABLED=True):
+            reserve(payload)
+            with self.assertRaises(WebsiteAuthorityError) as publish:
+                reserve({**payload, "delivery_mode": "publish_code"})
+            self.assertEqual(publish.exception.code, "website_publish_verification_required")
+        with self.assertRaises(WebsiteAuthorityError):
+            reserve(payload)  # reads off: today's proof requirement
+
+    def test_an_access_failure_stays_needs_user_on_the_next_shadow_write(self):
+        from .website_contract import WebsiteAuthorityError
+        self.push_to(_compare("stories/index.html"))
+        lost = WebsiteAuthorityError("github_access_required", "Access was removed.")
+        with patch.object(rules, "run_checks", side_effect=lost):
+            reconciliation._process_source_reverification(self.checks_op().pk, timezone.now() + timedelta(minutes=2))
+        self.assertEqual(self.row().state, "needs_user")
+        readiness.record(self.connection, trigger="verification_recorded")
+        self.assertEqual((self.row().state, self.row().reason_code), ("needs_user", "github_access_required"))
+
+    def test_a_push_to_a_fixing_site_checks_without_reopening_preparation(self):
+        WebsiteReadiness.objects.filter(connection=self.connection).update(state="fixing", can_publish=False)
+        result, compare, wake, _ = self.push_to(_compare("README.md"))
+        self.assertEqual(result["push_footprint"], 1)
+        compare.assert_not_called()
+        self.assertTrue(self.checks_op().payload["verify_only"])
+        self.assertTrue(rules.holds_prepare(self.connection))
+
+    def test_wake_prepare_stays_shut_for_a_held_site(self):
+        self.connection.authorized_by = self.built.owner
+        self.connection.save(update_fields=["authorized_by"])
+        with patch("content_factory.website_prepare.start_prepare") as start:
+            self.assertIsNone(REAL_WAKE(self.connection.pk, organization_id=self.connection.organization_id, source_sha=PUSHED))
+            start.assert_not_called()
+            with patch.object(rules, "sealed_for", return_value=True):
+                # Sealed-CI targets keep today's behaviour: the guard does not hold them.
+                self.assertFalse(rules.holds_prepare(self.connection))
+
+    def test_the_weekly_look_reaches_enabled_sites_past_other_domains(self):
+        from .founder_journey_testing import make_history_free_org
+        from .tests_live_url_verification import _connect
+        long_ago = timezone.now() - timedelta(days=60)
+        for index in range(5):
+            other = _connect(make_history_free_org(domain=f"other{index}.example.test"))
+            WebsiteReadiness.objects.create(connection=other, generation=other.generation, state="ready",
+                                            can_draft=True, can_publish=True)
+        WebsiteReadiness.objects.exclude(connection=self.connection).update(updated_at=long_ago)
+        looked = []
+        with patch.object(rules, "look", side_effect=lambda site, row, now: looked.append(site.pk) or (True, {})):
+            counts = rules.run_weekly_look_sweep(now=timezone.now() + timedelta(days=8), limit=1)
+        self.assertEqual(looked, [self.connection.pk])
+        self.assertEqual((counts["looked"], counts["skipped"]), (1, 0))
+
+    def test_an_archived_repository_records_needs_user(self):
+        from . import website_repository_identity as identity
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertTrue(identity.set_blocker(self.connection, identity.ARCHIVED_ENTRY, True))
+        self.assertEqual((self.row().state, self.row().reason_code), ("needs_user", "CONNECTION_READ_ONLY"))
+        event = WebsiteCheckEvent.objects.filter(connection=self.connection).order_by("-created_at", "-pk").first()
+        self.assertEqual((event.trigger, event.detail["identity"]), ("access_change", "added:CONNECTION_READ_ONLY"))
+
+    def test_a_reset_drops_the_pin(self):
+        self.assertEqual(self.row().pinned_contract["setupRunId"], "e3f55f7e")
+        self.connection.generation += 1
+        self.connection.save(update_fields=["generation"])
+        readiness.record(self.connection, trigger="access_change", detail={"action": "reset"})
+        self.assertEqual(self.row().pinned_contract.get("setupRunId"), "")
+        with override_settings(ARTICLES_READINESS_PIN_ENABLED=True):
+            self.assertEqual(rules.setup_pin(self.connection), {})

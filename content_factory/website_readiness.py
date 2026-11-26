@@ -136,7 +136,10 @@ def _setup_run(connection, config):
     rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
                                             status="completed")
     run_id = str(cache.get("setup_run_id") or "")
-    run = rows.filter(run_id=run_id).only("run_id", "result").first() if run_id else None
+    # The cached run counts only when it was bound to this connection generation:
+    # a reset or reconnect starts a new generation with no pin.
+    run = (rows.filter(run_id=run_id, run_request__connection_generation=connection.generation)
+           .only("run_id", "result").first() if run_id else None)
     if run is None:
         run = (rows.filter(run_request__website_connection_id=str(connection.pk),
                            run_request__connection_generation=connection.generation)
@@ -188,7 +191,8 @@ def pinned_contract(config, connection, target):
     return {"adapter": str(getattr(target, "adapter", "") or ""), "adapterVersion": str(getattr(target, "adapter_version", "") or ""),
             "adapterMode": adapter_mode(getattr(run, "result", None)), "setupRunId": setup_run_id,
             "targetKey": str(getattr(target, "target_key", "") or ""),
-            "routePath": ("/" + route.strip("/")) if route else "", "footprint": paths, "footprintSource": source}
+            "routePath": ("/" + route.strip("/")) if route else "", "footprint": paths, "footprintSource": source,
+            "generation": connection.generation}
 
 
 def _open_recheck(connection):
@@ -211,9 +215,28 @@ def _open_recheck(connection):
             "sourceSha": str(payload.get("source_sha") or ""), "queuedAt": _iso(op.created_at), "operationId": str(op.pk)}
 
 
+# Access refusals a verify-only check settles on, mapped to the founder's ask.
+RECHECK_ACCESS_REASONS = {"github_access_required": "github_access_required",
+                          "github_installation_revoked": "github_access_required",
+                          "github_repository_inaccessible": "github_access_required",
+                          "website_repository_changed": "repository_changed",
+                          "CONNECTION_READ_ONLY": "CONNECTION_READ_ONLY",
+                          "github_write_required": "github_write_required"}
+
+
 def _failed_recheck(connection):
+    """The latest source check's failure: ``""`` (none), ``"failed"``, or the founder's access ask.
+
+    A verify-only check that lost access keeps its refusal code on the receipt,
+    so later shadow writes derive ``needs_user`` rather than ``fixing``.
+    """
     op = _latest_op(connection, "source-reverify")
-    return op is not None and op.state == "needs_attention"
+    if op is None or op.state != "needs_attention":
+        return ""
+    receipt = _mapping(op.receipt)
+    if receipt.get("verify_only") and receipt.get("code") in RECHECK_ACCESS_REASONS:
+        return RECHECK_ACCESS_REASONS[receipt["code"]]
+    return "failed"
 
 
 def prepare_outcome(op):
@@ -247,8 +270,13 @@ def _blocker(connection, code):
     return any(isinstance(item, dict) and item.get("code") == code for item in connection.blockers or [])
 
 
-def classify(connection, legacy, *, prepare=None, recheck=None, failed_recheck=False):
-    """Map saved facts to ``(state, reason_code)`` with no I/O. ``prepare`` is ``prepare_outcome(op)``."""
+def classify(connection, legacy, *, prepare=None, recheck=None, failed_recheck=""):
+    """Map saved facts to ``(state, reason_code)`` with no I/O. ``prepare`` is ``prepare_outcome(op)``.
+
+    ``legacy`` is today's answer with the age bound waived (see :func:`derive`),
+    so a ``verification_stale`` left here is a missing or future stamp, never
+    age alone, and is not ready. ``failed_recheck`` is :func:`_failed_recheck`.
+    """
     kind, receipt = prepare or (None, {})
     code = str(legacy.get("reasonCode") or "")
     if connection.state in {"disconnected", "revoked"}:
@@ -259,15 +287,15 @@ def classify(connection, legacy, *, prepare=None, recheck=None, failed_recheck=F
         return "needs_user", "github_write_required"
     if legacy.get("verified"):
         return ("ready", "") if legacy.get("publishingVerified") else ("checking", "live_check_pending")
-    if code == "verification_stale":
-        # Age alone is not a failure: the last proof stands (noted on the checks).
-        return "ready", ""
     previously_verified = bool(connection.verified_sha and connection.last_verified_at)
     if code == "website_writes_paused":
         return "fixing", code
-    if previously_verified and (code == SOURCE_CHANGED or code in {"integration_required", "verification_required"}):
+    if previously_verified and (code == SOURCE_CHANGED or code in {"integration_required", "verification_required",
+                                                                   "verification_stale"}):
         if recheck or kind == "running":
             return "checking", code
+        if failed_recheck in NEEDS_USER_REASONS:
+            return "needs_user", failed_recheck
         if kind == "needs_user":
             return "needs_user", str(receipt.get("reason_code") or code)
         if kind in {"fixing", "closed"} or failed_recheck:
@@ -342,9 +370,9 @@ def derive_checks(connection, legacy, target, pinned, *, live_op=None, now=None)
 
 # --- derive / record ---------------------------------------------------------
 
-def _legacy(config, connection, now):
+def _legacy(config, connection, now, *, ignore_age=False):
     from .activation import durable_integration_evidence
-    evidence = durable_integration_evidence(config, connection, now=now)
+    evidence = durable_integration_evidence(config, connection, now=now, ignore_age=ignore_age)
     return {key: evidence.get(key) for key in ("verified", "publishingVerified", "liveVerified", "reasonCode", "routePath",
                                                "verifiedAt", "sha", "branch")}
 
@@ -363,10 +391,14 @@ def derive(config, connection, *, now=None):
     """The readiness record from saved state only (no GitHub, Content Factory or site calls)."""
     now = now or timezone.now()
     legacy = _legacy(config, connection, now)
+    # Age alone is not a failure, but nothing else is skipped: aged proof is
+    # judged again with only the age bound waived (sealed CI, live checks).
+    judged = (_legacy(config, connection, now, ignore_age=True)
+              if legacy.get("reasonCode") == "verification_stale" else legacy)
     target = _default_target(config, connection)
     prepare = prepare_outcome(_latest_op(connection, "prepare"))
     recheck = _open_recheck(connection)
-    state, reason_code = classify(connection, legacy, prepare=prepare, recheck=recheck,
+    state, reason_code = classify(connection, judged, prepare=prepare, recheck=recheck,
                                   failed_recheck=_failed_recheck(connection))
     pinned = pinned_contract(config, connection, target)
     live_op = (_latest_op(connection, "deployment-verify", state="completed", payload__source_sha=connection.verified_sha)
@@ -398,6 +430,11 @@ def _next_values(row, derived, *, trigger, state, checks, now, detail=None):
         values.update(state=state, can_draft=state in DRAFT_STATES, can_publish=state == "ready",
                       reason=values["reason"] if state == derived["state"] else FOUNDER_COPY[state][0])
     stored_pin = _mapping(row.pinned_contract)
+    if row.generation != values.get("generation", row.generation) or (
+            stored_pin.get("generation") not in (None, values.get("generation", row.generation))):
+        # Pause, reconnect, reset and revoke start a new generation: the old pin
+        # (setup run, footprint, route) does not carry into it.
+        stored_pin = {}
     repin = trigger == "setup_completed" and _mapping(detail).get("prepare_state", "completed") == "completed"
     if stored_pin.get("setupRunId") and (not repin or not values["pinned_contract"].get("setupRunId")):
         # The pin is what worked last time; only a completed setup replaces it.
@@ -573,14 +610,33 @@ def for_reads(config, organization):
 STAGES = {"ready": "ready", "checking": "verifying", "fixing": "integration", "not_set_up": "integration"}
 
 
-def apply_to_capabilities(capabilities, readiness, *, account=None):
+# Live repository answers that definitely deny access (not "unknown yet").
+ACCESS_DENIALS = frozenset({"github_access_required", "website_disconnected", "repository_changed", "CONNECTION_READ_ONLY"})
+
+
+def _live_access_denial(access):
+    """``(draft_denied, publish_denied)`` from today's live repository access answer."""
+    access = _mapping(access)
+    if access.get("verified") is not True:
+        return (True, True) if access.get("reasonCode") in ACCESS_DENIALS else (False, False)
+    return False, access.get("writable", True) is not True
+
+
+def apply_to_capabilities(capabilities, readiness, *, account=None, repository_access=None):
     """Answer ``articleCapabilities`` drafting and publishing from the stored record.
 
     ``canGenerateArticle`` is the record's ``can_draft`` (still requiring the
     founder's own GitHub account, as today); ``canPublishArticle`` is
-    ``can_publish``. Write-time publishing guards are unchanged.
+    ``can_publish``. A definite live denial in ``repository_access`` (access
+    lost, repository changed or archived, no write permission) keeps today's
+    refusal: the record never overrides it. Write-time publishing guards are
+    unchanged.
     """
     account = account or {}
+    draft_denied, publish_denied = _live_access_denial(repository_access)
+    if draft_denied:
+        # Keep today's refusal: it already carries the live reason.
+        return {**capabilities, "canGenerateArticle": False, "canPublishArticle": False, "readinessState": readiness.state}
     can_draft = bool(readiness.can_draft and account.get("owned", True))
     stage = STAGES.get(readiness.state) or ("github" if readiness.reason_code == "github_access_required" else "integration")
     reason = "" if readiness.state == "ready" else readiness.reason
@@ -592,6 +648,9 @@ def apply_to_capabilities(capabilities, readiness, *, account=None):
                        publishingReason=reason or FOUNDER_COPY[readiness.state][0])
     else:
         updated.update(publishingReasonCode="", publishingReason="")
+    if publish_denied and updated["canPublishArticle"]:
+        updated.update(canPublishArticle=False, publishingReasonCode="github_write_required",
+                       publishingReason="Grant repository write access before preparing or publishing articles.")
     return updated
 
 

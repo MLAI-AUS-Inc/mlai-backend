@@ -121,6 +121,7 @@ def set_blocker(connection, entry, present) -> bool:
         locked.blockers = updated
         locked.save(update_fields=["blockers", "updated_at"])
     connection.blockers = updated
+    _record_access_change(connection, f"{'added' if present else 'removed'}:{entry['code']}")
     return True
 
 
@@ -137,7 +138,14 @@ def update_installation(connection, installation_id) -> bool:
         OrganizationContentConfig.objects.filter(website_connection=locked).update(
             github_installation_id=installation_id, updated_at=timezone.now())
     connection.installation_id = installation_id
+    _record_access_change(connection, "installation_updated")
     return True
+
+
+def _record_access_change(connection, change):
+    """Readiness shadow write after an access/identity change (never raises)."""
+    from .website_readiness import shadow
+    shadow(connection, "access_change", detail={"identity": change})
 
 
 def installation_can_see(installation_id, *, repository_id, full_name):

@@ -51,6 +51,9 @@ PIN_FLAG = "ARTICLES_READINESS_PIN_ENABLED"
 NIGHTLY_COMPARE_FLAG = "ARTICLES_READINESS_NIGHTLY_COMPARE_ENABLED"
 COMPARE_ALERTS_PER_DAY = 10
 HELD_STATES = frozenset({"ready", "checking"})
+# A fixing website keeps the push rules (a push queues a verify-only check and
+# never reopens preparation); only ready/checking keep publishing and the age waiver.
+RULE_STATES = HELD_STATES | {"fixing"}
 SOURCE_CHANGED = "repository_source_changed"
 VERIFY_ONLY_TRIGGERS = frozenset({"push_footprint", "manual", "weekly_look", "delivery_failure"})
 ACCESS_CODES = frozenset({"github_access_required", "github_installation_revoked", "github_repository_inaccessible",
@@ -94,6 +97,12 @@ def age_waived(connection) -> bool:
 
 def held_record(connection):
     """The stored readiness row when the rules hold this website (ready/checking with a pin), else None."""
+    row = rules_record(connection)
+    return row if row is not None and row.state in HELD_STATES else None
+
+
+def rules_record(connection):
+    """The stored readiness row when the push rules apply (ready/checking/fixing with a pin), else None."""
     if not enabled_for(connection):
         return None
     from .website_readiness import stored
@@ -102,15 +111,32 @@ def held_record(connection):
     except Exception:  # noqa: BLE001 - no record means today's behaviour
         logger.warning("website_readiness_rules_record_failed connection=%s", connection.pk, exc_info=True)
         return None
-    if row is None or row.state not in HELD_STATES:
+    if row is None or row.state not in RULE_STATES:
         return None
     pin = _mapping(row.pinned_contract)
     return row if pin.get("setupRunId") or pin.get("footprint") else None
 
 
 def holds_prepare(connection) -> bool:
-    """Whether a source change must not reopen preparation (full setup only via explicit actions)."""
-    return held_record(connection) is not None
+    """Whether a source change must not reopen preparation (full setup only via explicit actions).
+
+    Sealed-CI targets keep today's behaviour (preparation re-verifies them),
+    matching :func:`push_plan`.
+    """
+    return rules_record(connection) is not None and not sealed_for(connection)
+
+
+def sealed_for(connection) -> bool:
+    """Whether the connection's default target needs sealed CI proof; True when it cannot be told (today's path)."""
+    try:
+        from .models import OrganizationContentConfig
+        from .website_sealed_workflow import required
+        config = OrganizationContentConfig.objects.filter(website_connection_id=connection.pk).first()
+        target = _default_target(connection, config) if config is not None else None
+        return target is None or bool(required(connection, target))
+    except Exception:  # noqa: BLE001 - unknown means today's behaviour
+        logger.warning("website_readiness_rules_sealed_check_failed connection=%s", getattr(connection, "pk", ""), exc_info=True)
+        return True
 
 
 def is_verify_only(op) -> bool:
@@ -152,7 +178,7 @@ def push_plan(website, config, source_sha, *, owned_merge=False):
     from .website_contract import SHA_PATTERN
     if owned_merge:
         return None
-    row = held_record(website)
+    row = rules_record(website)
     from_sha = str(website.verified_sha or "")
     if row is None or not SHA_PATTERN.fullmatch(from_sha) or not SHA_PATTERN.fullmatch(str(source_sha or "")):
         return None
@@ -163,6 +189,10 @@ def push_plan(website, config, source_sha, *, owned_merge=False):
     footprint = footprint_for(row, config)
     if not footprint:
         return None
+    if row.state == "fixing":
+        # Publishing is already paused: any push is checked, nothing is carried.
+        return {"rule": "footprint", "reason": "record_fixing", "changed": [], "from_sha": from_sha,
+                "footprint": footprint, "target_key": target.target_key}
     from .website_source_carry import compare_sources
     comparison = compare_sources(website, from_sha, source_sha, setup_files=footprint)
     return {**footprint_decision(footprint, comparison), "from_sha": from_sha, "footprint": footprint,
@@ -257,7 +287,8 @@ def queue_verify_only(website, *, trigger, source_sha="", now=None, bucket=""):
     now = now or timezone.now()
     from .website_readiness import stored
     sha = str(source_sha or _check_sha(website, stored(website)))
-    if not SHA_PATTERN.fullmatch(sha):
+    if not SHA_PATTERN.fullmatch(sha) or sealed_for(website):
+        # Sealed-CI targets are re-proven by today's CI path, never by a verify-only check.
         return None, False
     key = f"{website.pk}:readiness-check:{website.generation}:{sha}:{trigger}:{bucket}"
     return _queue(website, sha, trigger=trigger, key=key[:255])
@@ -269,7 +300,7 @@ def request_manual_check(config, *, now=None):
     website = getattr(config, "website_connection", None)
     if website is None or website.state not in {"connected", "paused"}:
         raise WebsiteAuthorityError("website_disconnected", "Connect your website before checking it.")
-    if not enabled_for(website):
+    if not enabled_for(website) or sealed_for(website):
         raise WebsiteAuthorityError("source_reverification_unavailable", "Website checks are not available for this website yet.")
     now = now or timezone.now()
     op, created = queue_verify_only(website, trigger="manual", now=now, bucket=now.strftime("%Y%m%d%H"))
@@ -281,7 +312,8 @@ def request_manual_check(config, *, now=None):
     return op
 
 
-DELIVERY_FAILURE_CODES = frozenset({"website_source_changed", "verified_target_required"})
+DELIVERY_FAILURE_CODES = frozenset({"website_source_changed", "verified_target_required",
+                                    "website_publish_verification_required"})
 
 
 def queue_after_delivery_failure(website, exc):
@@ -289,6 +321,9 @@ def queue_after_delivery_failure(website, exc):
     try:
         codes = {getattr(exc, "code", ""), getattr(exc, "authority_code", "")}
         if website is None or not codes & DELIVERY_FAILURE_CODES or not enabled_for(website):
+            return None
+        if rules_record(website) is None:
+            # Only a website the rules track (pinned, ready/checking/fixing) gets a verify-only check.
             return None
 
         def run():
@@ -408,18 +443,22 @@ def check_build_render(website, row, op, *, source_sha, attempt=0, now=None, pos
     return check, str(_mapping(checks.get("blog_files")).get("status") or "")
 
 
-def verify_outcome(checks) -> str:
+def verify_outcome(checks, *, require_build=False) -> str:
     """``passed`` | ``failed`` | ``unproven`` from the run checks.
 
-    Passed needs blog files in place and either a build at the commit or, when
-    the build could not run, the live blog page answering.
+    Passed needs blog files in place and a build at the commit. Only a check of
+    the already-verified commit (``require_build`` False: manual, weekly or
+    refused-article checks) may stand on the live blog page answering instead,
+    because the live page is still served from the previous deploy after a push.
     """
     statuses = {key: _mapping(value).get("status") for key, value in checks.items()}
     if "failed" in statuses.values():
         return "failed"
     if statuses.get("blog_files") != "passed":
         return "unproven"
-    if statuses.get("build_render") == "passed" or statuses.get("live_page") == "passed":
+    if statuses.get("build_render") == "passed":
+        return "passed"
+    if not require_build and statuses.get("live_page") == "passed":
         return "passed"
     return "unproven"
 
@@ -532,11 +571,18 @@ def process_verify_only(op, attempt, now):
     trigger = op.payload.get("trigger") if op.payload.get("trigger") in VERIFY_ONLY_TRIGGERS else "push_footprint"
     receipt = {**_mapping(op.receipt), "verify_only": True, "repository_modified": False}
     state, outcome, record_state, checks = "pending", "unproven", None, {}
+    # A new commit needs a build there; the live page alone proves only the old deploy.
+    require_build = trigger == "push_footprint" or source_sha != str(website.verified_sha or "")
+    if sealed_for(website):
+        # Sealed-CI targets keep today's CI re-verification; a verify-only check never promotes them.
+        _settle(op, attempt, "cancelled", {**receipt, "status": "cancelled", "code": "source_reverification_unavailable",
+                                           "reason": "sealed_workflow_required", "retryable": False}, now=now)
+        return "cancelled"
     try:
         if website.generation != op.generation or website.state not in {"connected", "paused"}:
             raise WebsiteAuthorityError("website_connection_changed", "The website connection changed.")
         checks = run_checks(website, row, op, source_sha=source_sha, footprint=footprint, attempt=attempt, now=now)
-        outcome = verify_outcome(checks)
+        outcome = verify_outcome(checks, require_build=require_build)
     except WebsiteAuthorityError as exc:
         codes = {exc.code, exc.authority_code}
         if "website_source_changed" in codes:
@@ -562,7 +608,8 @@ def process_verify_only(op, attempt, now):
         _settle(op, attempt, "pending", {**receipt, "status": "verification_pending"}, now=now)
         return "pending"
     if outcome == "passed":
-        state, record_state, result = "completed", "ready", "passed"
+        # The record derives from the promoted facts, so it never claims more than they prove.
+        state, record_state, result = "completed", None, "passed"
         receipt.update(status="verified", method="verify_only", source_sha=source_sha)
     else:
         state, result = "needs_attention", "failed"
@@ -574,7 +621,8 @@ def process_verify_only(op, attempt, now):
         _alert(website, op, checks)
     try:
         record(website, trigger=trigger, source_sha=source_sha, checks=checks, result=result, state=record_state,
-               detail={"operation_id": str(op.pk), "outcome": outcome, "verify_only": True}, now=now)
+               detail={"operation_id": str(op.pk), "outcome": outcome, "verify_only": True,
+                    "require_build": require_build}, now=now)
     except Exception:  # noqa: BLE001 - the operation outcome is already saved
         logger.warning("website_readiness_verify_only_record_failed operation=%s", op.pk, exc_info=True)
     return state
@@ -629,8 +677,7 @@ def run_weekly_look_sweep(now=None, limit=None) -> dict:
     if not cache.add(LOOK_THROTTLE_KEY, now.isoformat(), LOOK_THROTTLE_SECONDS):
         return {"skipped": "throttled"}
     counts = {"looked": 0, "failed": 0, "queued": 0, "skipped": 0}
-    rows = (WebsiteReadiness.objects.select_related("connection__organization")
-            .filter(state="ready", connection__state="connected").order_by("updated_at"))
+    rows = _look_candidates(WebsiteReadiness.objects.select_related("connection__organization"))
     for row in rows[: (limit or SWEEP_LIMIT) * 4]:
         if counts["looked"] >= (limit or SWEEP_LIMIT):
             break
@@ -643,6 +690,25 @@ def run_weekly_look_sweep(now=None, limit=None) -> dict:
         except Exception:  # noqa: BLE001 - one site must not stop the sweep
             logger.warning("website_readiness_weekly_look_failed connection=%s", website.pk, exc_info=True)
     return counts
+
+
+def _look_candidates(rows):
+    """Ready, current-generation records of enabled domains only, least recently written first.
+
+    Filtering before the window keeps rows the rules skip (other domains, an
+    old generation) from holding the front of it for good.
+    """
+    from functools import reduce
+    from operator import or_
+
+    from django.db.models import F, Q
+    from .website_readiness import _domains
+    domains = sorted(_domains())
+    if not domains:
+        return rows.none()
+    scope = reduce(or_, (Q(connection__organization__domain__iexact=domain) for domain in domains))
+    return (rows.filter(scope, state="ready", connection__state="connected", generation=F("connection__generation"))
+            .order_by("updated_at", "pk"))
 
 
 def _look_once(website, row, *, now, counts):
@@ -678,7 +744,8 @@ def setup_pin(connection, *, fresh=False):
             return {}
         row = stored(connection)
         pin = _mapping(getattr(row, "pinned_contract", None))
-        if not pin.get("setupRunId"):
+        if not pin.get("setupRunId") or pin.get("generation") not in (None, connection.generation):
+            # A pin from another connection generation (reset, reconnect) is never replayed.
             return {}
         values = {"pinned_setup_run_id": str(pin["setupRunId"])}
         rung = STRATEGY_FOR_MODE.get(str(pin.get("adapterMode") or ""))

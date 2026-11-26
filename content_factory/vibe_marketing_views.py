@@ -901,9 +901,39 @@ def _validate_article_start_reservation(context, payload, *, require_website=Fal
     # publishing proof can be recorded meanwhile without changing the website
     # generation, so recheck its stored authority before spending or dispatching.
     from .activation import durable_integration_evidence
-    if not durable_integration_evidence(config, website).get("verified"):
+    if (not durable_integration_evidence(config, website).get("verified")
+            and not _readiness_allows_draft_start(context.organization, website, payload)):
         raise WebsiteAuthorityError("website_publish_verification_required",
             "Verify the current articles integration before starting this article.")
+
+
+def _readiness_allows_draft_start(organization, website, payload):
+    """With ARTICLES_READINESS_READS_ENABLED for the organisation, a draft start stands on the stored record.
+
+    The start gate already answers ``canGenerateArticle`` from the record's
+    ``can_draft`` (ready, checking, fixing); this keeps the reservation re-check
+    in step for review drafts. A ``publish_code`` start keeps today's proof.
+    """
+    if payload.get("delivery_mode") == "publish_code":
+        return False
+    from .website_readiness import readiness_enabled, stored
+    if not readiness_enabled("reads", organization):
+        return False
+    row = stored(website)
+    return bool(row is not None and row.can_draft and row.verified_sha == website.verified_sha)
+
+
+def _queue_readiness_recheck_after_refusal(context, exc):
+    """An article start refused for its website proof queues one verify-only check (never raises)."""
+    if not isinstance(exc, WebsiteAuthorityError):
+        return
+    try:
+        website = getattr(_get_config(context.organization), "website_connection", None)
+        from .website_readiness_rules import queue_after_delivery_failure
+        queue_after_delivery_failure(website, exc)
+    except Exception:  # noqa: BLE001 - the refusal answer stands
+        logger.warning("website_readiness_refusal_recheck_failed organization=%s",
+                       getattr(context.organization, "pk", None), exc_info=True)
 
 
 class _FreeArticleUnavailable(Exception):
@@ -1083,6 +1113,9 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
         )
 
     except (ArticleGenerationError, WebsiteAuthorityError) as exc:
+        # The reservation re-check refuses inside the rolled-back transaction;
+        # its verify-only check is queued here, after the rollback.
+        _queue_readiness_recheck_after_refusal(context, exc)
         return None, None, None, Response({"detail": str(exc), "code": getattr(exc, "code", "company_billing_founder_unavailable")}, status=409)
 
     return charged_user, charge_ledger, article_request, None
@@ -13528,7 +13561,8 @@ def _article_capabilities_for_context(context, config, *, latest_runs=None, forc
     capabilities = article_capabilities(config, domain=context.organization.domain, user=user, account=account,
                                         evidence=evidence, repository_access=access,
                                         first_article=entitlement_state(context.organization, user, config=config))
-    return apply_to_capabilities(capabilities, readiness, account=account) if readiness is not None else capabilities
+    return (apply_to_capabilities(capabilities, readiness, account=account, repository_access=access)
+            if readiness is not None else capabilities)
 
 
 def _setup_blocked_response_for_generation(context, config, *, run=None, publishing=False, request_data=None):
