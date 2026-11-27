@@ -107,6 +107,39 @@ class SetupMergeProofTests(SetupMergeFixture, TestCase):
         self.run.save(update_fields=["result"])
         self.assertEqual(self.dispatch()["status"], "completed")
 
+    def test_an_unlinked_preparation_adopts_the_setup_that_merged_the_observed_head(self):
+        """TalaThrive, 27 Nov: the push arrived before the run recorded its merge."""
+        self.op.receipt = {"setup_run_id": "older-failed-setup"}
+        self.op.save(update_fields=["receipt"])
+        self.assertEqual(self.dispatch()["status"], "completed")
+        self.op.refresh_from_db()
+        self.website.refresh_from_db()
+        self.assertEqual(self.op.receipt["merged_setup_run_id"], "setup-1")
+        self.assertEqual(self.op.receipt["setup_run_id"], "older-failed-setup")
+        self.assertEqual(self.website.verified_sha, MERGED)
+
+    def test_an_unlinked_preparation_never_adopts_a_setup_that_merged_another_commit(self):
+        self.op.receipt = {}
+        self.op.save(update_fields=["receipt"])
+        self.run.result["merge_sha"] = "e" * 40
+        self.run.save(update_fields=["result"])
+        with self.assertRaises(WebsiteAuthorityError):
+            self.dispatch()
+        self.op.refresh_from_db()
+        self.assertNotIn("merged_setup_run_id", self.op.receipt)
+        self.assert_withheld()
+
+    def test_an_unlinked_preparation_never_adopts_an_unapproved_setup(self):
+        self.op.receipt = {}
+        self.op.save(update_fields=["receipt"])
+        self.run.approval_state = "pending"
+        self.run.save(update_fields=["approval_state"])
+        with self.assertRaises(WebsiteAuthorityError):
+            self.dispatch()
+        self.op.refresh_from_db()
+        self.assertNotIn("merged_setup_run_id", self.op.receipt)
+        self.assert_withheld()
+
     def test_a_contradictory_merge_receipt_or_sealed_setup_contract_is_refused(self):
         receipt = self.run.result["merge_response"]
         receipt["pull"]["head_sha"] = BASE

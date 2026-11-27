@@ -61,6 +61,36 @@ def _reviewed_target(run, website, selected_key):
     return head, merge, contract
 
 
+def _adopt_merged_setup(op, website, source):
+    """Link this preparation to MLAI's own setup merge at the observed head, once.
+
+    A push webhook can arrive before the setup run records its merge commit.
+    The push is then treated as an outside change and preparation is never
+    told which setup merged (TalaThrive, 27 Nov 2026: setup run 78773166 was
+    approved and merged as ff9b37b5, but its preparation stayed on "Waiting for
+    articles build and render proof"). This uses only the saved-merge rule of
+    ``website_reconciliation._find_owned_merge``: an approved, completed setup
+    run of this connection generation that recorded ``source`` as its merge
+    commit. The link is saved on the running preparation before any proof is
+    carried, so the locked re-check below sees it.
+    """
+    from .website_models import WebsiteConnectionOperation
+    run = (ContentFactoryRun.objects.filter(organization_id=website.organization_id,
+        github_repo__iexact=website.github_repo, workflow="article_system_setup", status="completed",
+        approval_state="approved", run_request__website_connection_id=str(website.pk),
+        run_request__connection_generation=website.generation, result__merge_status="merged",
+        result__merge_sha=source).order_by("-updated_at").first())
+    if run is None:
+        return ""
+    receipt = {**mapping(op.receipt), "merged_setup_run_id": run.run_id}
+    linked = WebsiteConnectionOperation.objects.filter(pk=op.pk, action="prepare", state="running",
+        attempts=op.attempts, generation=website.generation).update(receipt=receipt)
+    if linked != 1:
+        return ""
+    op.receipt = receipt
+    return run.run_id
+
+
 def carry_setup_merge_proof(op, config, target):
     """Prepare a build-proven target. The live verifier owns connection readiness."""
     website = config.website_connection
@@ -71,7 +101,7 @@ def carry_setup_merge_proof(op, config, target):
     source = observed_source_sha(website)
     if not source or (target and target.source_sha == source and live.build_proof(target)):
         return target
-    run_id = op.receipt.get("merged_setup_run_id")
+    run_id = op.receipt.get("merged_setup_run_id") or _adopt_merged_setup(op, website, source)
     runs = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=website.organization_id,
         workflow="article_system_setup", status="completed", approval_state="approved",
         run_request__website_connection_id=str(website.pk), run_request__connection_generation=website.generation)

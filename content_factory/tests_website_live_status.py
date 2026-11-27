@@ -307,7 +307,7 @@ class PrepareDeadlineTests(MergedLegacySite, TestCase):
         from . import website_prepare
         from .website_live_verification import selected
         self.assertTrue(selected(self.built.organization))
-        op = SimpleNamespace(receipt={}, pk="op")
+        op = SimpleNamespace(receipt={}, pk="op", generation=self.config.website_connection.generation)
         context = SimpleNamespace(organization=self.built.organization, company=self.built.company)
         with patch("content_factory.website_verification.current_ci_attestation", return_value=None), \
                 patch("content_factory.website_verification.discover_source_attestation") as discover, self.not_deployed():
