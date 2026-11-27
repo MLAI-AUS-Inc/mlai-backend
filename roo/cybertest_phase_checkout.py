@@ -18,7 +18,7 @@ def lock_upgrade_parent(intent, *, test_mode, checkout_id):
     if (parent.id == checkout._uuid(checkout_id) or not snapshot or snapshot.get('phase') != 'basic'
             or parent.status != 'started' or parent.test_mode != test_mode
             or not parent.settlement or parent.settlement.get('delivery', {}).get('minimumMet') is not True
-            or parent.settlement.get('charge_microroo') != 24_000_000
+            or parent.settlement.get('charge_microroo') != parent.points*1_000_000
             or parent.user_id is None or str(parent.user_id) != intent.get('mlai_user_id')):
         raise CheckoutError('UPGRADE_UNAVAILABLE', 'A delivered basic scan from this payer is required.')
     original = {k: v for k, v in parent.binding.items() if k != 'purchase'}
@@ -43,7 +43,7 @@ def settle_delivery(checkout_id, audit_id, evidence, costs):
     if not row.phase_contract or row.dispatched_at is None or row.status not in ('started', 'refunded'):
         raise CheckoutError('SETTLEMENT_REVIEW_REQUIRED', 'A dispatched phased scan is required.')
     result = delivery_settlement(row.phase_contract, evidence, str(row.audit_id),
-                                 row.pricing_snapshot, costs, existing=row.settlement)
+                                 row.pricing_snapshot, costs, existing=row.settlement, points=row.points)
     if row.settlement is not None:
         return checkout.receipt_status(row)
     if not row.test_mode and not checkout.is_sponsored(row) and result['refund_microroo']:

@@ -82,16 +82,26 @@ def _unexpired(row):
         raise CheckoutError('QUOTE_EXPIRED','The price confirmation expired. Request a new quote.')
 
 
+def receipt_price(row):
+    """What this receipt costs: its own saved points, plus the basic check it
+    builds on for an upgrade, so a price change never rewrites a receipt."""
+    if row.phase_contract and row.phase_contract.get('phase') == 'upgrade':
+        parent = row.parent_checkout
+        base = parent.points if parent is not None else phase_price(row.phase_contract)['totalPoints'] - row.points
+        return {'totalPoints': base + row.points, 'duePoints': row.points}
+    return {'totalPoints': row.points, 'duePoints': row.points}
+
+
 def receipt_status(row, *, include_plan=False):
     from .cybertest_plan import public_purchase_scope
     return {'checkout_id':str(row.id),'status':row.status,'points':row.points,
         'test_mode':row.test_mode,'sponsored':is_sponsored(row),'due_points':0 if is_sponsored(row) else row.points,'pricing_snapshot':row.pricing_snapshot,'settlement':row.settlement,'binding':row.binding,'binding_sha256':row.binding_sha256,
         'expires_at':row.expires_at.isoformat(),'audit_id':str(row.audit_id) if row.audit_id else None,
         'phase_contract':purchase_contract(row.phase_contract) if row.phase_contract else {},
-        'purchase_scope':public_purchase_scope(row.phase_contract),
+        'purchase_scope':public_purchase_scope(row.phase_contract, price=receipt_price(row)) if row.phase_contract else None,
         **({'execution_plan':row.phase_contract.get('executionPlan')} if include_plan and row.phase_contract else {}),
         'parent_checkout_id':str(row.parent_checkout_id) if row.parent_checkout_id else None,
-        'total_points':phase_price(row.phase_contract)['totalPoints'] if row.phase_contract else row.points}
+        'total_points':receipt_price(row)['totalPoints']}
 
 
 def status(checkout_id):

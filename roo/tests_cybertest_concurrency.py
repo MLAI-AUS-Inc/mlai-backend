@@ -66,17 +66,17 @@ class PhaseConcurrencyTests(TransactionTestCase):
         self.assertEqual([r[0] for r in results].count('ok'), 1)
         self.assertIn(('rejected', 'UPGRADE_EXISTS'), results)
         self.assertEqual(CybertestCheckout.objects.filter(parent_checkout_id=parent).count(), 1)
-        self.assertEqual(checkout.balance(self.user, test_mode=False), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=False), 990)
 
     def test_concurrent_charge_and_dispatch_do_not_spend_or_start_twice(self):
         quote, audit, token = uuid.uuid4(), uuid.uuid4(), secrets.token_urlsafe(32)
         intent = self.purchase(basic())
         checkout.create_quote(quote, token, intent, execution_plan=plan())
-        checkout.confirm(quote, token, self.user, expected_points=24)
+        checkout.confirm(quote, token, self.user, expected_points=10)
         results = self.race(lambda: checkout.charge(quote, audit, intent))
         self.assertTrue(all(kind == 'ok' for kind, _ in results))
         self.assertEqual(Ledger.objects.filter(kind='SPEND').count(), 1)
-        self.assertEqual(checkout.balance(self.user, test_mode=False), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=False), 990)
         dispatches = self.race(lambda: checkout.start_dispatch(quote, audit))
         self.assertEqual(sum(bool(data['dispatch_allowed']) for kind, data in dispatches if kind == 'ok'), 1)
 
@@ -89,5 +89,5 @@ class PhaseConcurrencyTests(TransactionTestCase):
         self.assertTrue(all(kind == 'ok' for kind, _ in results))
         self.assertEqual(results[0][1], results[1][1])
         self.assertEqual(Ledger.objects.filter(kind='REFUND').count(), 1)
-        self.assertEqual(checkout.balance(self.user, test_mode=False), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=False), 990)
         self.assertIsNone(CybertestCheckout.objects.get(pk=parent).refund_ledger_id)
