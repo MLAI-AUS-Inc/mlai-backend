@@ -988,6 +988,17 @@ JSON. Slack timeline images use an uncropped `thumb_1024` (or the next available
 is checked before either cache; account/workspace scopes and rendition keys remain
 separate. No Slack credential or private download URL is returned to clients.
 
+### Public link preview fetch budget (November 2026)
+
+Public (non-Slack) page and image previews are cached server-side by normalised
+URL for six hours. Each fetch has a whole-request deadline across redirects and
+the body (8 s for a page, 10 s for an image) on top of the 3 s connect and 5 s
+read timeouts per hop. A page read stops once `</head>` has arrived, so
+metadata in the document body is not used. A failure that a retry cannot fix
+(not an HTML page, over the size cap, or an unsupported image type) is cached
+for 30 minutes; other failures stay at 60 seconds. DNS and public-network
+validation still run before every cache read.
+
 ### Slack file previews, playback and downloads (November 2026)
 
 For a Slack file the member can see, `link-preview/` adds `file_kind` (`image`,

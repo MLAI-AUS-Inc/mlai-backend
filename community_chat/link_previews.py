@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import socket
+import threading
+import time
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
@@ -19,10 +21,29 @@ MAX_REDIRECTS = 3
 REQUEST_TIMEOUT = (3, 5)
 USER_AGENT = "MLAI Chat link preview/1.0"
 FAILURE_CACHE_SECONDS = 60
+# A failure that a retry cannot fix (not a page, too large, unsupported image
+# type) is remembered longer, so mounted rows stop refetching a PDF or video.
+DETERMINISTIC_FAILURE_CACHE_SECONDS = 30 * 60
+SUCCESS_CACHE_SECONDS = 6 * 60 * 60
+# Whole-fetch budgets across redirects and slow-drip bodies. A single page hop
+# keeps its previous 3 s connect + 5 s read allowance.
+PAGE_DEADLINE_SECONDS = 8
+IMAGE_DEADLINE_SECONDS = 10
+HEAD_END_MARKER = b"</head>"
 
 
 class LinkPreviewError(ValueError):
     """A public-safe link preview validation or retrieval failure."""
+
+
+class _LastingLinkPreviewError(LinkPreviewError):
+    """A failure the same URL will repeat, so its miss is cached longer."""
+
+
+def _failure_cache_seconds(error: LinkPreviewError) -> int:
+    if isinstance(error, _LastingLinkPreviewError):
+        return DETERMINISTIC_FAILURE_CACHE_SECONDS
+    return FAILURE_CACHE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -55,12 +76,12 @@ def fetch_link_preview(raw_url: str) -> LinkPreview:
         raise LinkPreviewError("The link preview is temporarily unavailable.")
     try:
         preview = _fetch_link_preview_uncached(normalized_url)
-    except LinkPreviewError:
+    except LinkPreviewError as exc:
         # Store no exception, URL contents or provider response. A short shared
         # miss prevents every mounted row/device from repeating a slow fetch.
-        cache.set(cache_key + ":failure", True, timeout=FAILURE_CACHE_SECONDS)
+        cache.set(cache_key + ":failure", True, timeout=_failure_cache_seconds(exc))
         raise
-    cache.set(cache_key, preview.as_payload(), timeout=6 * 60 * 60)
+    cache.set(cache_key, preview.as_payload(), timeout=SUCCESS_CACHE_SECONDS)
     return preview
 
 
@@ -69,9 +90,11 @@ def _fetch_link_preview_uncached(normalized_url: str) -> LinkPreview:
         normalized_url,
         accept="text/html,application/xhtml+xml;q=0.9",
         maximum_bytes=HTML_LIMIT_BYTES,
+        deadline_seconds=PAGE_DEADLINE_SECONDS,
+        stop_after=HEAD_END_MARKER,
     )
     if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
-        raise LinkPreviewError("The link did not return an HTML page.")
+        raise _LastingLinkPreviewError("The link did not return an HTML page.")
 
     soup = BeautifulSoup(body, "lxml")
     title = _meta_content(soup, "property", "og:title") or _meta_content(
@@ -114,13 +137,13 @@ def fetch_preview_image(raw_url: str) -> tuple[str, bytes]:
         raise LinkPreviewError("The preview image is temporarily unavailable.")
     try:
         normalized_type, body = _fetch_preview_image_uncached(normalized_url)
-    except LinkPreviewError:
-        cache.set(cache_key + ":failure", True, timeout=FAILURE_CACHE_SECONDS)
+    except LinkPreviewError as exc:
+        cache.set(cache_key + ":failure", True, timeout=_failure_cache_seconds(exc))
         raise
     cache.set(
         cache_key,
         {"body": body, "content_type": normalized_type},
-        timeout=6 * 60 * 60,
+        timeout=SUCCESS_CACHE_SECONDS,
     )
     return normalized_type, body
 
@@ -130,6 +153,7 @@ def _fetch_preview_image_uncached(normalized_url: str) -> tuple[str, bytes]:
         normalized_url,
         accept="image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.8",
         maximum_bytes=IMAGE_LIMIT_BYTES,
+        deadline_seconds=IMAGE_DEADLINE_SECONDS,
     )
     normalized_type = content_type.split(";", 1)[0].strip().lower()
     if normalized_type not in {
@@ -139,8 +163,30 @@ def _fetch_preview_image_uncached(normalized_url: str) -> tuple[str, bytes]:
         "image/png",
         "image/webp",
     }:
-        raise LinkPreviewError("The preview image used an unsupported content type.")
+        raise _LastingLinkPreviewError("The preview image used an unsupported content type.")
     return normalized_type, body
+
+
+def _remaining_timeout(deadline: float) -> tuple[float, float]:
+    """Cap each hop's connect/read timeouts by what is left of the whole fetch."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise LinkPreviewError("The link took too long to respond.")
+    connect, read = REQUEST_TIMEOUT
+    if remaining >= max(connect, read):
+        return REQUEST_TIMEOUT
+    return (min(connect, remaining), min(read, remaining))
+
+
+def _expire_response(response, expired: threading.Event) -> None:
+    """Mark the fetch as over its deadline and unblock any pending body read."""
+    expired.set()
+    shutdown = getattr(getattr(response, "raw", None), "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown()
+        except OSError:
+            pass
 
 
 def _fetch_limited(
@@ -148,19 +194,28 @@ def _fetch_limited(
     *,
     accept: str,
     maximum_bytes: int,
+    deadline_seconds: float = PAGE_DEADLINE_SECONDS,
+    stop_after: bytes = b"",
 ) -> tuple[str, str, bytes]:
+    """Fetch one public URL within a byte cap and a whole-fetch deadline.
+
+    ``stop_after`` ends the download once that (lower-case) marker has been
+    received, so a page preview reads its ``<head>`` and not the whole body.
+    """
+    deadline = time.monotonic() + deadline_seconds
     session = requests.Session()
     session.trust_env = False
     current_url = raw_url
     for redirect_count in range(MAX_REDIRECTS + 1):
         current_url = _validated_public_url(current_url)
+        timeout = _remaining_timeout(deadline)
         try:
             response = session.get(
                 current_url,
                 allow_redirects=False,
                 headers={"Accept": accept, "User-Agent": USER_AGENT},
                 stream=True,
-                timeout=REQUEST_TIMEOUT,
+                timeout=timeout,
             )
         except requests.RequestException as exc:
             raise LinkPreviewError("The link could not be reached.") from exc
@@ -172,28 +227,57 @@ def _fetch_limited(
                 raise LinkPreviewError("The link redirected too many times.")
             current_url = urljoin(current_url, location)
             continue
+        # Socket timeouts bound each read, not the whole body: a server that
+        # drips a byte every few seconds would otherwise hold the worker
+        # indefinitely inside a single chunk read. Shut the socket down at the
+        # deadline so the blocked read returns.
+        expired = threading.Event()
+        watchdog = threading.Timer(
+            max(0.0, deadline - time.monotonic()),
+            _expire_response,
+            args=(response, expired),
+        )
+        watchdog.daemon = True
+        watchdog.start()
         try:
             response.raise_for_status()
             declared_length = int(response.headers.get("Content-Length") or 0)
             if declared_length > maximum_bytes:
-                raise LinkPreviewError("The preview response was too large.")
+                raise _LastingLinkPreviewError("The preview response was too large.")
             chunks = []
             size = 0
+            tail = b""
             for chunk in response.iter_content(chunk_size=16 * 1024):
                 if not chunk:
                     continue
                 size += len(chunk)
                 if size > maximum_bytes:
-                    raise LinkPreviewError("The preview response was too large.")
+                    raise _LastingLinkPreviewError("The preview response was too large.")
                 chunks.append(chunk)
+                if stop_after:
+                    # Keep a marker-sized tail so a marker split across
+                    # chunks is still found.
+                    window = (tail + chunk).lower()
+                    if stop_after in window:
+                        break
+                    tail = window[-len(stop_after):]
+                if expired.is_set() or time.monotonic() > deadline:
+                    raise LinkPreviewError("The link took too long to respond.")
+            if expired.is_set():
+                # A shut-down socket can end an unsized body early; never
+                # treat that partial body as a complete page or image.
+                raise LinkPreviewError("The link took too long to respond.")
             return (
                 current_url,
                 str(response.headers.get("Content-Type") or "").lower(),
                 b"".join(chunks),
             )
         except requests.RequestException as exc:
+            if expired.is_set():
+                raise LinkPreviewError("The link took too long to respond.") from exc
             raise LinkPreviewError("The link returned an unsuccessful response.") from exc
         finally:
+            watchdog.cancel()
             response.close()
     raise LinkPreviewError("The link redirected too many times.")
 

@@ -117,3 +117,161 @@ class SlackPreviewFailureTests(SimpleTestCase):
             with self.assertRaisesMessage(slack.SlackFilePreviewError, "revoked"):
                 slack.fetch_slack_file_image("F123", user="owner")
             self.assertEqual(fetch.call_count, 2)
+
+
+class _SlowResponse:
+    """A streamed HTML response whose chunks are produced on demand."""
+
+    def __init__(self, chunks, content_type="text/html; charset=utf-8"):
+        self.chunks = chunks
+        self.headers = {"Content-Type": content_type}
+        self.is_redirect = False
+        self.is_permanent_redirect = False
+        self.read_count = 0
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        del chunk_size
+        for chunk in self.chunks:
+            self.read_count += 1
+            if isinstance(chunk, Exception):
+                raise chunk
+            yield chunk
+
+    def close(self):
+        return None
+
+
+class PublicPreviewSpeedTests(SimpleTestCase):
+    def setUp(self):
+        cache.clear()
+        self.dns = patch.object(public.socket, "getaddrinfo", return_value=[
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+        ])
+        self.dns.start()
+        self.addCleanup(self.dns.stop)
+        self.addCleanup(cache.clear)
+
+    def test_deterministic_failures_are_remembered_longer_than_transient_ones(self):
+        with (
+            patch("time.time", return_value=1000) as clock,
+            patch.object(public, "_fetch_limited", return_value=(
+                "https://example.com/report.pdf", "application/pdf", b"%PDF",
+            )) as fetch,
+        ):
+            with self.assertRaisesMessage(public.LinkPreviewError, "did not return an HTML page"):
+                public.fetch_link_preview("https://example.com/report.pdf")
+            clock.return_value = 1000 + public.FAILURE_CACHE_SECONDS + 1
+            with self.assertRaisesMessage(public.LinkPreviewError, "temporarily unavailable"):
+                public.fetch_link_preview("https://example.com/report.pdf")
+            self.assertEqual(fetch.call_count, 1)
+            clock.return_value = 1000 + public.DETERMINISTIC_FAILURE_CACHE_SECONDS + 1
+            with self.assertRaisesMessage(public.LinkPreviewError, "did not return an HTML page"):
+                public.fetch_link_preview("https://example.com/report.pdf")
+            self.assertEqual(fetch.call_count, 2)
+
+    def test_unsupported_image_type_is_remembered_longer(self):
+        with (
+            patch("time.time", return_value=1000) as clock,
+            patch.object(public, "_fetch_limited", return_value=(
+                "https://example.com/a.svg", "image/svg+xml", b"<svg/>",
+            )) as fetch,
+        ):
+            for offset in (0, public.FAILURE_CACHE_SECONDS + 1):
+                clock.return_value = 1000 + offset
+                with self.assertRaises(public.LinkPreviewError):
+                    public.fetch_preview_image("https://example.com/a.svg")
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_page_read_stops_after_the_document_head(self):
+        response = _SlowResponse([
+            b"<html><head><title>Fast</title>",
+            b"<meta property='og:description' content='Head only'></he",
+            b"ad><body>",
+            AssertionError("the body must not be downloaded"),
+        ])
+        with patch.object(public.requests.Session, "get", return_value=response):
+            preview = public.fetch_link_preview("https://example.com/")
+        self.assertEqual(preview.title, "Fast")
+        self.assertEqual(preview.description, "Head only")
+        self.assertEqual(response.read_count, 3)
+
+    def test_image_read_is_not_cut_at_a_head_marker(self):
+        body = b"GIF89a</head>" + b"x" * 10
+        response = _SlowResponse([body[:8], body[8:]], content_type="image/gif")
+        with patch.object(public.requests.Session, "get", return_value=response):
+            content_type, image = public.fetch_preview_image("https://example.com/a.gif")
+        self.assertEqual((content_type, image), ("image/gif", body))
+
+    def test_slow_drip_page_is_cut_off_at_the_total_deadline(self):
+        clock = iter([0.0, 0.0, 1.0, public.PAGE_DEADLINE_SECONDS + 0.5, 99.0, 99.0])
+        response = _SlowResponse([b"<html>", b"<p>", b"<p>", b"<p>"])
+        with (
+            patch.object(public.time, "monotonic", side_effect=lambda: next(clock)),
+            patch.object(public.requests.Session, "get", return_value=response),
+        ):
+            with self.assertRaisesMessage(public.LinkPreviewError, "took too long"):
+                public.fetch_link_preview("https://example.com/slow")
+        self.assertLess(response.read_count, 4)
+
+    def test_each_request_timeout_is_capped_by_the_remaining_deadline(self):
+        redirect = _SlowResponse([])
+        redirect.is_redirect = True
+        redirect.headers = {"Location": "https://example.com/next"}
+        final = _SlowResponse([b"<title>Done</title></head>"])
+        clock = iter([0.0, 0.0, public.PAGE_DEADLINE_SECONDS - 1.5] + [public.PAGE_DEADLINE_SECONDS - 1.0] * 5)
+        with (
+            patch.object(public.time, "monotonic", side_effect=lambda: next(clock)),
+            patch.object(public.requests.Session, "get", side_effect=[redirect, final]) as get,
+        ):
+            self.assertEqual(public.fetch_link_preview("https://example.com/").title, "Done")
+        self.assertEqual(get.call_args_list[0].kwargs["timeout"], public.REQUEST_TIMEOUT)
+        connect, read = get.call_args_list[1].kwargs["timeout"]
+        self.assertLessEqual(connect, 1.5)
+        self.assertLessEqual(read, 1.5)
+
+    def test_deadline_already_spent_before_a_redirect_hop_fails_without_a_request(self):
+        redirect = _SlowResponse([])
+        redirect.is_redirect = True
+        redirect.headers = {"Location": "https://example.com/next"}
+        clock = iter([0.0, 0.0, public.PAGE_DEADLINE_SECONDS + 1, 99.0])
+        with (
+            patch.object(public.time, "monotonic", side_effect=lambda: next(clock)),
+            patch.object(public.requests.Session, "get", side_effect=[redirect]) as get,
+        ):
+            with self.assertRaisesMessage(public.LinkPreviewError, "took too long"):
+                public.fetch_link_preview("https://example.com/")
+        self.assertEqual(get.call_count, 1)
+
+    def test_a_read_blocked_inside_one_chunk_is_unblocked_at_the_deadline(self):
+        # A socket read timeout bounds each recv, not a 16 KiB chunk read, so a
+        # server dripping one byte at a time must be cut off by the watchdog.
+        import threading
+
+        unblocked = threading.Event()
+
+        class _Raw:
+            def shutdown(self):
+                unblocked.set()
+
+        class _BlockedResponse(_SlowResponse):
+            raw = _Raw()
+
+            def iter_content(self, chunk_size):
+                del chunk_size
+                yield b"<html><head>"
+                if not unblocked.wait(timeout=5):
+                    raise AssertionError("the deadline did not unblock the read")
+                # An unsized body ends cleanly once its socket is shut down.
+                yield b"<title>Partial</title>"
+
+        response = _BlockedResponse([])
+        with (
+            patch.object(public, "PAGE_DEADLINE_SECONDS", 0.2),
+            patch.object(public.requests.Session, "get", return_value=response),
+        ):
+            with self.assertRaisesMessage(public.LinkPreviewError, "took too long"):
+                public.fetch_link_preview("https://example.com/drip")
+        self.assertTrue(unblocked.is_set())
