@@ -681,6 +681,7 @@ jobs:
           community_chat.tests.test_home \
           community_chat.tests.test_roo_slack_dm \
           community_chat.tests.test_slack_agent_bots \
+          community_chat.tests.test_private_roo_command \
           community_chat.tests.test_roo_channel_mentions \
           community_chat.tests.test_slack_mentions \
           community_chat.tests.test_workspace_mentions_unit \

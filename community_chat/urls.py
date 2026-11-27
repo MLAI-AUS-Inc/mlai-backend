@@ -1,3 +1,4 @@
+from .roo_command import RooCommandView
 from .roo_points_views import RooPointsMuteView
 from .slack_emoji_views import SlackEmojiDirectoryView
 from django.urls import include, path
@@ -160,6 +161,7 @@ urlpatterns = [
     path("mentor/admin/mentors/<int:profile_id>/pause/", MentoringAdminMentorPauseView.as_view(), name="community_chat_mentor_admin_mentor_pause"),
     path("mentor/admin/mentors/<int:profile_id>/unpause/", MentoringAdminMentorUnpauseView.as_view(), name="community_chat_mentor_admin_mentor_unpause"),
     path("mentor/admin/sessions/", MentoringAdminSessionsView.as_view(), name="community_chat_mentor_admin_sessions"),
+    path("roo/command/", RooCommandView.as_view(), name="community_chat_roo_command"),
     path("roo-avatar/", RooAvatarView.as_view(), name="community_chat_roo_avatar"),
     path("event-discounts/events/<str:event_id>/", MemberPerksView.as_view(), name="community_chat_member_perks"),
     path("event-discounts/", MyEventDiscountsView.as_view(), name="community_chat_event_discounts"),

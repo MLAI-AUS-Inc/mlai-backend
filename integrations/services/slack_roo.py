@@ -6,6 +6,17 @@ from urllib.parse import urlparse
 from django.conf import settings
 
 
+def public_roo_endpoint(path):
+    """Return the configured internal Public Roo endpoint and service credential."""
+    base = str(getattr(settings, "ROO_SERVICE_URL", "") or "").rstrip("/")
+    key = str(getattr(settings, "ROO_INTERNAL_MENTION_API_KEY", "") or "").strip()
+    parsed = urlparse(base)
+    if (not key or parsed.scheme not in {"https", "http"} or not parsed.hostname
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        return None
+    return base + path, key
+
+
 def public_roo_target():
     """Return the operator-configured MLAI Slack identity, never a name match."""
     workspace = str(

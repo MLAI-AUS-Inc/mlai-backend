@@ -3,7 +3,6 @@
 from contextlib import contextmanager
 from datetime import datetime
 import re
-from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
@@ -14,6 +13,7 @@ from django.db import transaction
 
 from community_chat.privacy import has_ai_consent
 from integrations.models import CommunityBridgeChannel, CommunityBridgeIdentityLink
+from integrations.services.slack_roo import public_roo_endpoint
 from .identity import verified_identity_for_buzz
 
 COWORKING_CHANNEL_ID = "b2566a10-c26c-5bae-a362-051254af85ea"
@@ -25,14 +25,7 @@ class CoworkingHandoffError(RuntimeError):
 
 
 def _configuration():
-    url = str(getattr(settings, "ROO_SERVICE_URL", "") or "").rstrip("/")
-    key = str(getattr(settings, "ROO_INTERNAL_MENTION_API_KEY", "") or "").strip()
-    parsed = urlparse(url)
-    if (parsed.scheme not in {"https", "http"} or not parsed.hostname
-            or parsed.username or parsed.password or parsed.query or parsed.fragment
-            or not key):
-        return None
-    return url + "/api/mention", key
+    return public_roo_endpoint("/api/mention")
 
 
 def coworking_booking_available(user):
