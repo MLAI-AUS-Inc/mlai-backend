@@ -1279,6 +1279,7 @@ jobs:
           content_factory.tests_service_config \
           content_factory.tests_vibe_marketing_topic_selection \
           content_factory.tests_website_baseline_serialization \
+          content_factory.tests_website_content_files_fence \
           core.tests.test_admin_user_creation \
           core.tests.test_password_readiness \
           core.tests.test_permissions \

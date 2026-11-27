@@ -247,3 +247,102 @@ class FreeArticleNotConsumedTests(SimpleTestCase):
         from . import first_article_entitlement as entitlement
         with patch("content_factory.run_reconciliation.authoritative_run", return_value=False):
             self.assertTrue(entitlement._delivered(self._run({"article": {"status": "ready"}})))
+
+
+class ModelLedTierFenceTests(SimpleTestCase):
+    """Content Factory's model-led tier 2 (``agentic``): its merge alone grants nothing, with no switch."""
+
+    def test_an_agentic_receipt_needs_independent_verification_from_the_result_or_its_setup(self):
+        ladder = {"schema_version": 1, "tier": "agentic", "tier_number": 2, "outcome": "awaiting_review"}
+        self.assertTrue(content_files.requires_independent_verification({"setup_ladder": ladder}))
+        self.assertTrue(content_files.requires_independent_verification(
+            {"article_system_setup": {"setup_ladder": ladder}}))
+
+    def test_other_receipts_behave_as_today(self):
+        for tier in ("static_dropin", "content_files"):
+            self.assertTrue(content_files.requires_independent_verification({"setup_ladder": {"tier": tier}}))
+        for result in (None, {}, {"setup_ladder": None}, {"setup_ladder": "agentic"}, {"setup_ladder": {}},
+                       {"setup_ladder": {"tier": "native"}}, {"article_system_setup": {"status": "merged"}},
+                       {"article_system_setup": "agentic"}):
+            with self.subTest(result=result):
+                self.assertFalse(content_files.requires_independent_verification(result))
+
+    def test_a_merged_agentic_setup_does_not_vouch_for_merge_readiness(self):
+        from .website_connections import _verified_setup_run_base
+        from .website_reconciliation import _owner_merge_recordable
+        for result in ({"setup_ladder": {"tier": "agentic"}},
+                       {"article_system_setup": {"setup_ladder": {"tier": "agentic"}}}):
+            run = _child(result)
+            self.assertEqual(_verified_setup_run_base(run, "a" * 40, None, merged=True), "")
+            self.assertFalse(_owner_merge_recordable(None, run, {}))
+
+    def _merge(self, result):
+        from . import vibe_marketing_views as views
+        config = SimpleNamespace(article_system={}, articles_scaffold_pr_url="", save=Mock())
+        with patch.object(views, "_link_built_scaffold_publish_target") as link:
+            views._mark_pending_article_system_setup_merged(config, result=result, pr_url=PR)
+        link.assert_called_once_with(config)
+        return config.article_system
+
+    def test_a_merged_agentic_setup_is_not_marked_generation_ready(self):
+        system = self._merge({"article_system_setup": {"setup_ladder": {"tier": "agentic"}}})
+        self.assertEqual(system["pending_article_system_setup"]["merge_status"], "merged")
+        self.assertNotIn("generation_ready", system["pending_article_system_setup"])
+        self.assertNotIn("generation_ready", system)
+        self.assertNotIn("state", system)
+
+    def test_a_merged_setup_with_no_ladder_receipt_is_still_marked_generation_ready(self):
+        system = self._merge({"article_system_setup": {"status": "merged"}})
+        self.assertIs(system["generation_ready"], True)
+        self.assertEqual(system["state"], "roo_scaffolded")
+
+    def test_prepare_never_settles_an_agentic_setup_as_ready(self):
+        op = _operation()
+        op.receipt.update(setup_run_id="setup-run-1")
+        child = _child({"setup_ladder": {"schema_version": 1, "tier": "agentic", "outcome": "awaiting_review"}})
+        with patch("workflow_runs.models.ContentFactoryRun.objects") as runs, \
+                patch.object(prepare, "_setup_owner_action", return_value=None), \
+                patch.object(prepare, "_finish_prepare", side_effect=lambda op, **_: op), \
+                patch("content_factory.website_staff_fixing.enter") as enter:
+            runs.filter.return_value.first.return_value = child
+            prepare._finish_ready(op, now=NOW)
+        enter.assert_called_once()
+        self.assertNotEqual(op.receipt.get("status"), "ready")
+        self.assertNotEqual(op.state, "completed")
+
+
+class SetupCallbackFenceWithoutDatabaseTests(SimpleTestCase):
+    """The service_views setup-completed callback gate, with the ORM stubbed so no database is built."""
+
+    def _complete(self, setup):
+        from . import service_views
+        data = {"run_id": "fence-run", "domain": "fence.example.test", "github_repo": "acme/site",
+                "merge_status": "merged", "status": "completed", "article_system_setup": setup, "pr_url": PR}
+        saved = SimpleNamespace(run_id="fence-run")
+        with patch.object(service_views, "ContentFactoryRun") as runs, \
+                patch.object(service_views, "bind_dispatch_token_run"), \
+                patch.object(service_views, "_update_pending_article_system_setup_for_domain"), \
+                patch("content_factory.website_readiness.shadow_for_run"), \
+                patch.object(service_views, "_mark_article_system_setup_generation_ready_for_domain") as ready:
+            runs.objects.filter.return_value.first.return_value = None
+            runs.objects.update_or_create.return_value = (saved, True)
+            run = service_views._sync_article_system_setup_callback_to_run(
+                data=data, event_type="article_system_setup_completed")
+        self.assertIs(run, saved)
+        return ready, runs.objects.update_or_create.call_args.kwargs["defaults"]["result"]
+
+    def test_a_merged_agentic_setup_callback_is_not_marked_generation_ready(self):
+        ladder = {"schema_version": 1, "tier": "agentic", "tier_number": 2, "outcome": "awaiting_review"}
+        ready, result = self._complete({"setup_ladder": ladder})
+        ready.assert_not_called()
+        self.assertEqual(result["setup_ladder"]["tier"], "agentic")
+
+    def test_lower_tier_setup_callbacks_behave_as_today(self):
+        for tier in ("static_dropin", "content_files"):
+            with self.subTest(tier=tier):
+                self._complete({"setup_ladder": {"tier": tier}})[0].assert_not_called()
+
+    def test_a_merged_setup_callback_with_no_ladder_receipt_is_marked_generation_ready_as_today(self):
+        ready, _result = self._complete({"status": "merged"})
+        ready.assert_called_once()
+        self.assertEqual(ready.call_args.args, ("fence.example.test",))
