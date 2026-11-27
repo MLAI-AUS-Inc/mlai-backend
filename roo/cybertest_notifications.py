@@ -153,4 +153,5 @@ def drain():
         if outcome != 'superseded':
             claim.update(processed_at=timezone.now())
         counts[outcome] += 1
-    return counts
+    # The scheduler requires every runner to report a status string.
+    return {'status': 'completed', **counts}

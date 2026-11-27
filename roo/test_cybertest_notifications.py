@@ -176,6 +176,16 @@ class CompletionTests(SimpleTestCase):
             self.assertEqual(notices.drain()['skipped'], 1)
             due.update.assert_called_once()
 
+    @override_settings(CYBERTEST_COMPLETION_NOTICES_ENABLED=True)
+    def test_enabled_drain_satisfies_the_scheduler_runner_contract(self):
+        from core.scheduling import run_runners
+        with patch.object(notices.ContentFactoryCallbackEvent.objects, 'filter') as initial:
+            initial.return_value.filter.return_value.order_by.return_value = []
+            results, failures = run_runners([('security_review_notifications', notices.drain)])
+        self.assertEqual(failures, [])
+        self.assertEqual(results['security_review_notifications'],
+                         {'status': 'completed', 'sent': 0, 'retry': 0, 'skipped': 0, 'superseded': 0})
+
     @override_settings(CYBERTEST_COMPLETION_NOTICES_ENABLED=False)
     def test_disabled_worker_and_test_receipts_send_nothing(self):
         self.assertEqual(notices.drain(), {'status': 'disabled'})
