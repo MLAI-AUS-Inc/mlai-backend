@@ -2,7 +2,11 @@ from django.urls import path
 from . import cybertest_views as views
 from . import cybertest_entry_views as entry
 
+from . import cybertest_personal as personal
+
 urlpatterns=[
+    path('entry/personal/exchange/', personal.PersonalExchange.as_view()),
+    path('entry/personal/inspect/', personal.PersonalInspect.as_view()),
     path('quotes/recover/',views.RecoverQuoteView.as_view(),name='cybertest-recover-quote'),
     path('entry/exchange/',entry.ExchangeView.as_view(),name='cybertest-entry-exchange'),
     path('entry/inspect/',entry.InspectView.as_view(),name='cybertest-entry-inspect'),
