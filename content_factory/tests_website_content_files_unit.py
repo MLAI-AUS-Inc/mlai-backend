@@ -309,3 +309,40 @@ class ModelLedTierFenceTests(SimpleTestCase):
         enter.assert_called_once()
         self.assertNotEqual(op.receipt.get("status"), "ready")
         self.assertNotEqual(op.state, "completed")
+
+
+class SetupCallbackFenceWithoutDatabaseTests(SimpleTestCase):
+    """The service_views setup-completed callback gate, with the ORM stubbed so no database is built."""
+
+    def _complete(self, setup):
+        from . import service_views
+        data = {"run_id": "fence-run", "domain": "fence.example.test", "github_repo": "acme/site",
+                "merge_status": "merged", "status": "completed", "article_system_setup": setup, "pr_url": PR}
+        saved = SimpleNamespace(run_id="fence-run")
+        with patch.object(service_views, "ContentFactoryRun") as runs, \
+                patch.object(service_views, "bind_dispatch_token_run"), \
+                patch.object(service_views, "_update_pending_article_system_setup_for_domain"), \
+                patch("content_factory.website_readiness.shadow_for_run"), \
+                patch.object(service_views, "_mark_article_system_setup_generation_ready_for_domain") as ready:
+            runs.objects.filter.return_value.first.return_value = None
+            runs.objects.update_or_create.return_value = (saved, True)
+            run = service_views._sync_article_system_setup_callback_to_run(
+                data=data, event_type="article_system_setup_completed")
+        self.assertIs(run, saved)
+        return ready, runs.objects.update_or_create.call_args.kwargs["defaults"]["result"]
+
+    def test_a_merged_agentic_setup_callback_is_not_marked_generation_ready(self):
+        ladder = {"schema_version": 1, "tier": "agentic", "tier_number": 2, "outcome": "awaiting_review"}
+        ready, result = self._complete({"setup_ladder": ladder})
+        ready.assert_not_called()
+        self.assertEqual(result["setup_ladder"]["tier"], "agentic")
+
+    def test_lower_tier_setup_callbacks_behave_as_today(self):
+        for tier in ("static_dropin", "content_files"):
+            with self.subTest(tier=tier):
+                self._complete({"setup_ladder": {"tier": tier}})[0].assert_not_called()
+
+    def test_a_merged_setup_callback_with_no_ladder_receipt_is_marked_generation_ready_as_today(self):
+        ready, _result = self._complete({"status": "merged"})
+        ready.assert_called_once()
+        self.assertEqual(ready.call_args.args, ("fence.example.test",))
