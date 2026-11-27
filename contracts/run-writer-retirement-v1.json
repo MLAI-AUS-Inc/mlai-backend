@@ -5703,7 +5703,7 @@
       "identity": "content_factory/website_setup_merge_proof.py:carry_setup_merge_proof:51a5152e7e06fb160848afb6389e04820d94762714aa47a79948a84b1b11df99:1",
       "path": "content_factory/website_setup_merge_proof.py",
       "function": "carry_setup_merge_proof",
-      "line": 120,
+      "line": 151,
       "kind": "inferred_run_save",
       "fields": [],
       "statement_sha256": "51a5152e7e06fb160848afb6389e04820d94762714aa47a79948a84b1b11df99",
@@ -5713,7 +5713,7 @@
         "locked"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "29dce05f1add073029c83a55ede9ac760f5e8f642de5fb9c47e537da95a06af5",
+      "function_sha256": "1c68cbe5ab84c03ebf7f3cbde70618d4d94d2939e04fb6f41f458ca9a319d1d3",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_setup_merge_proof.py"
