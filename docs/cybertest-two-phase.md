@@ -22,15 +22,18 @@ cannot override them. Legacy receipts without a purchase retain their policy.
 
 | Purchase | Total points | Points due now |
 | --- | ---: | ---: |
-| Basic | 24 per block | 24 per block |
-| Standard upgrade | 48 | 24 |
-| Large upgrade | 124 | 100 |
+| Basic | 10 per block | 10 per block |
+| Standard upgrade | basic paid + 24 | 24 |
+| Large upgrade | basic paid + 100 | 100 |
 
 An upgrade requires a delivered, settled basic purchase by the same payer for
 the same company, workspace, repository, selected scope and immutable source.
-A basic block is 64 `source_batch` checks: a basic purchase costs 24 points
+A basic block is 64 `source_batch` checks: a basic purchase costs 10 points
 for each started block (`basic_points` in `roo/cybertest_delivery.py`), so a
-repository with 910 source batches costs 360 points. The scan service applies
+repository with 910 source batches costs 150 points. That is about three times
+the measured model cost (US$0.04-0.05 per source batch). A receipt keeps the
+price it was bought at: settlement, the upgrade check and the totals shown all
+read the saved `points`, never today's price. The scan service applies
 the same rule to the same contract. Basic execution plans may be up to 1.5 MB.
 Upgrade prices are unchanged.
 

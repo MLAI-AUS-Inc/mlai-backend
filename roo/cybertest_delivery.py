@@ -25,8 +25,12 @@ def _valid(pattern, value):
 # A basic check costs BASIC_BLOCK_POINTS for each started block of
 # BASIC_BLOCK_BATCHES source batches in its contract, so a larger repository
 # costs more. The scanner applies the same rule; no client price is accepted.
+# Set to about three times the measured model cost: production checks used
+# US$0.04-0.05 per source batch (about US$3 per block of 64), and a point is
+# A$1.2798 at US$0.697 per A$ (CYBERTEST_AUD_PER_POINT, CYBERTEST_USD_PER_AUD),
+# so 10 points is about US$8.90 per block.
 BASIC_BLOCK_BATCHES = 64
-BASIC_BLOCK_POINTS = 24
+BASIC_BLOCK_POINTS = 10
 
 
 def basic_points(checks):
@@ -123,9 +127,12 @@ def assess_delivery(contract, evidence, expected_audit_id):
             'incompleteCheckIds': incomplete, 'evidenceSha256': digest}
 
 
-def delivery_settlement(contract, evidence, expected_audit_id, pricing, costs, *, existing=None):
+def delivery_settlement(contract, evidence, expected_audit_id, pricing, costs, *, existing=None, points=None):
+    """Settle one phase. `points` is the price on the receipt, so a check bought
+    before a price change settles at the price the founder agreed to."""
     delivery = assess_delivery(contract, evidence, expected_audit_id)
-    points = phase_price(contract)['duePoints']
+    if points is None:
+        points = phase_price(contract)['duePoints']
     if delivery['minimumMet']:
         amounts = {'basis': 'phase_delivered', 'charge_microroo': points*1_000_000, 'refund_microroo': 0}
     elif contract['phase'] == 'upgrade':

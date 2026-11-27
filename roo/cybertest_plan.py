@@ -11,13 +11,16 @@ from .cybertest_policy import CheckoutError
 BASIC_PLAN_BYTES = 1_500_000
 
 
-def public_purchase_scope(snapshot):
-    """Return customer-reviewable scope, never internal model or runner settings."""
+def public_purchase_scope(snapshot, *, price=None):
+    """Return customer-reviewable scope, never internal model or runner settings.
+
+    `price` is a saved receipt's price ({'totalPoints', 'duePoints'}), shown
+    instead of today's price so a check shows what the founder agreed to."""
     if not snapshot:
         return None
     from .cybertest_delivery import phase_price
     contract = purchase_contract(snapshot)
-    price = phase_price(contract)
+    price = price or phase_price(contract)
     groups = {}
     for check in contract['checks']:
         key = (check['kind'], check['required'])

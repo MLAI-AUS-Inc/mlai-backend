@@ -55,13 +55,13 @@ class DeliveryPolicyTests(unittest.TestCase):
         def sized(batches):
             checks = [{'id': f'basic:source:{i+1}', 'kind': 'source_batch', 'required': True} for i in range(batches)]
             return {**basic(), 'checks': checks + basic()['checks'][1:]}
-        for batches, points in [(1, 24), (64, 24), (65, 48), (128, 48), (129, 72), (910, 360)]:
+        for batches, points in [(1, 10), (64, 10), (65, 20), (128, 20), (129, 30), (910, 150)]:
             with self.subTest(batches=batches):
                 self.assertEqual(phase_price(sized(batches)), {'totalPoints': points, 'duePoints': points})
 
     def test_phase_prices_are_incremental(self):
         self.assertTrue(callable(phase_price), 'phase policy is not implemented')
-        self.assertEqual(phase_price(basic()), {'totalPoints': 24, 'duePoints': 24})
+        self.assertEqual(phase_price(basic()), {'totalPoints': 10, 'duePoints': 10})
         self.assertEqual(phase_price(upgrade()), {'totalPoints': 48, 'duePoints': 24})
         self.assertEqual(phase_price(upgrade('large')), {'totalPoints': 124, 'duePoints': 100})
         for change in [{'parentCheckoutId': None}, {'tier': 'enterprise'}, {'version': True}]:
@@ -74,16 +74,16 @@ class DeliveryPolicyTests(unittest.TestCase):
         result = delivery_settlement(basic(), value, AUDIT, PRICING, None)
         self.assertEqual(result['delivery']['status'], 'partial')
         self.assertTrue(result['delivery']['minimumMet'])
-        self.assertEqual(result['charge_microroo'], 24_000_000)
+        self.assertEqual(result['charge_microroo'], 10_000_000)
         self.assertEqual(result['refund_microroo'], 0)
 
-    def test_missing_required_basic_work_retains_only_actual_model_cost_capped_at_24(self):
+    def test_missing_required_basic_work_retains_only_actual_model_cost_capped_at_the_price(self):
         value = evidence(); value['checks'][0]['status'] = 'incomplete'
         result = delivery_settlement(basic(), value, AUDIT, PRICING, usage(2))
         self.assertEqual(result['charge_microroo'], 2_000_000)
-        self.assertEqual(result['refund_microroo'], 22_000_000)
+        self.assertEqual(result['refund_microroo'], 8_000_000)
         capped = delivery_settlement(basic(), value, AUDIT, PRICING, usage(99))
-        self.assertEqual(capped['charge_microroo'], 24_000_000)
+        self.assertEqual(capped['charge_microroo'], 10_000_000)
 
     def test_failed_upgrade_refunds_whole_difference_even_if_costs_are_unknown(self):
         value = {**evidence(), 'checks': [{'id': 'upgrade:target:referrals', 'status': 'error'}]}

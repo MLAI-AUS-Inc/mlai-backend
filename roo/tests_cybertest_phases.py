@@ -43,7 +43,7 @@ class PhaseCheckoutTests(TestCase):
                 'report': {'persisted': True, 'sha256': 'b'*64}}
 
     def delivered_basic(self):
-        quote, audit, intent = self.start(basic(), 24)
+        quote, audit, intent = self.start(basic(), 10)
         checkout.settle_delivery(quote, audit, self.result(audit, basic()), None)
         return quote, audit, intent
 
@@ -70,14 +70,14 @@ class PhaseCheckoutTests(TestCase):
         self.assertIsNone(recover(parent_id=str(uuid.uuid4())))
         self.assertEqual(recover()['execution_plan'], snapshot)
         self.assertEqual(recover()['status'], 'authorized')
-        self.assertEqual(checkout.balance(self.user, test_mode=True), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=True), 990)
         checkout.charge(quote, audit, intent)
         checkout.start_dispatch(quote, audit)
         checkout.settle_delivery(quote, audit, self.result(audit, contract), None)
         self.assertEqual(recover()['checkout_id'], str(quote))
         self.assertEqual(recover()['settlement']['basis'], 'phase_delivered')
         self.assertEqual(CybertestCheckout.objects.count(), 2)
-        self.assertEqual(checkout.balance(self.user, test_mode=True), 952)
+        self.assertEqual(checkout.balance(self.user, test_mode=True), 966)
 
     def test_upgrade_execution_plan_must_reference_the_actual_delivered_base(self):
         import json
@@ -96,7 +96,7 @@ class PhaseCheckoutTests(TestCase):
         quote, token = uuid.uuid4(), secrets.token_urlsafe(32)
         intent, snapshot = self.purchase(basic()), plan()
         checkout.create_quote(quote, token, intent, execution_plan=snapshot)
-        checkout.confirm(quote, token, self.user, expected_points=24)
+        checkout.confirm(quote, token, self.user, expected_points=10)
         restored = checkout.recover_quote(self.intent, secrets.token_urlsafe(32))
         self.assertEqual(restored['checkout_id'], str(quote))
         self.assertEqual(restored['execution_plan'], snapshot)
@@ -117,7 +117,7 @@ class PhaseCheckoutTests(TestCase):
         updated = {**plan(), 'algorithm': 'basic-source-v2', 'backendAnswer': 'no'}
         checkout.create_quote(new, token, intent, execution_plan=updated)
         self.assertEqual(checkout.recover_quote(self.intent, token, backend_answer='no')['checkout_id'], str(new))
-        checkout.confirm(new, token, self.user, expected_points=24)
+        checkout.confirm(new, token, self.user, expected_points=10)
         audit = uuid.uuid4()
         for status in ('authorized', 'charged', 'started'):
             if status == 'charged':
@@ -167,14 +167,14 @@ class PhaseCheckoutTests(TestCase):
             checkout.create_quote(uuid.uuid4(), secrets.token_urlsafe(32), intent, execution_plan=plan())
         self.assertEqual(caught.exception.code, 'BASIC_PURCHASE_PENDING')
         self.assertEqual(CybertestCheckout.objects.count(), 1)
-        checkout.confirm(quote, token, self.user, expected_points=24)
+        checkout.confirm(quote, token, self.user, expected_points=10)
         checkout.charge(quote, audit, intent)
         checkout.start_dispatch(quote, audit)
         CybertestCheckout.objects.filter(pk=quote).update(expires_at=timezone.now()-timedelta(seconds=1))
         with self.assertRaises(CheckoutError) as caught:
             checkout.create_quote(uuid.uuid4(), secrets.token_urlsafe(32), intent, execution_plan=plan())
         self.assertEqual(caught.exception.code, 'BASIC_PURCHASE_PENDING')
-        self.assertEqual(checkout.balance(self.user, test_mode=True), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=True), 990)
         checkout.settle_delivery(quote, audit, self.result(audit, basic()), None)
         checkout.create_quote(uuid.uuid4(), secrets.token_urlsafe(32), intent, execution_plan=plan())
         self.assertEqual(CybertestCheckout.objects.count(), 2)
@@ -190,32 +190,51 @@ class PhaseCheckoutTests(TestCase):
         checkout.create_quote(uuid.uuid4(), secrets.token_urlsafe(32), intent, execution_plan=plan())
         self.assertEqual(CybertestCheckout.objects.count(), 3)
 
-    def test_basic_purchase_is_24_and_zero_findings_delivery_settles_once(self):
-        quote, audit, intent = self.start(basic(), 24)
+    def test_basic_purchase_is_10_and_zero_findings_delivery_settles_once(self):
+        quote, audit, intent = self.start(basic(), 10)
         evidence = self.result(audit, basic())
         first = checkout.settle_delivery(quote, audit, evidence, None)
         repeated = checkout.settle_delivery(quote, audit, evidence, None)
         self.assertEqual(first, repeated)
-        self.assertEqual(first['settlement']['charge_microroo'], 24_000_000)
-        self.assertEqual(checkout.balance(self.user, test_mode=True), 976)
+        self.assertEqual(first['settlement']['charge_microroo'], 10_000_000)
+        self.assertEqual(checkout.balance(self.user, test_mode=True), 990)
         self.assertEqual(Ledger.objects.count(), 0)
         stored = CybertestCheckout.objects.get(pk=quote).phase_contract
         self.assertEqual(stored['commitSha'], 'c'*40)
         self.assertEqual(stored['sourceManifestSha256'], 'd'*64)
         self.assertEqual(stored['phase'], 'basic')
 
+    def test_basic_bought_before_a_price_change_keeps_its_agreed_price(self):
+        quote, audit, intent = self.start(basic(), 10)
+        CybertestCheckout.objects.filter(pk=quote).update(points=24)
+        receipt = checkout.status(quote)
+        self.assertEqual((receipt['points'], receipt['total_points']), (24, 24))
+        self.assertEqual(receipt['purchase_scope']['total_points'], 24)
+        settled = checkout.settle_delivery(quote, audit, self.result(audit, basic()), None)
+        self.assertEqual(settled['settlement']['charge_microroo'], 24_000_000)
+        contract = {**upgrade(), 'parentCheckoutId': str(quote)}
+        upgraded, _, _ = self.start(contract, 24)
+        self.assertEqual(checkout.status(upgraded)['purchase_scope']['total_points'], 48)
+
+    def test_upgrade_total_is_the_basic_paid_plus_the_upgrade(self):
+        base, _, _ = self.delivered_basic()
+        quote, _, _ = self.start({**upgrade('large'), 'parentCheckoutId': str(base)}, 100)
+        receipt = checkout.status(quote)
+        self.assertEqual((receipt['points'], receipt['total_points']), (100, 110))
+        self.assertEqual(receipt['purchase_scope']['total_points'], 110)
+
     def test_upgrade_debits_only_difference_and_refunds_it_without_touching_basic(self):
         base, _, _ = self.delivered_basic()
         for tier, points in [('standard', 24), ('large', 100)]:
             contract = {**upgrade(tier), 'parentCheckoutId': str(base)}
             quote, audit, _ = self.start(contract, points)
-            self.assertEqual(checkout.balance(self.user, test_mode=True), 976-points)
+            self.assertEqual(checkout.balance(self.user, test_mode=True), 990-points)
             evidence = self.result(audit, contract, missing_required=True)
             first = checkout.settle_delivery(quote, audit, evidence, None)
             self.assertEqual(checkout.settle_delivery(quote, audit, evidence, None), first)
             self.assertEqual(first['settlement']['refund_microroo'], points*1_000_000)
-            self.assertEqual(checkout.balance(self.user, test_mode=True), 976)
-        self.assertEqual(CybertestCheckout.objects.get(pk=base).settlement['charge_microroo'], 24_000_000)
+            self.assertEqual(checkout.balance(self.user, test_mode=True), 990)
+        self.assertEqual(CybertestCheckout.objects.get(pk=base).settlement['charge_microroo'], 10_000_000)
         self.assertEqual(Ledger.objects.count(), 0)
 
     def test_distinct_quote_ids_cannot_buy_two_upgrades(self):
@@ -227,10 +246,10 @@ class PhaseCheckoutTests(TestCase):
         checkout.settle_delivery(quote, audit, self.result(audit, contract), None)
         with self.assertRaises(CheckoutError):
             checkout.create_quote(uuid.uuid4(), secrets.token_urlsafe(32), intent)
-        self.assertEqual(checkout.balance(self.user, test_mode=True), 952)
+        self.assertEqual(checkout.balance(self.user, test_mode=True), 966)
 
     def test_incomplete_base_cannot_upgrade_even_when_it_has_findings(self):
-        base, audit, _ = self.start(basic(), 24)
+        base, audit, _ = self.start(basic(), 10)
         costs = {'auditId': str(audit), 'status': 'complete', 'modelCostUsd': 2, 'pendingCalls': 0, 'unpricedCalls': 0}
         checkout.settle_delivery(base, audit, self.result(audit, basic(), missing_required=True), costs)
         self.assertEqual(checkout.balance(self.user, test_mode=True), 998)
@@ -249,7 +268,7 @@ class PhaseCheckoutTests(TestCase):
                 checkout.create_quote(uuid.uuid4(), secrets.token_urlsafe(32), {**intent, **change})
 
     def test_optional_failure_is_partial_but_does_not_refund_delivered_purchase(self):
-        quote, audit, _ = self.start(basic(), 24)
+        quote, audit, _ = self.start(basic(), 10)
         evidence = self.result(audit, basic()); evidence['checks'][-1]['status'] = 'error'
         result = checkout.settle_delivery(quote, audit, evidence, None)
         self.assertEqual(result['settlement']['delivery']['status'], 'partial')
@@ -275,7 +294,7 @@ class PhaseCheckoutTests(TestCase):
         checkout.settle_delivery(old, audit, self.result(audit, intent['purchase'], missing_required=True), None)
         checkout.create_quote(uuid.uuid4(), secrets.token_urlsafe(32), intent)
         self.assertEqual(checkout.create_quote(old, token, intent)['status'], 'refunded')
-        self.assertEqual(checkout.balance(self.user, test_mode=True), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=True), 990)
 
     def test_feature_off_blocks_new_phased_quotes_but_not_refunds(self):
         base, _, _ = self.delivered_basic()
@@ -319,23 +338,23 @@ class PhaseSyntheticLedgerTests(TestCase):
         checkout.settle_delivery(quote, audit, evidence, None)
         checkout.settle_delivery(quote, audit, evidence, None)
         self.account.refresh_from_db()
-        self.assertEqual(self.account.digital_balance_microroo, 6_000_000)
+        self.assertEqual(self.account.digital_balance_microroo, 20_000_000)
         self.assertEqual(self.account.purchased_topup_balance_microroo, 150_000_000)
         self.assertEqual(self.account.earned_balance_microroo, 820_000_000)
-        self.assertEqual(checkout.balance(self.user, test_mode=False), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=False), 990)
         refund = Ledger.objects.get(user=self.user, kind='REFUND')
         self.assertEqual(refund.refund_of_id, CybertestCheckout.objects.get(pk=quote).spend_ledger_id)
         self.assertIsNone(CybertestCheckout.objects.get(pk=base).refund_ledger_id)
         self.assertEqual(Ledger.objects.filter(user=self.user, kind='SPEND').count(), 2)
 
     def test_basic_retained_cost_and_refund_roll_back_together_then_settle_once(self):
-        quote, audit, _ = self.start(basic(), 24)
+        quote, audit, _ = self.start(basic(), 10)
         evidence = self.result(audit, basic(), missing_required=True)
         costs = {'auditId': str(audit), 'status': 'complete', 'modelCostUsd': 2.5, 'pendingCalls': 0, 'unpricedCalls': 0}
         with patch.object(checkout.PointsService, 'spend_microroo', side_effect=RuntimeError('synthetic ledger failure')):
             with self.assertRaisesRegex(RuntimeError, 'synthetic ledger failure'):
                 checkout.settle_delivery(quote, audit, evidence, costs)
-        self.assertEqual(checkout.balance(self.user, test_mode=False), 976)
+        self.assertEqual(checkout.balance(self.user, test_mode=False), 990)
         self.assertIsNone(CybertestCheckout.objects.get(pk=quote).settlement)
         self.assertEqual(Ledger.objects.filter(user=self.user).count(), 1)
         first = checkout.settle_delivery(quote, audit, evidence, costs)
@@ -384,7 +403,7 @@ class FreeRepositoryCheckTests(TestCase):
             workspace_id=self.intent['workspace_id'], is_active=True, verified_at=timezone.now())
         CommunityChatDevice.objects.create(user=self.user, public_key='1'*64,
             status=DeviceBindingStatus.VERIFIED, verified_at=timezone.now())
-        quote, audit, _ = self.start(basic(), 24)
+        quote, audit, _ = self.start(basic(), 10)
         checkout.settle_delivery(quote, audit, self.result(audit, basic(), missing_required=True), None)
         queued = ContentFactoryCallbackEvent.objects.filter(event_type=notices.EVENT_TYPE)
         self.assertFalse(queued.exists())
@@ -408,10 +427,10 @@ class FreeRepositoryCheckTests(TestCase):
         self.assertFalse(Ledger.objects.exists())
 
     def test_free_basic_and_upgrade_cost_nothing_and_settle_without_ledger_rows(self):
-        quote, audit, _ = self.start(basic(), 24)
+        quote, audit, _ = self.start(basic(), 10)
         receipt = checkout.status(quote)
         self.assertTrue(receipt['sponsored'])
-        self.assertEqual((receipt['points'], receipt['due_points']), (24, 0))
+        self.assertEqual((receipt['points'], receipt['due_points']), (10, 0))
         checkout.settle_delivery(quote, audit, self.result(audit, basic()), None)
         contract = {**upgrade('large'), 'parentCheckoutId': str(quote)}
         upgrade_quote, upgrade_audit, _ = self.start(contract, 100)
@@ -425,7 +444,7 @@ class FreeRepositoryCheckTests(TestCase):
         quote, audit, token = uuid.uuid4(), uuid.uuid4(), secrets.token_urlsafe(32)
         intent = self.purchase(basic())
         checkout.create_quote(quote, token, intent)
-        checkout.confirm(quote, token, self.user, expected_points=24)
+        checkout.confirm(quote, token, self.user, expected_points=10)
         checkout.charge(quote, audit, intent)
         self.assertEqual(checkout.refund_start_failure(quote, audit, 'PREPARATION_FAILED')['status'], 'refunded')
         self.assertFalse(Ledger.objects.filter(user=self.user).exists())
@@ -435,7 +454,7 @@ class FreeRepositoryCheckTests(TestCase):
         quote, token = uuid.uuid4(), secrets.token_urlsafe(32)
         self.assertFalse(checkout.create_quote(quote, token, self.purchase(basic()))['sponsored'])
         with self.assertRaises(CheckoutError) as raised:
-            checkout.confirm(quote, token, self.user, expected_points=24)
+            checkout.confirm(quote, token, self.user, expected_points=10)
         self.assertEqual(raised.exception.code, 'INSUFFICIENT_ROO_POINTS')
 
     def test_the_default_list_is_the_five_mlai_repositories(self):
