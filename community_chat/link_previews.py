@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
@@ -177,6 +178,17 @@ def _remaining_timeout(deadline: float) -> tuple[float, float]:
     return (min(connect, remaining), min(read, remaining))
 
 
+def _expire_response(response, expired: threading.Event) -> None:
+    """Mark the fetch as over its deadline and unblock any pending body read."""
+    expired.set()
+    shutdown = getattr(getattr(response, "raw", None), "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown()
+        except OSError:
+            pass
+
+
 def _fetch_limited(
     raw_url: str,
     *,
@@ -215,6 +227,18 @@ def _fetch_limited(
                 raise LinkPreviewError("The link redirected too many times.")
             current_url = urljoin(current_url, location)
             continue
+        # Socket timeouts bound each read, not the whole body: a server that
+        # drips a byte every few seconds would otherwise hold the worker
+        # indefinitely inside a single chunk read. Shut the socket down at the
+        # deadline so the blocked read returns.
+        expired = threading.Event()
+        watchdog = threading.Timer(
+            max(0.0, deadline - time.monotonic()),
+            _expire_response,
+            args=(response, expired),
+        )
+        watchdog.daemon = True
+        watchdog.start()
         try:
             response.raise_for_status()
             declared_length = int(response.headers.get("Content-Length") or 0)
@@ -237,16 +261,23 @@ def _fetch_limited(
                     if stop_after in window:
                         break
                     tail = window[-len(stop_after):]
-                if time.monotonic() > deadline:
+                if expired.is_set() or time.monotonic() > deadline:
                     raise LinkPreviewError("The link took too long to respond.")
+            if expired.is_set():
+                # A shut-down socket can end an unsized body early; never
+                # treat that partial body as a complete page or image.
+                raise LinkPreviewError("The link took too long to respond.")
             return (
                 current_url,
                 str(response.headers.get("Content-Type") or "").lower(),
                 b"".join(chunks),
             )
         except requests.RequestException as exc:
+            if expired.is_set():
+                raise LinkPreviewError("The link took too long to respond.") from exc
             raise LinkPreviewError("The link returned an unsuccessful response.") from exc
         finally:
+            watchdog.cancel()
             response.close()
     raise LinkPreviewError("The link redirected too many times.")
 

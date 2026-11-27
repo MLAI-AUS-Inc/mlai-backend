@@ -244,3 +244,34 @@ class PublicPreviewSpeedTests(SimpleTestCase):
             with self.assertRaisesMessage(public.LinkPreviewError, "took too long"):
                 public.fetch_link_preview("https://example.com/")
         self.assertEqual(get.call_count, 1)
+
+    def test_a_read_blocked_inside_one_chunk_is_unblocked_at_the_deadline(self):
+        # A socket read timeout bounds each recv, not a 16 KiB chunk read, so a
+        # server dripping one byte at a time must be cut off by the watchdog.
+        import threading
+
+        unblocked = threading.Event()
+
+        class _Raw:
+            def shutdown(self):
+                unblocked.set()
+
+        class _BlockedResponse(_SlowResponse):
+            raw = _Raw()
+
+            def iter_content(self, chunk_size):
+                del chunk_size
+                yield b"<html><head>"
+                if not unblocked.wait(timeout=5):
+                    raise AssertionError("the deadline did not unblock the read")
+                # An unsized body ends cleanly once its socket is shut down.
+                yield b"<title>Partial</title>"
+
+        response = _BlockedResponse([])
+        with (
+            patch.object(public, "PAGE_DEADLINE_SECONDS", 0.2),
+            patch.object(public.requests.Session, "get", return_value=response),
+        ):
+            with self.assertRaisesMessage(public.LinkPreviewError, "took too long"):
+                public.fetch_link_preview("https://example.com/drip")
+        self.assertTrue(unblocked.is_set())
