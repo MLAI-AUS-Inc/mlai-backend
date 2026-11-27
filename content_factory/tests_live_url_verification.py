@@ -286,7 +286,7 @@ class LiveUrlVerificationTests(LiveUrlFixture, TestCase):
     def test_prepare_verifies_new_journey_sites_by_live_url_and_never_asks_for_permissions(self):
         from . import website_prepare
         built, connection, target = self.new_journey_site()
-        op = SimpleNamespace(receipt={"setup_run_id": "setup-1"})
+        op = SimpleNamespace(receipt={"setup_run_id": "setup-1"}, generation=connection.generation)
         context = SimpleNamespace(organization=built.organization, company=built.company)
         self.assertEqual(website_prepare._dispatch_prepare_step(op, context, built.config, "permissions", user=built.owner,
             journey={"prerequisites": {"permissions": {"reasonCode": "github_workflow_permission_required"}}}),
