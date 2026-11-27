@@ -54,11 +54,18 @@ def _mapping(value):
     return value if isinstance(value, dict) else {}
 
 
+# Ladder tiers whose merge alone grants nothing. ``agentic`` is Content
+# Factory's model-led tier 2: the agent's pages carry no backend-checked
+# contract, so merging its pull request is never generation readiness. Not
+# behind a switch: it must be deployed before any domain runs the agent.
+INDEPENDENTLY_VERIFIED_TIERS = ("agentic", "static_dropin", "content_files")
+
+
 def requires_independent_verification(result):
     """A lower-tier change cannot turn its own merge into website publication authority."""
     for source in (_mapping(result), _mapping(_mapping(result).get("article_system_setup"))):
         ladder = _mapping(source.get("setup_ladder"))
-        if ladder.get("tier") in ("content_files", "static_dropin"):
+        if ladder.get("tier") in INDEPENDENTLY_VERIFIED_TIERS:
             return True
     return False
 
