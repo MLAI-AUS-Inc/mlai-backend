@@ -40,8 +40,13 @@ class EntryAuthority:
     cache.add must be atomic across all workers. Cache contents contain opaque
     session references, never account access/refresh tokens or GitHub secrets.
     """
-    def __init__(self, cache, authorize, *, clock=time.time):
+    def __init__(self, cache, authorize, *, clock=time.time, namespace=""):
         self.cache, self.authorize, self.clock = cache, authorize, clock
+
+        self.namespace = namespace
+
+    def _key(self, kind, token):
+        return _key(f"{self.namespace}:{kind}" if self.namespace else kind, token)
 
     def issue(self, session_id, user_id, company_id, state, challenge):
         _token(state)
@@ -55,12 +60,12 @@ class EntryAuthority:
         if identity['user_id'] != str(user_id) or identity['company_id'] != company_id:
             raise EntryError('WRONG_ACCOUNT', 'Restart sign-in with the selected account.', 403)
         code = secrets.token_urlsafe(32)
-        self.cache.set(_key('code', code), dict(identity=identity, session_id=str(session_id),
+        self.cache.set(self._key('code', code), dict(identity=identity, session_id=str(session_id),
             state=state, challenge=challenge, expires=self.clock()+120), timeout=120)
         return code
 
     def _load(self, kind, token):
-        row = self.cache.get(_key(kind, token))
+        row = self.cache.get(self._key(kind, token))
         if not row or row['expires'] <= self.clock():
             raise EntryError('ENTRY_EXPIRED', 'Sign in again from MLAI.', 401)
         identity = _identity(self.authorize(row['session_id'], row['identity']['company_id']))
@@ -75,10 +80,10 @@ class EntryAuthority:
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
         if not hmac.compare_digest(row['state'], state) or not hmac.compare_digest(row['challenge'], challenge):
             raise EntryError('INVALID_ENTRY', 'Restart sign-in in the original browser.', 403)
-        if not self.cache.add(_key('used', code), True, timeout=120):
+        if not self.cache.add(self._key('used', code), True, timeout=120):
             raise EntryError('ENTRY_USED', 'This sign-in link was already used.', 409)
         grant = secrets.token_urlsafe(32)
-        self.cache.set(_key('grant', grant), dict(identity=identity, session_id=row['session_id'],
+        self.cache.set(self._key('grant', grant), dict(identity=identity, session_id=row['session_id'],
             expires=self.clock()+3600), timeout=3600)
         return {**identity, 'grant': grant}
 

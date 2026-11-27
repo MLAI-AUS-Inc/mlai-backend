@@ -188,10 +188,14 @@ class AuthorizeView(EntryErrors, MyStartupAccess, PrivateView):
 
 
 class ExchangeView(EntryErrors, ServiceView):
+    @staticmethod
+    def authority_factory():
+        return authority()
+
     def post(self, request):
         if not isinstance(request.data, dict) or set(request.data) != {'code','state','verifier'}:
             raise EntryError('INVALID_ENTRY', 'Invalid exchange.')
-        return Response(authority().exchange(**request.data))
+        return Response(self.authority_factory().exchange(**request.data))
 
 
 class EntryInspectServiceThrottle(SimpleRateThrottle):
@@ -221,10 +225,14 @@ class EntryInspectGrantThrottle(SimpleRateThrottle):
 class InspectView(EntryErrors, ServiceView):
     throttle_classes = [EntryInspectServiceThrottle, EntryInspectGrantThrottle]
 
+    @staticmethod
+    def authority_factory():
+        return authority()
+
     def post(self, request):
         if not isinstance(request.data, dict) or set(request.data) != {'grant'}:
             raise EntryError('INVALID_ENTRY', 'Invalid session check.')
-        return Response(authority().inspect(request.data['grant']))
+        return Response(self.authority_factory().inspect(request.data['grant']))
 
 
 class GitHubView(EntryErrors, ServiceView):

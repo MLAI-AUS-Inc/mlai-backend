@@ -209,3 +209,16 @@ The minute scheduler retries private messages for up to two days. The report
 link checks company, workspace and account access when opened. The sender
 rechecks recipient membership and verified devices immediately before delivery.
 The message contains only a fixed completion sentence and the report link.
+
+## Personal Basic reviews
+
+Members enter from the Chat Security app at `/security`. The authenticated
+`personal/authorize/` endpoint under `/api/v1/my-startup/cybertest/` derives a
+private workspace from the member's permanent community profile ID. Exchange
+and inspection use the service-authenticated `entry/personal/` routes. Each
+inspection checks the member's session, device and community access.
+
+The points service binds a personal quote to that member and their workspace.
+A Basic execution plan is required. The member previews and authorizes the
+price in Chat before starting. Personal reviews use the member's points for
+every repository. Roll out the matching scan service and Chat entry together.

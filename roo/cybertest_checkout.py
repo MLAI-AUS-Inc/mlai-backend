@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Sum, Q
 from django.utils import timezone
+from .cybertest_personal_scope import personal_binding, workspace_id as personal_workspace_id
 from .cybertest_models import CybertestCheckout as Receipt
 from .cybertest_policy import CheckoutError, binding, binding_digest, price_points, token_digest, failure_settlement
 from .services import PointsService
@@ -54,6 +55,8 @@ def _payer(row,user):
     expected = row.binding.get('mlai_user_id')
     if expected is not None and expected != str(user.pk):
         raise CheckoutError('WRONG_ACCOUNT','Return to the MLAI account that selected this audit.',403)
+    if personal_binding(row.binding) and row.binding["workspace_id"] != personal_workspace_id(user.community_chat_profile_id):
+        raise CheckoutError("WRONG_ACCOUNT", "This personal review belongs to another member.", 403)
     if not user.is_active or (row.user_id is not None and row.user_id!=user.pk):
         raise CheckoutError('WRONG_ACCOUNT','This checkout belongs to another account.',403)
 
@@ -67,7 +70,7 @@ def free_repository_ids():
 
 def _sponsored(normalized):
     """MLAI's own repositories are checked for free; everything else is paid."""
-    return bool(normalized.get('purchase')) and normalized.get('repository_id') in free_repository_ids()
+    return not personal_binding(normalized) and bool(normalized.get('purchase')) and normalized.get('repository_id') in free_repository_ids()
 
 
 def is_sponsored(row):
@@ -129,6 +132,10 @@ def _pending_basic(selection, *, test_mode):
 def create_quote(checkout_id, token, intent, *, execution_plan=None):
     test_mode=configured_mode()=='test'
     normalized=binding(intent);digest=binding_digest(normalized);secret_hash=token_digest(token)
+    if personal_binding(normalized) and (
+        (normalized.get("purchase") or {}).get("phase") != "basic" or execution_plan is None
+    ):
+        raise CheckoutError("BASIC_REQUIRED", "Personal workspaces support Basic source reviews.", 403)
     stored_plan=None
     if execution_plan is not None:
         from .cybertest_plan import execution_plan as normalize_plan
@@ -320,6 +327,8 @@ def settle_delivery(checkout_id, audit_id, evidence, costs):
 def recover_quote(intent, token, *, parent_checkout_id=None, backend_answer=None):
     """Recover this payer's purchase; never authorize, debit or restart it."""
     normalized=binding(intent)
+    if personal_binding(normalized) and parent_checkout_id is not None:
+        raise CheckoutError("BASIC_REQUIRED", "Personal workspaces support Basic source reviews.", 403)
     if not normalized.get('mlai_user_id') or 'purchase' in normalized:
         raise CheckoutError('INVALID_QUOTE','An authenticated MLAI selection is required.',400)
     if not getattr(settings,'CYBERTEST_PHASED_SCANS_ENABLED',False):
