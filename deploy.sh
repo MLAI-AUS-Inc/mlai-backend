@@ -252,6 +252,11 @@ if [ -z "${REDIS_URL:-}" ]; then
     echo "❌ REDIS_URL must be supplied by the deployment secret store."
     exit 1
 fi
+# Production must explicitly preserve its Points Admin manager/workspace.
+if ! [[ "${POINTS_SUPER_ADMIN_SLACK_ID:-}" =~ ^[UW][A-Z0-9]+$ ]] || ! [[ "${POINTS_SUPER_ADMIN_SLACK_TEAM_ID:-}" =~ ^T[A-Z0-9]+$ ]]; then
+    echo "❌ Configure valid POINTS_SUPER_ADMIN_SLACK_ID and POINTS_SUPER_ADMIN_SLACK_TEAM_ID before deployment."
+    exit 1
+fi
 for service_secret_name in ROO_API_KEY INTERNAL_API_KEY; do
     service_secret_value="${!service_secret_name:-}"
     if [ "${#service_secret_value}" -lt 32 ]; then
@@ -520,6 +525,8 @@ install_remote_env_value APPROVED_MIGRATION_PLAN_SHA256 "$APPROVED_MIGRATION_PLA
 install_remote_env_value ROO_POINTS_LEVEL_UP_ENABLED "${ROO_POINTS_LEVEL_UP_ENABLED:-false}"
 install_remote_env_value ROO_POINTS_NATIVE_ACTIVE_FROM "${ROO_POINTS_NATIVE_ACTIVE_FROM:-}"
 install_remote_env_value ROO_MANUAL_TIME_ENABLED "${ROO_MANUAL_TIME_ENABLED:-false}"
+install_remote_env_value POINTS_SUPER_ADMIN_SLACK_ID "$POINTS_SUPER_ADMIN_SLACK_ID"
+install_remote_env_value POINTS_SUPER_ADMIN_SLACK_TEAM_ID "$POINTS_SUPER_ADMIN_SLACK_TEAM_ID"
 install_remote_env_value SYSTEM_EMAIL_RESEND_MESSAGES "$SYSTEM_EMAIL_RESEND_MESSAGES"
 for system_email_setting in $SYSTEM_EMAIL_DEPLOY_SETTINGS; do
     if [ -n "${!system_email_setting}" ]; then
