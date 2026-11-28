@@ -9,7 +9,7 @@ L * (L + 23) / 2 points in total, and Level 200 takes 22,300.
 
 Three rank names differ from the proposal until the committee settles the
 names (decision 3 in the plan): two that swear, and one that uses an office
-MLAI really has. ``RANKS`` marks them.
+MLAI really has. ``RANKS`` marks them and ``PENDING_RANK_NAMES`` lists them.
 """
 
 from math import isqrt
@@ -77,6 +77,7 @@ RANKS = (
     (194, "Frontier Human", "The benchmark is now whether the rest of us can keep up. We've requested more compute."),
     (200, "AGI with a Lanyard", "Got twelve volunteers to agree on a date. The labs would like a word."),
 )
+PENDING_RANK_NAMES = frozenset({"Hype Debugger", "Human in the Thick of It", "Department of Actually Shipping"})
 
 # (first level, key, name). Only the member sees their frame unless they share.
 FRAMES = (
