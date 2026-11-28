@@ -134,6 +134,22 @@ class SystemStoppedRunTests(TestCase):
         self.assertTrue(cards[0]["restartAvailable"])
         self.assertIsNone(stopped.follow_up(ContentFactoryRun.objects.get(pk=run.pk)))
 
+    def test_clear_saved_setup_is_never_ours_to_fix(self):
+        from django.utils import timezone
+        from . import founder_journey_p2, registry_policy
+        from .founder_setup_state import setup_state
+        setup_run = self.make_run(run_id="tala-setup", workflow="article_system_setup")
+        transition_connection(self.config, action="reset", expected=contract_for(self.connection), idempotency_key="reset-1")
+        setup_run.refresh_from_db()
+        self.assertEqual((setup_run.status, setup_run.result["cancellation_transition"]), ("cancelled", "reset"))
+        # B24 follows up article runs only; the setup simply starts again.
+        self.assertIsNone(stopped.stop_cause(setup_run))
+        state = setup_state(self.built.organization, company=self.built.company, user=self.built.owner)
+        self.assertNotIn("fixing", [step["state"] for step in state["steps"]])
+        with patch.object(registry_policy, "_policy_v2_for", return_value=True):
+            self.assertIsNone(founder_journey_p2.run_decision(self.built.organization, setup_run, config=self.config,
+                                                              user=self.built.owner, now=timezone.now()))
+
     def test_a_founder_cancel_gives_nothing(self):
         run = self.make_run(status="cancelled", result={"topic": "Synthetic topic", "cancellation_reason": "owner_cancelled",
             "cancelled_by": "owner"})

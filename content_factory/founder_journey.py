@@ -375,6 +375,66 @@ def is_owner_cancel(run) -> bool:
     return not (run.error or "")
 
 
+# Website actions that cancel in-flight runs (website_connections.transition_connection
+# records the action as ``cancellation_transition``). Pause and cleanup never stop a run.
+STOP_TRANSITIONS = frozenset({"disconnect", "reconnect", "reset", "revoke", "purge"})
+# website_operations.cancel_operation: Stop on a website operation, or the
+# system fencing a superseded prepare child (a newer setup run replaces it).
+OPERATION_CANCEL_ERROR = "Website operation cancelled."
+
+
+def is_owner_initiated_stop(run) -> bool:
+    """A stop that is not ours to fix: never "We're fixing this".
+
+    The owner's own cancel, a run stopped by a website action (Clear saved
+    setup, disconnect, reconnect, revoke, purge) or a cancelled website
+    operation (the owner's Stop, or a superseded prepare child). This is a read
+    projection only: system_stopped_runs still treats a transition stop as a
+    system stop for its restart or notice, and staff alerts are unchanged.
+    """
+    if is_owner_cancel(run):
+        return True
+    if run.status != "cancelled":
+        return False
+    result = _result(run)
+    if result.get("cancelled_by") == "staff":
+        return False
+    # The recorded facts answer first; only an unrecorded stop needs a lookup.
+    if result.get("cancellation_transition") in STOP_TRANSITIONS:
+        return True
+    if str(run.error or "").strip() == OPERATION_CANCEL_ERROR:
+        return True
+    # An authoritative run is cancelled through the transition's operation, and
+    # its receipt carries no transition: the operation's cancel list names it.
+    from .system_stopped_runs import transition_for
+    return transition_for(run) in STOP_TRANSITIONS
+
+
+def is_stale_setup_run(run, connection, config=None) -> bool:
+    """A stopped setup run that a later reset, reconnect or disconnect left behind.
+
+    Every transition that stops runs bumps the connection generation, so a
+    stopped setup run bound to an older generation belongs to a setup the owner
+    started over. A run the shallow reset tombstoned (``excludedRunIds``) counts
+    too. Legacy runs with neither fact are left to :func:`is_owner_initiated_stop`.
+    """
+    if run is None or run.workflow not in SETUP_WORKFLOWS or run.status not in SETUP_STOPPED_STATUSES | {"blocked"}:
+        return False
+    if config is not None:
+        from .article_setup_reset import article_setup_reset_excluded_run_ids
+        if str(run.run_id or "").strip() in article_setup_reset_excluded_run_ids(config):
+            return True
+    if connection is None:
+        return False
+    request = _mapping(run.run_request)
+    bound = request.get("website_connection_id")
+    if bound and str(bound) != str(connection.pk):
+        # Another connection's generation is not comparable.
+        return False
+    generation = request.get("connection_generation")
+    return type(generation) is int and generation < connection.generation
+
+
 def is_retrying(run) -> bool:
     """A failed or blocked run that Content Factory will run again (not terminal)."""
     if run.status not in FAILED_STATUSES:
@@ -825,7 +885,8 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
 
     if decision is None and run is not None and (
             (run.status in FAILED_STATUSES and not is_retrying(run))
-            or (run.status == "cancelled" and not is_owner_cancel(run))):
+            or (run.status == "cancelled" and not is_owner_initiated_stop(run))) \
+            and not is_stale_setup_run(run, connection, config):
         price, _balance = article_price_and_balance(organization, user)
         support = _support_code(run)
         from .no_generic_stop import is_generic_stop

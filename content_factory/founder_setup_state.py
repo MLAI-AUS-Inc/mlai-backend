@@ -3,6 +3,9 @@
 The founder journey answers with ``setup`` when the client asks for it
 (``?setup=1``): the four guided steps in the approved order (GitHub, target
 readers, authors, articles page), the one current step and at most one ask.
+Target readers and Authors are optional: they show done when saved and todo
+otherwise, and are never the current step, so only GitHub and the articles
+page can hold setup or the first article.
 It is computed here from the facts the clients read for themselves today
 (Chat ``setupProgress.ts`` and mobile ``startup_setup_progress.dart``), so the
 clients stop deriving the step and only render it.
@@ -23,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 SETUP_VERSION = 1
 STEP_IDS = ("github", "readers", "authors", "articles_page")
+# Owner decision 2026-11-28: Target readers and Authors are optional. They never
+# carry an ask or become current; an audience the founder has not approved is
+# asked once at article start instead (editorial_default_brief.ASK_ACTION).
+# Their asks stay in SETUP_ASK_LABELS: the schema and older clients name them.
+OPTIONAL_STEP_IDS = frozenset({"readers", "authors"})
 COMPLETE = "complete"
 # Step states. ``todo`` is a later step that is not current yet.
 STEP_STATES = ("done", "your_turn", "working", "fixing", "todo")
@@ -88,18 +96,20 @@ def decide_setup(facts: dict) -> dict:
     :data:`ARTICLES_PAGE_FACTS`), and optionally ``articlesPageAsk``,
     ``askUrl`` and ``askLabel`` for an operation's ask.
 
-    The current step is the first one, in the approved order, that is not
-    done; once every step is done it is ``complete``. Only the current step
-    can carry an ask, so there is exactly one current step and at most one ask.
+    The current step is the first required step (GitHub, articles page), in
+    the approved order, that is not done; once both are done it is
+    ``complete``. Readers and authors are optional: done when saved, else
+    todo, never current and never an ask. Only the current step can carry an
+    ask, so there is exactly one current step and at most one ask.
     """
     facts = _mapping(facts)
     decided = {
         "github": _github_step(facts.get("github")),
-        "readers": (True, "done", None) if facts.get("readers") is True else (False, "your_turn", "describe_customer"),
-        "authors": (True, "done", None) if facts.get("authors") is True else (False, "your_turn", "add_authors"),
+        "readers": (True, "done", None) if facts.get("readers") is True else (False, "todo", None),
+        "authors": (True, "done", None) if facts.get("authors") is True else (False, "todo", None),
         "articles_page": _articles_page_step(facts.get("articlesPage"), facts.get("articlesPageAsk")),
     }
-    current = next((step for step in STEP_IDS if not decided[step][0]), COMPLETE)
+    current = next((step for step in STEP_IDS if step not in OPTIONAL_STEP_IDS and not decided[step][0]), COMPLETE)
     steps = []
     for step in STEP_IDS:
         done, state, _ask = decided[step]
@@ -183,7 +193,10 @@ def _articles_page_facts(organization, *, company, config, user, marker, connect
         return {"articlesPage": "not_started"}
     if setup_run.status in _SETUP_ACTIVE:
         return {"articlesPage": "working"}
-    if setup_run.status == "cancelled" and journey.is_owner_cancel(setup_run):
+    if ((setup_run.status == "cancelled" and journey.is_owner_initiated_stop(setup_run))
+            or journey.is_stale_setup_run(setup_run, connection, config)):
+        # The owner's cancel, Clear saved setup, a disconnect or Stop, or a stop
+        # a later reset left behind: not ours to fix, so setup starts again.
         return {"articlesPage": "not_started"}
     # A stopped setup with no founder ask is ours to fix.
     return {"articlesPage": "fixing"}

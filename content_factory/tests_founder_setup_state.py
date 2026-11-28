@@ -51,13 +51,20 @@ class SetupDecisionMatrixTests(SimpleTestCase):
                 states = [step["state"] for step in body["steps"]]
                 self.assertEqual([step["id"] for step in body["steps"]], list(setup.STEP_IDS))
                 active = [step["id"] for step in body["steps"] if step["state"] not in {"done", "todo"}]
+                # Target readers and Authors are optional: never current, done or todo.
+                self.assertNotIn(body["current"], setup.OPTIONAL_STEP_IDS)
+                self.assertIn(states[1], {"done", "todo"})
+                self.assertIn(states[2], {"done", "todo"})
+                self.assertEqual(states[1] == "done", facts["readers"] is True)
+                self.assertEqual(states[2] == "done", facts["authors"] is True)
                 if body["current"] == setup.COMPLETE:
-                    self.assertEqual(states, ["done"] * 4)
+                    self.assertEqual((states[0], states[3]), ("done", "done"))
                     self.assertEqual((body["state"], body["ask"]), ("done", None))
                 else:
-                    # Exactly one current step: the first one not done, in the approved order.
+                    # Exactly one current step: the first required one not done, in the approved order.
                     self.assertEqual(active, [body["current"]])
-                    first = next(step["id"] for step in body["steps"] if step["state"] != "done")
+                    first = next(step["id"] for step in body["steps"]
+                                 if step["id"] not in setup.OPTIONAL_STEP_IDS and step["state"] != "done")
                     self.assertEqual(first, body["current"])
                     self.assertEqual(body["state"], states[setup.STEP_IDS.index(body["current"])])
                     after = states[setup.STEP_IDS.index(body["current"]) + 1:]
@@ -69,13 +76,21 @@ class SetupDecisionMatrixTests(SimpleTestCase):
                     self.assertTrue(body["ask"]["label"])
         self.assertGreater(count, 400)
 
-    def test_the_approved_order_github_first(self):
+    def test_readers_and_authors_never_block(self):
         body = setup.decide_setup({"github": "none", "readers": False, "authors": False, "articlesPage": "not_started"})
         self.assertEqual((body["current"], body["ask"]["id"]), ("github", "connect_github"))
         body = setup.decide_setup({"github": "connected", "readers": False, "authors": True, "articlesPage": "verified"})
-        self.assertEqual((body["current"], body["ask"]["id"]), ("readers", "describe_customer"))
-        body = setup.decide_setup({"github": "connected", "readers": True, "authors": False, "articlesPage": "verified"})
-        self.assertEqual((body["current"], body["ask"]["id"]), ("authors", "add_authors"))
+        self.assertEqual((body["current"], body["ask"]), ("complete", None))
+        self.assertEqual(body["steps"][1], {"id": "readers", "state": "todo"})
+        body = setup.decide_setup({"github": "connected", "readers": True, "authors": False, "articlesPage": "not_started"})
+        self.assertEqual((body["current"], body["ask"]["id"]), ("articles_page", "set_up_articles_page"))
+        self.assertEqual(body["steps"][2], {"id": "authors", "state": "todo"})
+        body = setup.decide_setup({"github": "connected", "readers": False, "authors": False, "articlesPage": "verified"})
+        self.assertEqual(body["current"], "complete")
+        self.assertEqual([step["state"] for step in body["steps"]], ["done", "todo", "todo", "done"])
+        # The asks stay in the closed list: older clients and the schema still name them.
+        self.assertIn("describe_customer", setup.SETUP_ASK_LABELS)
+        self.assertIn("add_authors", setup.SETUP_ASK_LABELS)
         body = setup.decide_setup({"github": "connected", "readers": True, "authors": True, "articlesPage": "fixing"})
         self.assertEqual((body["current"], body["state"], body["ask"]), ("articles_page", "fixing", None))
 
@@ -179,12 +194,11 @@ class SetupStateBothCohortsTests(TestCase):
                 self.assertEqual(state["ask"] is not None, state["state"] == "your_turn")
                 expected_github = {"none": "connect_github", "revoked": "authorize_github",
                                    "no_repository": "choose_repository"}.get(github)
+                # Target readers and Authors are optional: never current, done or todo.
+                self.assertEqual(state["steps"][1]["state"], "done" if readers else "todo")
+                self.assertEqual(state["steps"][2]["state"], "done" if authors else "todo")
                 if expected_github:
                     self.assertEqual((state["current"], state["ask"]["id"]), ("github", expected_github))
-                elif not readers:
-                    self.assertEqual((state["current"], state["ask"]["id"]), ("readers", "describe_customer"))
-                elif not authors:
-                    self.assertEqual((state["current"], state["ask"]["id"]), ("authors", "add_authors"))
                 elif github == "verified":
                     self.assertEqual((state["current"], state["ask"]), (setup.COMPLETE, None))
                 else:
@@ -242,6 +256,39 @@ class SetupStateBothCohortsTests(TestCase):
         run.save(update_fields=["status", "result"])
         state = self.journey(built, include_setup=True)["setup"]
         self.assertEqual((state["current"], state["state"], state["ask"]), ("articles_page", "fixing", None))
+
+    def test_a_setup_stopped_by_a_website_action_starts_again_and_is_not_ours_to_fix(self):
+        built = self.build("legacy", "connected", True, True)
+        from workflow_runs.models import ContentFactoryRun
+        connection = journeys._connection(built.organization)
+        run = ContentFactoryRun.objects.create(
+            run_id=f"setup-{uuid4().hex[:10]}", workflow="article_system_setup", domain=built.organization.domain,
+            organization=built.organization, status="cancelled", error="Website connection changed.",
+            result={"cancellation_reason": "system_stop", "cancelled_by": "system", "cancellation_transition": "reset"})
+        expected = ("articles_page", "your_turn", "set_up_articles_page")
+
+        def current():
+            state = self.journey(built, include_setup=True)["setup"]
+            return state["current"], state["state"], (state["ask"] or {}).get("id")
+
+        # Clear saved setup (reset) cancelled it.
+        self.assertEqual(current(), expected)
+        # The owner pressed Stop on the website operation.
+        run.error, run.result = "Website operation cancelled.", {}
+        run.save(update_fields=["error", "result"])
+        self.assertEqual(current(), expected)
+        # A staff cancel stays ours to fix.
+        run.error = "Website connection changed."
+        run.result = {"cancellation_reason": "system_stop", "cancelled_by": "staff", "cancellation_transition": "reset"}
+        run.save(update_fields=["error", "result"])
+        self.assertEqual(current(), ("articles_page", "fixing", None))
+        # A setup that had already failed before a reset bumped the generation.
+        run.status, run.error, run.result = "failed", "", {"error_code": "SOMETHING_OURS"}
+        run.run_request = {"website_connection_id": str(connection.pk), "connection_generation": connection.generation}
+        run.save(update_fields=["status", "error", "result", "run_request"])
+        self.assertEqual(current(), ("articles_page", "fixing", None))
+        type(connection).objects.filter(pk=connection.pk).update(generation=connection.generation + 1)
+        self.assertEqual(current(), expected)
 
 
 @override_settings(**ALL_P1_FLAGS_ON)

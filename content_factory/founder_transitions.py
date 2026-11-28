@@ -223,8 +223,7 @@ def _copy(event, state, organization):
     if event == "article_live":return "Your article is live!", f"{title} is now on {host}.", "View article"
     if event == "research_ready":return "Your research is ready", "Choose a topic for your next article.", "View your articles"
     if event == "article_stopped":
-        outcome = projection.optional("content_factory.no_delivery_refunds", "points_outcome", run)
-        line = projection.line("stopped", run=run, outcome=outcome)
+        line = projection.line("stopped", run=run, outcome=projection.article_outcome(run))
         return "We couldn't write this one", line["body"], "Open your startup"
     return {
         "ladder_exhausted": ("Your website's checks didn't accept the blog page", "Your articles are still ready to copy.", "Open your startup"),
