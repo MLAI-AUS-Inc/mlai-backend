@@ -14,7 +14,7 @@ from uuid import uuid4
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from roo.models import Ledger
-from . import founder_journey, founder_journey_p2, no_generic_stop, registry_policy
+from . import founder_journey, founder_journey_p2, no_generic_stop, p2_foundation, registry_policy
 from .incident_guards import NO_DELIVERY_REFUND_CODES
 from .tests_founder_journey_unit import JourneyFixture, make_run
 
@@ -143,6 +143,10 @@ class ArticleOutcomeTests(SimpleTestCase):
     """One points outcome for the journey card and the article_stopped email; no database."""
 
     def outcome(self, run, receipt):
+        # optional() resolves the seam through a cached lookup, so clear it to
+        # see this test's patch rather than an earlier one.
+        p2_foundation._optional.cache_clear()
+        self.addCleanup(p2_foundation._optional.cache_clear)
         with patch("content_factory.no_delivery_refunds.points_outcome", return_value=receipt):
             return founder_journey_p2.article_outcome(run)
 
