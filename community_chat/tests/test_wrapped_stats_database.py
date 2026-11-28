@@ -80,7 +80,6 @@ class WrappedStatsDatabaseTests(TestCase):
         [ada] = people
         self.assertEqual((ada.name, ada.name_source), ("Ada Lovelace", "chat_profile"))
         self.assertEqual(ada.roo_earned_microroo, 20_000_000)
-        self.assertEqual(ada.roo_paid_microroo, 100_000_000)
         self.assertEqual((ada.volunteer_minutes, ada.logged_minutes), (145, 25))
         self.assertEqual(ada.monthly_updates, 1)
         self.assertEqual((ada.coworking_days, ada.events_attended), (1, 1))

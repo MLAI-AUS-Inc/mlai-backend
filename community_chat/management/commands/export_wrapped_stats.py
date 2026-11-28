@@ -58,7 +58,10 @@ class Command(BaseCommand):
         overrides = dict(_override(value) for value in options["name"])
 
         people, selection = wrapped_people(year, now, scope=scope, member_ids=members, overrides=overrides)
-        result = sheet(people)
+        try:
+            result = sheet(people)
+        except ValueError as error:
+            raise CommandError(str(error)) from None
         if options["output"]:
             with open(options["output"], "w", encoding="utf-8", newline="") as handle:
                 handle.write(result["csv"])
@@ -77,6 +80,8 @@ class Command(BaseCommand):
             ))
         for item in review["needs_name"]:
             err.write(self.style.WARNING(f"Needs a confirmed name ({item['reason']}): {item['id']}"))
+        for item in review["pending_ranks"]:
+            err.write(self.style.WARNING(f"Rank {item['rank']} ({item['reason']}): {item['name']} {item['id']}"))
         for key, label in (
             ("unknown_profile_ids", "Unknown profile ID"),
             ("without_qualifying_record", "Selected but not in the member roster"),

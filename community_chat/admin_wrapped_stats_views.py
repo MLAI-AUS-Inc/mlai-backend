@@ -53,7 +53,10 @@ class AdminWrappedStatsView(MlaiAdminView):
         people, selection = wrapped_people(
             params["year"], now, scope=params["scope"], member_ids=params["member"],
         )
-        result = sheet(people)
+        try:
+            result = sheet(people)
+        except ValueError as error:
+            raise serializers.ValidationError({"scope": str(error)}) from None
         logger.info(
             "Wrapped stats exported by account %s: year %s, scope %s, %s rows",
             request.user.pk, params["year"], params["scope"], result["rows"],

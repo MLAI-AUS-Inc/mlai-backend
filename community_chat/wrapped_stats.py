@@ -15,7 +15,7 @@ Roo wallet credits come in three kinds, and Wrapped keeps them apart:
   monthly startup updates, arcade prizes and level bonuses.
 - **Paid** points are remuneration for a role or a service, not a
   contribution: the committee's weekly points remuneration and mentors'
-  session payouts (``PAID_POINTS_KINDS``).
+  session payouts (``PAID_POINTS_KINDS``). They never appear on the sheet.
 - **Purchased** top-ups (Stripe or Apple) are bought with money. They are
   excluded before this module sees a credit, as in every contribution report.
 
@@ -39,6 +39,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from types import SimpleNamespace
 
 from .volunteer.credits import COUNTS, NON_LEVEL_ACTIONS, classify
+from .volunteer.ladder import PENDING_RANK_NAMES
 from .volunteer.policy import MICROROO
 
 EARNED = "earned"
@@ -61,9 +62,12 @@ MONTHS = (
 
 NOTES = (
     "Roo points earned excludes paid points (committee remuneration and mentor "
-    "session payouts) and purchased top-ups; Roo points paid is shown separately.",
+    "session payouts) and purchased top-ups.",
     "Volunteer hours (est.) uses logged minutes where a member recorded them "
     "(from 2026-11-21) and otherwise 10 minutes per volunteering Roo point.",
+    "Monthly updates shipped counts approved monthly startup updates, so a "
+    "founder can ship several in one month.",
+    "Rank names listed as pending in the review still await the committee's decision.",
     "A zero leaves the cell empty, so media-intel shows no card for it.",
     "Standing columns rank each member within this export only.",
     "Badges and mentoring were only recorded from November 2026; volunteer "
@@ -90,7 +94,7 @@ def points_bucket(row, recognition_action=None):
 
 
 def is_monthly_update(row):
-    """A founder's monthly startup update reward: at most one per calendar month."""
+    """A founder's reward for one approved monthly startup update."""
     return classify(SimpleNamespace(
         source=row.get("source"), reference_type=row.get("reference_type"),
         description=row.get("description") or "",
@@ -105,7 +109,6 @@ class WrappedPerson:
     name: str
     name_source: str = "account"
     roo_earned_microroo: int = 0
-    roo_paid_microroo: int = 0
     volunteer_minutes: int = 0
     logged_minutes: int = 0
     events_attended: int = 0
@@ -122,10 +125,7 @@ class WrappedPerson:
     active_days: list[date] = field(default_factory=list)
 
     def add_credit(self, amount_microroo, bucket, volunteering, logged_minutes=None):
-        if bucket == PURCHASED:
-            return
-        if bucket == PAID:
-            self.roo_paid_microroo += amount_microroo
+        if bucket != EARNED:
             return
         self.roo_earned_microroo += amount_microroo
         if not volunteering:
@@ -170,7 +170,6 @@ def _count(value):
 # (heading, value). Headings are the card's words in media-intel.
 COLUMNS = (
     ("Roo points earned", lambda p: _count(whole_roo(p.roo_earned_microroo))),
-    ("Roo points paid", lambda p: _count(whole_roo(p.roo_paid_microroo))),
     ("Volunteer hours (est.)", lambda p: str(hours(p.volunteer_minutes)) if p.volunteer_minutes >= 6 else ""),
     ("Events attended", lambda p: _count(p.events_attended)),
     ("Volunteer check-ins", lambda p: _count(p.volunteer_check_ins)),
@@ -219,9 +218,13 @@ def review(people):
             else ""
         ] if reason
     ]
+    pending_ranks = [
+        dict(id=p.id, name=p.name, rank=p.rank, reason="rank name pending committee decision")
+        for p in people if p.rank in PENDING_RANK_NAMES
+    ]
     return dict(
         people=[dict(id=p.id, name=p.name, name_source=p.name_source) for p in people],
-        name_collisions=collisions, needs_name=needs_name,
+        name_collisions=collisions, needs_name=needs_name, pending_ranks=pending_ranks,
     )
 
 

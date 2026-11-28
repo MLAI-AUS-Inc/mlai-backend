@@ -15,7 +15,7 @@ from community_chat import wrapped_stats_data as data
 from community_chat.admin_member_progress_data import Activity, Person
 from community_chat.admin_wrapped_stats_views import AdminWrappedStatsView
 from community_chat.wrapped_stats import (
-    EARNED, HEADINGS, MAX_CELL, MAX_HEADING, MAX_STAT_COLUMNS, PAID, PURCHASED, WrappedPerson,
+    EARNED, HEADINGS, MAX_CELL, MAX_HEADING, MAX_ROWS, MAX_STAT_COLUMNS, PAID, PURCHASED, WrappedPerson,
     hours, points_bucket, sheet, standing,
 )
 from core.models import User
@@ -59,7 +59,7 @@ class PointsSplitTest(SimpleTestCase):
         person.add_credit(100 * ROO, PAID, False)
         person.add_credit(50 * ROO, PURCHASED, False)
         self.assertEqual((person.volunteer_minutes, person.logged_minutes), (105, 45))
-        self.assertEqual((person.roo_earned_microroo, person.roo_paid_microroo), (14 * ROO, 100 * ROO))
+        self.assertEqual(person.roo_earned_microroo, 14 * ROO)
         self.assertEqual(str(hours(105)), "1.8")
         self.assertEqual(str(hours(120)), "2")
 
@@ -67,7 +67,7 @@ class PointsSplitTest(SimpleTestCase):
 class SheetTest(SimpleTestCase):
     def people(self):
         ada = WrappedPerson(
-            id=str(UUID(int=1)), name="Ada Lovelace", roo_earned_microroo=120_400_000, roo_paid_microroo=400 * ROO,
+            id=str(UUID(int=1)), name="Ada Lovelace", roo_earned_microroo=120_400_000,
             volunteer_minutes=600, events_attended=9, coworking_days=20, badges=2, latest_badge="Mic Is On",
             level=12, rank="Prompt Wrangler", levels_climbed=7,
             active_days=[date(2026, 3, 1), date(2026, 3, 9), date(2026, 5, 1)],
@@ -85,6 +85,7 @@ class SheetTest(SimpleTestCase):
         self.assertTrue(all(len(heading) <= MAX_HEADING for heading in rows[0]))
         self.assertEqual(len(set(rows[0])), len(rows[0]))
         self.assertEqual(rows[0], list(HEADINGS))
+        self.assertNotIn("Roo points paid", rows[0])
         self.assertTrue(all(len(cell) <= MAX_CELL for row in rows for cell in row))
         self.assertEqual(result["rows"], 4)
         self.assertNotIn("@", result["csv"])
@@ -97,7 +98,6 @@ class SheetTest(SimpleTestCase):
         ada = by_name["Ada Lovelace"]
         self.assertEqual(ada["Name"], "Ada Lovelace")
         self.assertEqual(ada["Roo points earned"], "120")
-        self.assertEqual(ada["Roo points paid"], "400")
         self.assertEqual(ada["Volunteer hours (est.)"], "10")
         self.assertEqual(ada["Latest badge"], "Mic Is On")
         self.assertEqual(ada["Rank"], "Prompt Wrangler")
@@ -108,7 +108,6 @@ class SheetTest(SimpleTestCase):
         sam = by_name["Sam Lee"]
         self.assertEqual(sam["Events attended standing"], "Top 25%")
         self.assertEqual(sam["Roo points earned standing"], "Top 50%")
-        self.assertEqual(sam["Roo points paid"], "")
         self.assertEqual(sam["Mentoring sessions given"], "")
         self.assertEqual(sam["Days coworking standing"], "")
 
@@ -121,6 +120,17 @@ class SheetTest(SimpleTestCase):
         self.assertEqual(result["review"]["needs_name"], [
             dict(id=str(UUID(int=4)), name="MLAI member", reason="no name on record"),
         ])
+
+    def test_pending_rank_names_are_kept_and_listed_for_review(self):
+        pending = WrappedPerson(id=str(UUID(int=5)), name="Grace Hopper", level=28, rank="Hype Debugger")
+        result = sheet([*self.people(), pending])
+        rows = parse(result["csv"])
+        by_name = {row[0]: dict(zip(rows[0], row)) for row in rows[1:]}
+        self.assertEqual(by_name["Grace Hopper"]["Rank"], "Hype Debugger")
+        self.assertEqual(result["review"]["pending_ranks"], [dict(
+            id=str(UUID(int=5)), name="Grace Hopper", rank="Hype Debugger",
+            reason="rank name pending committee decision",
+        )])
 
     def test_standing_is_relative_to_the_exported_group(self):
         self.assertEqual(standing([5, 3, 3, 0], 3), "Top 50%")
@@ -177,7 +187,6 @@ class WrappedPeopleTest(SimpleTestCase):
         self.assertEqual(end_at, NOW)
         [person] = people
         self.assertEqual(person.roo_earned_microroo, 20 * ROO)
-        self.assertEqual(person.roo_paid_microroo, 100 * ROO)
         self.assertEqual((person.volunteer_minutes, person.logged_minutes), (145, 25))
         self.assertEqual(person.monthly_updates, 1)
         self.assertEqual((person.coworking_days, person.volunteer_check_ins, person.events_attended), (1, 1, 1))
@@ -210,11 +219,30 @@ class ExportSurfaceTest(SimpleTestCase):
                     call_command("export_wrapped_stats", *args, stdout=io.StringIO(), stderr=io.StringIO())
             load.assert_not_called()
 
+    def test_command_and_endpoint_reject_more_rows_than_media_intel_accepts(self):
+        self.assertEqual(MAX_ROWS, 5000)
+        crowd = ([WrappedPerson(id=str(UUID(int=n)), name=f"Member {n}") for n in range(5001)],
+                 dict(unknown_profile_ids=[], without_qualifying_record=[]))
+        with patch("community_chat.management.commands.export_wrapped_stats.wrapped_people", return_value=crowd), \
+             self.assertRaisesMessage(CommandError, "narrow the scope"):
+            call_command("export_wrapped_stats", "--year", "2026", "--scope", "all",
+                         stdout=io.StringIO(), stderr=io.StringIO())
+        request = APIRequestFactory().get(URL, dict(year=2026, scope="all"))
+        force_authenticate(request, user=User(pk=8, email="admin@example.test", is_active=True))
+        with patch("community_chat.admin_views.is_mlai_admin_request", return_value=True), \
+             patch("community_chat.admin_wrapped_stats_views.member_progress_capabilities",
+                   return_value={"member_progress"}), \
+             patch("community_chat.admin_wrapped_stats_views.wrapped_people", return_value=crowd):
+            response = resolve(URL).func(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("narrow the scope", str(response.data["scope"]))
+
     def test_command_writes_csv_to_stdout_and_review_to_stderr(self):
         person = WrappedPerson(id=str(UUID(int=9)), name="Ada Lovelace", events_attended=3)
+        pending = WrappedPerson(id=str(UUID(int=10)), name="Grace Hopper", rank="Department of Actually Shipping")
         out, err = io.StringIO(), io.StringIO()
         with patch("community_chat.management.commands.export_wrapped_stats.wrapped_people",
-                   return_value=([person], dict(unknown_profile_ids=[], without_qualifying_record=[]))) as run:
+                   return_value=([person, pending], dict(unknown_profile_ids=[], without_qualifying_record=[]))) as run:
             call_command("export_wrapped_stats", "--year", "2026", "--name", f"{UUID(int=9)}=Ada L.",
                          stdout=out, stderr=err)
         self.assertEqual(run.call_args.kwargs["overrides"], {str(UUID(int=9)): "Ada L."})
@@ -222,6 +250,8 @@ class ExportSurfaceTest(SimpleTestCase):
         self.assertEqual(parse(out.getvalue())[1][0], "Ada Lovelace")
         self.assertNotIn(str(UUID(int=9)), out.getvalue())
         self.assertIn(str(UUID(int=9)), err.getvalue())
+        self.assertIn("rank name pending committee decision", err.getvalue())
+        self.assertIn("Grace Hopper", err.getvalue())
 
     def test_endpoint_is_gated_like_member_progress(self):
         self.assertIs(resolve(URL).func.view_class, AdminWrappedStatsView)
