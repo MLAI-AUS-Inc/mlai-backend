@@ -183,7 +183,10 @@ def _articles_page_facts(organization, *, company, config, user, marker, connect
         return {"articlesPage": "not_started"}
     if setup_run.status in _SETUP_ACTIVE:
         return {"articlesPage": "working"}
-    if setup_run.status == "cancelled" and journey.is_owner_cancel(setup_run):
+    if ((setup_run.status == "cancelled" and journey.is_owner_initiated_stop(setup_run))
+            or journey.is_stale_setup_run(setup_run, connection, config)):
+        # The owner's cancel, Clear saved setup, a disconnect or Stop, or a stop
+        # a later reset left behind: not ours to fix, so setup starts again.
         return {"articlesPage": "not_started"}
     # A stopped setup with no founder ask is ours to fix.
     return {"articlesPage": "fixing"}

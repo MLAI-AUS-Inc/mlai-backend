@@ -96,7 +96,7 @@ def founder_cancelled(run) -> bool:
     return run.status == "cancelled" and str(run.error or "").strip() == LEGACY_OWNER_MESSAGE
 
 
-def _transition_for(run):
+def transition_for(run):
     """The connection transition whose cancellation list names this run, if any."""
     from .website_models import WebsiteConnectionOperation
     saved = _mapping(run.run_request)
@@ -115,6 +115,10 @@ def _transition_for(run):
         if run.run_id in named:
             return action
     return None
+
+
+# The original private name, kept for existing callers.
+_transition_for = transition_for
 
 
 def stop_cause(run):

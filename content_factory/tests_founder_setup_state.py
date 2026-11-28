@@ -244,6 +244,40 @@ class SetupStateBothCohortsTests(TestCase):
         self.assertEqual((state["current"], state["state"], state["ask"]), ("articles_page", "fixing", None))
 
 
+    def test_a_setup_stopped_by_a_website_action_starts_again_and_is_not_ours_to_fix(self):
+        built = self.build("legacy", "connected", True, True)
+        from workflow_runs.models import ContentFactoryRun
+        connection = journeys._connection(built.organization)
+        run = ContentFactoryRun.objects.create(
+            run_id=f"setup-{uuid4().hex[:10]}", workflow="article_system_setup", domain=built.organization.domain,
+            organization=built.organization, status="cancelled", error="Website connection changed.",
+            result={"cancellation_reason": "system_stop", "cancelled_by": "system", "cancellation_transition": "reset"})
+        expected = ("articles_page", "your_turn", "set_up_articles_page")
+
+        def current():
+            state = self.journey(built, include_setup=True)["setup"]
+            return state["current"], state["state"], (state["ask"] or {}).get("id")
+
+        # Clear saved setup (reset) cancelled it.
+        self.assertEqual(current(), expected)
+        # The owner pressed Stop on the website operation.
+        run.error, run.result = "Website operation cancelled.", {}
+        run.save(update_fields=["error", "result"])
+        self.assertEqual(current(), expected)
+        # A staff cancel stays ours to fix.
+        run.error = "Website connection changed."
+        run.result = {"cancellation_reason": "system_stop", "cancelled_by": "staff", "cancellation_transition": "reset"}
+        run.save(update_fields=["error", "result"])
+        self.assertEqual(current(), ("articles_page", "fixing", None))
+        # A setup that had already failed before a reset bumped the generation.
+        run.status, run.error, run.result = "failed", "", {"error_code": "SOMETHING_OURS"}
+        run.run_request = {"website_connection_id": str(connection.pk), "connection_generation": connection.generation}
+        run.save(update_fields=["status", "error", "result", "run_request"])
+        self.assertEqual(current(), ("articles_page", "fixing", None))
+        type(connection).objects.filter(pk=connection.pk).update(generation=connection.generation + 1)
+        self.assertEqual(current(), expected)
+
+
 @override_settings(**ALL_P1_FLAGS_ON)
 class SetupStateEndpointTests(TestCase):
     def setUp(self):

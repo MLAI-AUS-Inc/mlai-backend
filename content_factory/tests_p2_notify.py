@@ -298,6 +298,10 @@ class NotificationTests(TransactionTestCase):
             run = self.make_run(result, status=status)
             decision = projection.run_decision(self.org, run, config=self.fixture.config, user=self.owner, now=self.now)
             self.assertEqual(decision["copyId"], copy_id, result)
+        # A run that Clear saved setup (reset) stopped is not ours to fix: no P2 line.
+        run = self.make_run({"cancellation_reason": "system_stop", "cancelled_by": "system",
+                             "cancellation_transition": "reset"}, status="cancelled")
+        self.assertIsNone(projection.run_decision(self.org, run, config=self.fixture.config, user=self.owner, now=self.now))
         run = self.make_run(status="queued")
         decision = projection.run_decision(self.org, run, config=self.fixture.config, user=self.owner, now=self.now, queue={"queuePosition": 2, "etaSeconds": 180})
         self.assertEqual(decision["copyId"], "working_queue")

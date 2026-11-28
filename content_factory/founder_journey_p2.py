@@ -137,8 +137,17 @@ def developer_note(organization, run):
     return {"subject": "Blog page checks for " + site, "body": text}
 
 
-def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=None, expected=None):
-    """Exact contract copy with one canonical ask or one next action."""
+# Desktop founderOutcome.ts uses the same setup copy for a setup stop.
+SETUP_FIXING_BODY = ("Setting up your articles page stopped for a reason our team needs to fix. "
+                     "We've told the team, so you don't need to do anything right now.")
+
+
+def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=None, expected=None, article=True):
+    """Exact contract copy with one canonical ask or one next action.
+
+    ``article`` False (a website setup run) gives the setup stop copy: no
+    article points line, no retry button and the ``setup`` stage.
+    """
     run_id = getattr(run, "run_id", None)
     headline, body, label, ask, next_kind = "Working on it", "Still working.", None, None, "view_progress"
     if copy_id == "working_slow":
@@ -176,6 +185,9 @@ def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=Non
         headline = "Your articles are still ready to copy" if exhausted else "Your article is ready to copy"
         body = "Your website's own checks didn't accept the new blog page." if exhausted else "We'll offer to add it to your website once your blog page works."
         label, next_kind = ("Send details to my developer" if exhausted else "Read your article"), "view_draft"
+    elif copy_id in {"fixing", "stopped"} and not article:
+        # Website setup is not an article: no points line and no retry button.
+        copy_id, headline, body, next_kind = "fixing", "We're fixing this", SETUP_FIXING_BODY, None
     elif copy_id == "fixing":
         # B10: a generic stop is ours to fix. Staff were alerted when it arrived;
         # the points lines are the stop's, so a refund still shows.
@@ -198,7 +210,7 @@ def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=Non
         label, next_kind = ("Write my first article · free", "write_first_article") if free else ("Try another topic", "write_article")
     if notify and copy_id in {"working", "working_slow", "working_queue", "working_website_update"}:
         body += " " + {"working": "We'll email you when it's done.", "working_website_update": "We'll email you when it's live."}.get(copy_id, "We'll email you when it's ready.")
-    return {"stage": "review" if ask == "review_draft" else "setup" if ask in {"approve_setup", "authorize_github", "approve_on_github"} else "done" if copy_id.startswith("done_") or copy_id == "stopped" else "writing",
+    return {"stage": "review" if ask == "review_draft" else "setup" if ask in {"approve_setup", "authorize_github", "approve_on_github"} or (not article and copy_id == "fixing") else "done" if copy_id.startswith("done_") or copy_id == "stopped" else "writing",
         "state": "your_turn" if ask else "done" if copy_id.startswith("done_") or copy_id == "stopped" else "working",
         "headline": headline, "body": body, "copyId": copy_id,
         "action": {"id": ask, "label": label, "url": None} if ask else None,
@@ -222,13 +234,35 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
         if child is not None:
             child["runId"] = run.run_id
             return child
+        from .founder_journey import is_owner_initiated_stop
+        if publication.status == "cancelled" and is_owner_initiated_stop(publication):
+            # A publish the owner's website action stopped is not still publishing.
+            return None
         return line("working_publishing", run=run)
+    from .founder_journey import SETUP_WORKFLOWS, _connection, is_owner_initiated_stop, is_stale_setup_run
+    if run.status == "cancelled" and is_owner_initiated_stop(run):
+        # The owner's own cancel, Clear saved setup, a disconnect or Stop: no
+        # card, so the setup prompt or the normal next step shows.
+        return None
+    if run.workflow in SETUP_WORKFLOWS and is_stale_setup_run(run, _connection(organization), config):
+        return None  # Clear saved setup, reconnect or disconnect started setup over.
     code = result.get("error_code") or mapping(result.get("failure")).get("code")
     entry = registry_policy.effective_entry(code, organization)
     channel = mapping(result.get("channel_v1"))
     count = claims_count(run)
     notify = emailable(organization, user)
-    outcome = optional("content_factory.no_delivery_refunds", "points_outcome", run)
+    from .run_state import ARTICLE_WORKFLOWS
+    # A publication child counts as its article; a setup run has no points line.
+    article = run.workflow in ARTICLE_WORKFLOWS or not follow_publication
+    outcome = optional("content_factory.no_delivery_refunds", "points_outcome", run) if article else None
+    if follow_publication and run.workflow in ARTICLE_WORKFLOWS and (outcome is None or outcome.get("state") == "pending"):
+        # Nothing was charged for this article, so there are no points to check.
+        # (A publication child carries no points fields of its own: never here.)
+        from .billing_lineage import paid_article_request
+        from .first_article_entitlement import entitled_request
+        saved = mapping(run.run_request)
+        if not paid_article_request(saved) and not entitled_request(saved):
+            outcome = {"state": "no_charge", "points": None}
     copy_id = None
     if run.status == "queued" and queue and queue.get("queuePosition"):
         copy_id = "working_queue"
@@ -269,7 +303,7 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
     if copy_id is None:
         return None
     decision = line(copy_id, run=run, count=count, notify=notify, queue=queue, outcome=outcome,
-        expected=mapping(result.get("site_test_v1")).get("expected"))
+        expected=mapping(result.get("site_test_v1")).get("expected"), article=article)
     if decision["action"] and decision["action"]["id"] == "approve_on_github":
         decision["action"]["url"] = mapping(result.get("site_test_v1")).get("pr_url") or mapping(result.get("publish_pr_v1")).get("pr_url") or result.get("pr_url")
     if copy_id == "working_website_update":

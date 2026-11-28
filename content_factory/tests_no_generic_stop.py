@@ -7,13 +7,14 @@ alerted when it arrives. Refunds are unchanged: the replacement code is a
 no-delivery refund code.
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from roo.models import Ledger
-from . import founder_journey_p2, no_generic_stop, registry_policy
+from . import founder_journey, founder_journey_p2, no_generic_stop, registry_policy
 from .incident_guards import NO_DELIVERY_REFUND_CODES
 from .tests_founder_journey_unit import JourneyFixture, make_run
 
@@ -56,6 +57,87 @@ class GenericStopRuleTests(SimpleTestCase):
         self.assertEqual(founder_journey_p2.line("fixing", outcome={"state": "no_charge"})["body"], "No charge.")
         self.assertIsNone(founder_journey_p2.line("fixing")["action"])
 
+    def test_a_paid_article_still_checks_its_points(self):
+        body = founder_journey_p2.line("fixing", outcome={"state": "pending"})
+        self.assertEqual(body["body"], "We're checking the points for this article.")
+        self.assertEqual(body["stage"], "writing")
+
+    def test_a_setup_stop_has_the_setup_copy_and_no_points_line(self):
+        for copy_id in ("fixing", "stopped"):
+            for outcome in ({"state": "pending"}, None, {"state": "refunded", "points": 12}):
+                with self.subTest(copy_id=copy_id, outcome=outcome):
+                    body = founder_journey_p2.line(copy_id, article=False, outcome=outcome)
+                    self.assertEqual((body["copyId"], body["headline"], body["body"]),
+                                     ("fixing", "We're fixing this", founder_journey_p2.SETUP_FIXING_BODY))
+                    self.assertNotIn("points", body["body"])
+                    self.assertEqual((body["stage"], body["state"]), ("setup", "working"))
+                    self.assertIsNone(body["action"])
+                    self.assertIsNone(body["next"])
+
+
+def _run(status="cancelled", *, result=None, error="", workflow="article_system_setup", request=None, run_id="run-1"):
+    return SimpleNamespace(status=status, result=result if result is not None else {}, error=error, workflow=workflow,
+                           run_request=request if request is not None else {}, run_id=run_id)
+
+
+class OwnerInitiatedStopTests(SimpleTestCase):
+    """Who stopped a run, read from its own record; no database."""
+
+    def test_owner_cancels_and_website_actions_are_not_ours_to_fix(self):
+        self.assertTrue(founder_journey.is_owner_initiated_stop(_run(result={"cancellation_reason": "owner_cancelled"})))
+        self.assertTrue(founder_journey.is_owner_initiated_stop(_run(result={"cancelled_by": "owner"})))
+        for transition in ("reset", "disconnect", "reconnect", "revoke", "purge"):
+            with self.subTest(transition=transition):
+                run = _run(error="Website connection changed.", result={
+                    "cancellation_reason": "system_stop", "cancelled_by": "system",
+                    "cancellation_transition": transition})
+                self.assertTrue(founder_journey.is_owner_initiated_stop(run))
+        self.assertTrue(founder_journey.is_owner_initiated_stop(_run(error="Website operation cancelled.")))
+
+    def test_staff_failures_and_other_system_stops_stay_ours(self):
+        staff = _run(result={"cancellation_reason": "system_stop", "cancelled_by": "staff",
+                             "cancellation_transition": "reset"})
+        self.assertFalse(founder_journey.is_owner_initiated_stop(staff))
+        self.assertFalse(founder_journey.is_owner_initiated_stop(_run("failed", error="Website operation cancelled.")))
+        lost = _run(error="Worker stopped.", result={"cancellation_reason": "worker_heartbeat_lost",
+                                                     "cancelled_by": "system"})
+        self.assertFalse(founder_journey.is_owner_initiated_stop(lost))
+        # Pause and cleanup never stop a run.
+        paused = _run(error="Website connection changed.", result={
+            "cancellation_reason": "system_stop", "cancelled_by": "system", "cancellation_transition": "pause"})
+        self.assertFalse(founder_journey.is_owner_initiated_stop(paused))
+
+    def test_the_recorded_facts_answer_before_any_lookup(self):
+        with patch("content_factory.system_stopped_runs.transition_for", side_effect=AssertionError("lookup")):
+            self.assertTrue(founder_journey.is_owner_initiated_stop(_run(result={"cancellation_transition": "reset"})))
+            self.assertTrue(founder_journey.is_owner_initiated_stop(_run(error="Website operation cancelled.")))
+        with patch("content_factory.system_stopped_runs.transition_for", return_value="reset") as lookup:
+            self.assertTrue(founder_journey.is_owner_initiated_stop(_run(error="Website connection changed.")))
+        lookup.assert_called_once()
+
+    def test_a_stopped_setup_from_an_older_generation_is_stale(self):
+        connection = SimpleNamespace(pk=7, generation=4)
+        old = {"website_connection_id": "7", "connection_generation": 3}
+        self.assertTrue(founder_journey.is_stale_setup_run(_run("failed", request=old), connection))
+        self.assertTrue(founder_journey.is_stale_setup_run(_run("cancelled", request=old), connection))
+        self.assertTrue(founder_journey.is_stale_setup_run(_run("blocked", request=old), connection))
+        current = {"website_connection_id": "7", "connection_generation": 4}
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("failed", request=current), connection))
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("running", request=old), connection))
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("failed", request=old, workflow="article_generation"),
+                                                            connection))
+        other = {"website_connection_id": "8", "connection_generation": 1}
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("failed", request=other), connection))
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("failed"), connection))  # legacy: no generation
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("failed", request=old), None))
+        self.assertFalse(founder_journey.is_stale_setup_run(None, connection))
+
+    def test_a_setup_run_the_shallow_reset_tombstoned_is_stale(self):
+        config = SimpleNamespace(article_system={"article_setup_reset": {"excludedRunIds": ["setup-old"]}})
+        self.assertTrue(founder_journey.is_stale_setup_run(_run("failed", run_id="setup-old"), None, config))
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("failed", run_id="setup-new"), None, config))
+        self.assertFalse(founder_journey.is_stale_setup_run(_run("running", run_id="setup-old"), None, config))
+
 
 class P1JourneyGenericStopTests(JourneyFixture, TestCase):
     """The flag-off path of the failure policy: the P1 journey cases."""
@@ -93,6 +175,14 @@ class P1JourneyGenericStopTests(JourneyFixture, TestCase):
         self.refunded_run({"failure_class": "permanent"})
         self.assertEqual(self.journey()["body"], "We couldn't write this one. Your points are back.")
 
+    def test_an_article_stopped_by_clear_saved_setup_is_not_a_failure_card(self):
+        make_run(self.org, status="cancelled", step="write_article", result={
+            "cancellation_reason": "system_stop", "cancelled_by": "system", "cancellation_transition": "reset"})
+        body = self.journey()
+        self.assertNotEqual(body["headline"], "We're fixing this")
+        self.assertNotIn(body.get("copyId"), {"fixing", "failed"})
+        self.assertNotIn("We couldn't write this one", body.get("body") or "")
+
 
 class P2CopyGenericStopTests(JourneyFixture, TestCase):
     def test_copy_id_for_answers_fixing_for_a_generic_terminal_in_the_cohort(self):
@@ -106,6 +196,64 @@ class P2CopyGenericStopTests(JourneyFixture, TestCase):
             with override_settings(ARTICLES_NO_GENERIC_STOP_ENABLED=False):
                 self.assertEqual(registry_policy.copy_id_for(None, organization=self.org, terminal=True,
                                                              self_heal=None), "stopped")
+
+    def decide(self, run):
+        from django.utils import timezone
+        with patch.object(registry_policy, "_policy_v2_for", return_value=True):
+            return founder_journey_p2.run_decision(self.org, run, config=self.built.config, user=self.owner,
+                                                   now=timezone.now())
+
+    def test_a_setup_stopped_by_the_owner_or_a_website_action_has_no_card(self):
+        reset = make_run(self.org, workflow="article_system_setup", status="cancelled", step="setup",
+                         result={"cancellation_reason": "system_stop", "cancelled_by": "system",
+                                 "cancellation_transition": "reset"})
+        self.assertIsNone(self.decide(reset))
+        stop = make_run(self.org, workflow="article_system_setup", status="cancelled", step="setup",
+                        result={})
+        stop.error = "Website operation cancelled."
+        stop.save(update_fields=["error"])
+        self.assertIsNone(self.decide(stop))
+
+    def test_a_setup_that_failed_before_a_reset_has_no_card(self):
+        connection = self.connection()
+        run = make_run(self.org, workflow="article_system_setup", status="failed", step="setup",
+                       request={"website_connection_id": str(connection.pk),
+                                "connection_generation": connection.generation})
+        self.assertEqual(self.decide(run)["copyId"], "fixing")
+        type(connection).objects.filter(pk=connection.pk).update(generation=connection.generation + 1)
+        self.assertIsNone(self.decide(run))
+
+    def test_a_setup_stop_ours_to_fix_has_the_setup_copy_and_no_points_line(self):
+        staff = make_run(self.org, workflow="article_system_setup", status="cancelled", step="setup",
+                         result={"cancellation_reason": "system_stop", "cancelled_by": "staff",
+                                 "cancellation_transition": "reset"})
+        failed = make_run(self.org, workflow="article_system_setup", status="failed", step="setup")
+        for run in (staff, failed):
+            with self.subTest(status=run.status):
+                decision = self.decide(run)
+                self.assertEqual((decision["copyId"], decision["headline"], decision["stage"]),
+                                 ("fixing", "We're fixing this", "setup"))
+                self.assertEqual(decision["body"], founder_journey_p2.SETUP_FIXING_BODY)
+                self.assertNotIn("points", decision["body"])
+
+    def test_an_article_that_charged_nothing_reads_no_charge(self):
+        unpaid = make_run(self.org, status="failed", step="write_article",
+                          request={"delivery_mode": "content_only"})
+        with patch("content_factory.no_delivery_refunds.points_outcome", return_value={"state": "pending", "points": None}):
+            self.assertEqual(self.decide(unpaid)["body"], "No charge.")
+            paid = make_run(self.org, status="failed", step="write_article",
+                            request={"delivery_mode": "content_only", "roo_points_billing_status": "charged"})
+            self.assertEqual(self.decide(paid)["body"], "We're checking the points for this article.")
+
+    def test_a_failed_publish_of_a_paid_article_does_not_read_no_charge(self):
+        source = make_run(self.org, status="completed", step="write_article",
+                          request={"delivery_mode": "content_only", "roo_points_billing_status": "charged"})
+        child = make_run(self.org, status="failed", step="publish", request={"delivery_mode": "content_only"})
+        with patch("content_factory.publish_reviewed_draft.published_child_for_source", return_value=child), \
+                patch("content_factory.no_delivery_refunds.points_outcome", return_value={"state": "pending", "points": None}):
+            decision = self.decide(source)
+        self.assertEqual(decision["runId"], source.run_id)
+        self.assertNotEqual(decision["body"], "No charge.")
 
 
 class GenericStopAlertTests(JourneyFixture, TestCase):
