@@ -113,3 +113,21 @@ Synthetic regression coverage lives in
 private-channel import tests. Production read-only checks can verify the target
 catalog and Slack membership without posting a message. Live conversational
 verification follows the explicit testing authorization rule above.
+
+## Invoking Public Roo inside a member DM
+
+The composer sends an explicit Public Roo selection to
+`POST /api/v1/community-chat/roo/command/` using the member's Chat account
+session. Its JSON body has three fields, `text`, `tags` and `request_id`.
+Only the current draft and its selected identities are shared. The response
+contains a private `message` for the requesting composer. The API accepts
+no room, history, parent, attachments or actor fields and performs no membership
+changes. The member's current device, linked Slack identity and AI consent
+are checked before dispatch. Existing Roo skill permissions apply.
+
+Deploy Public Roo's internal `/api/chat-command` first. Configure the existing
+`ROO_SERVICE_URL` and matching `ROO_INTERNAL_MENTION_API_KEY` over the private
+service route. Community Home advertises `roo_private_commands` when configured.
+The same flow works in native and mirrored DMs. A retry from the same draft
+uses its original request ID. After an uncertain result, check the action's
+outcome before creating a new command.
