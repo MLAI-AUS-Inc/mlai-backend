@@ -568,14 +568,15 @@
         "operation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "7bdd28ae8cba769eb682842cf742bca615bbc9e9fba4cda938f42b974ef3cba2",
+      "function_sha256": "c93270374cf39f3980188429ef2d94ed4c86fdb32620d20d3c14764c6000b122",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_failure_policy.py",
-        "content_factory/tests_self_heal_class_before_wall.py"
+        "content_factory/tests_self_heal_class_before_wall.py",
+        "content_factory/tests_p2_policy.py"
       ],
-      "reason": "This newly inferred save is WebsiteConnectionOperation receipt/payload/state, not Run; the enclosing legacy policy executor freshly refuses owned Run before effects. A capped stop records the engine stop under self_heal_v1.stop beside the unchanged original error_code (B2, flagged).",
+      "reason": "This newly inferred save is WebsiteConnectionOperation receipt/payload/state, not Run; the enclosing legacy policy executor freshly refuses owned Run before effects. A capped stop records the engine stop under self_heal_v1.stop beside the unchanged original error_code (B2, flagged). Only an exact versioned refusal for this setup recovery key proves the task was never reserved. A conflict transfers the uncertain attempt to staff.",
       "guard": "_fresh_owned_run early return; decide/apply/scheduler owned-goal child defer; operation queryset/type.",
       "pending_owner": null
     },
@@ -5835,8 +5836,8 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_decide",
-      "function_sha256": "45e3230e6a946d91ac854d75b868a8a3f967d4b85dbd99c396b53cc4c2f3be6c",
-      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch. An indeterminate reserved remote action hands off to staff and suppresses another dispatch or refund.",
+      "function_sha256": "2ce3687afa90e2158739efb3fa31b555b2225553d6c4aea3dfabe5ab1326da55",
+      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch. An indeterminate reserved remote action hands off to staff and suppresses another dispatch or refund. A refused or staff-held recovery receipt is terminal for automatic recovery.",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_background_alert_audience.py",
@@ -5847,8 +5848,8 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "apply",
-      "function_sha256": "3aa4f4b6cad8566108df449a5002fce89f1f44fd20be531beccd1a5747f5c856",
-      "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed. After the third ambiguous authenticated resume response the locked action receipt transfers to staff, keeping the same attempt and budget.",
+      "function_sha256": "ce7d4eabc75d871901df682825ee68dc7806917b0a8dcd2d045373e44b1a2575",
+      "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed. After the third ambiguous authenticated resume response the locked action receipt transfers to staff, keeping the same attempt and budget. An exact refusal releases only its unused slot after the organization, configuration and run are locked and the winning claim is rechecked. Ambiguous conflicts retain the slot.",
       "test_refs": [
         "content_factory/tests_p2_policy.py",
         "content_factory/tests_run_policy_retirement.py",
@@ -5878,11 +5879,12 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_execute_run",
-      "function_sha256": "7bdd28ae8cba769eb682842cf742bca615bbc9e9fba4cda938f42b974ef3cba2",
-      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
+      "function_sha256": "c93270374cf39f3980188429ef2d94ed4c86fdb32620d20d3c14764c6000b122",
+      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch. Only an exact versioned refusal for this setup recovery key proves the task was never reserved. A conflict transfers the uncertain attempt to staff.",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
-        "content_factory/tests_self_heal_class_before_wall.py"
+        "content_factory/tests_self_heal_class_before_wall.py",
+        "content_factory/tests_p2_policy.py"
       ]
     },
     {
