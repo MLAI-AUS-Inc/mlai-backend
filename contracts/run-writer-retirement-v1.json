@@ -4196,10 +4196,12 @@
         "candidate"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "a20fa63c7bed2e31c547855301b47126472f1825b58854b734c1c9c05c6aabd6",
+      "function_sha256": "5ebf5130a831d94d65e37585df0fd02dab451091890f31e0b8407f594a691e5d",
       "classification": "non_cf_model",
-      "test_refs": [],
-      "reason": "candidate is WebsiteConnectionOperation; reservation/supersession modifies operation state only.",
+      "test_refs": [
+        "content_factory/tests_dispatch_outcomes_unit.py"
+      ],
+      "reason": "candidate is WebsiteConnectionOperation; reservation/supersession modifies operation state only. Newly created setup operations pin their verified scan under the existing connection guard. Replays reuse the recorded operation pin.",
       "guard": "WebsiteConnectionOperation query assignment.",
       "pending_owner": null
     },
