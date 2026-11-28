@@ -84,7 +84,7 @@ def owner_can_retry(state, receipt) -> bool:
     """Whether the owner's Try again can change this preparation's outcome."""
     receipt = _mapping(receipt)
     if state == "cancelled":
-        # The owner pressed Stop: starting again is always theirs.
+        # At a saved dispatch cap, this click hands the stopped case back to staff.
         return True
     if state not in STOPPED_STATES:
         return False
@@ -92,9 +92,9 @@ def owner_can_retry(state, receipt) -> bool:
         # B11/B25: staff hold the fix, or it closed with an honest answer.
         # C7: delivered as content files; a retry cannot make it live.
         return False
-    from . import website_prepare_setup_cap as setup_cap
     from .website_prepare_sticky_stop import budget_hold_active
-    if isinstance(receipt.get(setup_cap.HELD_KEY), dict) or budget_hold_active(receipt):
+    from .website_prepare_setup_cap import held_for_staff
+    if held_for_staff(state, receipt) or budget_hold_active(receipt):
         return False
     failure = _mapping(receipt.get("failure"))
     if receipt.get("failure_taxonomy_policy_applied") and failure.get("failure_class") == "unsupported":

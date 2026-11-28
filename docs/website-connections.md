@@ -124,12 +124,25 @@ live check. With the flag off, merged articles still count as published and
 while explicitly retryable worker failures retain bounded retries. Owners may cancel
 an active or waiting prepare operation and explicitly reopen it with another Prepare
 click; cancelling fences its child and queues the ordinary run cancellation path.
+Once a preparation stops at its setup dispatch limit, retrying the same goal
+with unchanged consent returns HTTP 409 (`website_prepare_blocked`) and
+preserves its attempt count. An enrolled owner who submits different setup
+choices or a different goal follows the ordinary successor-goal consent checks.
+The owner card hides Prepare and Stop for that hold. If the owner previously
+stopped a capped operation, an explicit retry returns it to staff review
+without starting work or changing its dispatch count. Staff can review the
+operation and use its audited `restart_prepare` action with `resetAttemptCap`
+when the other recovery checks and the organisation's daily PR budget allow it.
 Choosing an ambiguous page through the existing setup form saves and attaches that
 direct setup child to the waiting prepare. Its saved company/domain, setup workflow,
 route and original connection tuple must match; its own workflow operation remains
 unchanged. A callback that wakes preparation before the handoff is saved adopts the
 same saved child, and bounded waiting while dispatch is in flight prevents a second
 setup request. A directly blocked child retains its actual failure prompt.
+New repository setup requests save the source commit from the selected website's
+current-generation inventory before dispatch. When the request selects a scan,
+that scan must supply the matching evidence. A retry uses the original pin.
+Setups without matching inventory keep their existing worker-side source check.
 
 Repository selection (plan E8). `GET /github/repos` ranks the founder's
 repositories (homepage equals the domain, the domain in `CNAME` or the wrangler,

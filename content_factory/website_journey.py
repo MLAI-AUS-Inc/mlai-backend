@@ -4,6 +4,7 @@ from .activation import mapping
 from .website_contract import evidence_digest
 from .website_discovery import discovery_snapshot
 from .website_operations import deletion_epoch, operation_summary
+from .website_prepare_setup_cap import held_for_staff
 from .activation import VERIFICATION_MAX_AGE
 from .article_publication_policy import can_publish_article
 from django.utils import timezone
@@ -151,8 +152,10 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     if account_access:
         allowed.append("github-revoke")
     if website:
+        prepare_held = bool(operation and operation.get("action") == "prepare"
+            and held_for_staff(operation.get("state"), mapping(operation.get("receipt"))))
         allowed += ["disconnect", "reset", "purge", "reconcile", "github-revoke"]
-        if connected and write_access and write_allowed:
+        if connected and write_access and write_allowed and (not prepare_held or operation.get("state") == "cancelled"):
             allowed.append("prepare")
         if access:
             if not permissions_ready:
@@ -167,7 +170,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             allowed.append("cleanup")
         if proof.get("cleanupAwaitingDeployment") or operation and operation.get("action") == "cleanup" and operation.get("state") == "awaiting_deployment":
             allowed.append("verify-cleanup")
-        if operation and ((running and operation.get("action") == "workflow") or (operation.get("action") == "prepare" and operation.get("state") in {"pending", "running", "needs_user", "needs_attention"})):
+        if operation and not prepare_held and ((running and operation.get("action") == "workflow") or (operation.get("action") == "prepare" and operation.get("state") in {"pending", "running", "needs_user", "needs_attention"})):
             allowed.append("cancel-operation")
     actions = [{"id": action, "label": action.replace("-", " ").capitalize(), "method": "POST",
         "path": "/api/v1/my-startup/vibe-marketing/" + ("scan" if action == "scan" else "article-system-setup" if action == "setup" else "website-connection/" + action),

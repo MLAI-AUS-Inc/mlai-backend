@@ -243,6 +243,90 @@ class PolicyTests(TransactionTestCase):
         with override_settings(ARTICLES_REGISTRY_REFUNDS_ENABLED=True):
             self.assertEqual(refund_decision(run)['why'], 'dispatch_unresolved')
 
+    def test_old_uncertain_setup_resume_conflict_leaves_the_automatic_queue(self):
+        from .no_delivery_refunds import refund_decision
+        run = self.run_for('EDITORIAL_REJECTED', workflow='article_system_setup')
+        earlier = self.now - timedelta(minutes=5)
+        self.seed(run, attempts=1, first_failed_at=earlier.isoformat(), last_action='resume',
+                  pending_action={'state': 'uncertain', 'action': 'resume', 'attempt': 1,
+                                  'reason': 'repair', 'lease_until': earlier.isoformat()})
+        conflict = {'content_factory_status_code': 409, 'retryable': False}
+        with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value=conflict) as remote, \
+                patch.object(engine, '_alert') as alert:
+            engine.apply(run, engine.decide(run, now=self.now), now=self.now)
+            run.refresh_from_db()
+            receipt = run.result['self_heal_v1']
+            self.assertIsNone(receipt['next_at'])
+            self.assertEqual(receipt['attempts'], 1)
+            self.assertEqual(receipt['pending_action']['state'], 'reconciliation_required')
+            self.assertEqual(receipt['pending_action']['reason'], 'policy_setup_resume_conflict')
+            self.assertEqual(receipt['pending_action']['owner'], 'staff')
+            self.fixture.config.refresh_from_db()
+            self.assertIn(f'{run.run_id}:1', self.fixture.config.pillar_strategy['self_heal']['pull_request_slots'])
+            self.assertEqual(refund_decision(run)['why'], 'dispatch_unresolved')
+            later = self.now + timedelta(minutes=10)
+            self.assertEqual(engine.decide(run, now=later).action, 'none')
+            self.assertNotIn(run, engine._candidates(later, 50))
+            remote.assert_called_once()
+            alert.assert_called_once()
+
+    def test_setup_noop_only_ends_the_attempt_with_its_exact_refusal(self):
+        self.assertTrue(engine.claim_pull_request_slot(self.org, key='unrelated:1', now=self.now))
+        for matching in (False, True):
+            with self.subTest(matching=matching):
+                run = self.run_for(workflow='article_system_setup')
+                earlier = (self.now - timedelta(minutes=5)).isoformat()
+                # Replaying a previously uncertain attempt can settle its own reservation.
+                self.seed(run, attempts=1, first_failed_at=earlier, last_action='retry',
+                          pending_action={'state': 'uncertain', 'action': 'retry', 'attempt': 1,
+                                          'reason': 'backoff', 'lease_until': earlier})
+                self.assertTrue(engine.claim_pull_request_slot(self.org, key=f'{run.run_id}:1', now=self.now))
+                ack = {'state': 'refused', 'version': 1, 'run_id': run.run_id, 'intent': 'resume',
+                       'key': f'{run.run_id}:1' if matching else 'another-key'}
+                with patch('content_factory.vibe_marketing_views._call_content_factory_run_action',
+                           return_value={'status': 'noop', 'resume_available': False, 'self_heal_resume': ack}) as remote:
+                    decision = engine.decide(run, now=self.now)
+                    engine.apply(run, decision, now=self.now)
+                    engine.apply(run, decision, now=self.now)
+                    remote.assert_called_once()
+                self.fixture.config.refresh_from_db()
+                day = self.fixture.config.pillar_strategy['self_heal']
+                self.assertEqual(f'{run.run_id}:1' in day['pull_request_slots'], not matching)
+                self.assertIn('unrelated:1', day['pull_request_slots'])
+                self.assertEqual(day['pull_requests'], 0)
+                run.refresh_from_db()
+                self.assertEqual(run.result['self_heal_v1']['pending_action']['state'],
+                                 'refused' if matching else 'uncertain')
+                self.assertEqual(engine.decide(run, now=self.now + timedelta(minutes=3)).action,
+                                 'none' if matching else 'retry')
+
+    def test_refused_setup_preserves_a_counted_pr_or_a_newer_lease_slot(self):
+        for completed in (True, False):
+            with self.subTest(completed=completed):
+                run = self.run_for(workflow='article_system_setup')
+                self.seed(run, first_failed_at=(self.now - timedelta(minutes=1)).isoformat())
+                slot = f'{run.run_id}:1'
+                pr_url = 'https://github.com/example/site/pull/1'
+                def refuse(**kwargs):
+                    if completed:
+                        engine.record_pull_request(self.org, pr_url=pr_url, run=run, now=self.now)
+                    else:
+                        run.refresh_from_db()
+                        run.result['self_heal_v1']['pending_action']['claim'] = 'newer-lease'
+                        run.save(update_fields=['result'])
+                    return {'status': 'noop', 'self_heal_resume': {'state': 'refused', 'version': 1,
+                            'run_id': run.run_id, 'intent': 'resume', 'key': slot}}
+                with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', side_effect=refuse):
+                    engine.apply(run, engine.decide(run, now=self.now), now=self.now)
+                self.fixture.config.refresh_from_db()
+                day = self.fixture.config.pillar_strategy['self_heal']
+                self.assertIn(slot, day['pull_request_slots'])
+                self.assertEqual(slot in day['pull_request_slot_completions'], completed)
+                self.assertEqual((day['pull_request_keys'], day['pull_requests']), ([pr_url], 1))
+                run.refresh_from_db()
+                self.assertEqual(run.result['self_heal_v1']['pending_action']['state'],
+                                 'refused' if completed else 'reserved')
+
     def test_uncertain_resume_reuses_reserved_attempt_after_short_lease(self):
         run = self.run_for()
         self.seed(run, first_failed_at=(self.now - timedelta(minutes=1)).isoformat())

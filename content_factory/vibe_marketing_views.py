@@ -15307,7 +15307,8 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
                 pass
             from .website_operations import reserve_workflow_operation, bind_operation_run
             payload.setdefault("client_request_id", _mint_dispatch_client_request_id(workflow))
-            operation = reserve_workflow_operation(website, workflow=workflow, payload=payload)
+            setup_options = {"pin_setup_source": True} if workflow == "article_system_setup" and endpoint == "article-system-setup" else {}
+            operation = reserve_workflow_operation(website, workflow=workflow, payload=payload, **setup_options)
             run = _queue_content_factory_run_authorized(endpoint=endpoint, workflow=workflow, context=context, config=config, payload=payload, billing_refund_context=billing_refund_context)
             bind_operation_run(operation, run)
             return run

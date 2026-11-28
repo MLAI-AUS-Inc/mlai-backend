@@ -78,6 +78,20 @@ class ReplayCorpusTests(TestCase):
         code = alerts.run_blocking_code(ContentFactoryRun(status=saved["status"], result=saved["result"]))
         return f"code:{code}" if code else "pass"
 
+    def handle_setup_resume_response(self, record):
+        """Classify the worker's response to a reserved website setup retry."""
+        from . import failure_policy_engine as policy
+        from .self_heal_testing import ALL_FLAGS_ON, make_p2_org, make_run
+        with override_settings(**ALL_FLAGS_ON):
+            org = make_p2_org().organization
+            run = make_run(org, stamped=True, workflow=record["workflow"],
+                           result={"error_code": record["code"]}, status=record["inputs"]["status"])
+            decision = policy.Decision("resume", None, "repair", record["inputs"]["attempt"], None, "policy")
+            response = {"content_factory_status_code": record["http"][0]["status"]}
+            with patch("content_factory.vibe_marketing_views._call_content_factory_run_action", return_value=response):
+                outcome = policy._execute_run(run, decision, now=timezone.now())
+        return "code:" + str(outcome.get("reason") or outcome.get("status"))
+
     def handle_research_empty_nights(self, record):
         """The ``research_empty`` callback for each recorded night of a daily automation (B23)."""
         from content_factory.models import (AutomationRun, AutomationRunStatus, NotificationChannelType,

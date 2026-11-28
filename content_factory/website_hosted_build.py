@@ -14,12 +14,14 @@ def enabled(website):
     return getattr(settings,"ARTICLES_HOSTED_VERIFICATION_ENABLED",False) and goals.enrolled(getattr(website,"organization_id",None))
 
 
-def current_scan_source(website):
+def current_scan_source(website, *, scan_run_id=None):
     """The current scan/observed source takes precedence over a last-successful SHA."""
     from .website_connections import observed_source_sha
     from .website_discovery import discovery_snapshot
     observed=observed_source_sha(website)
     rows=website.scan_snapshots.filter(generation=website.generation).exclude(detector_version="github_head")
+    if scan_run_id:
+        rows = rows.filter(run_id=scan_run_id)
     if observed:rows=rows.filter(source_sha=observed)
     scan=rows.order_by("-created_at","-pk").first()
     if not scan or not isinstance(scan.source_sha,str) or not goals.SHA.fullmatch(scan.source_sha):return None

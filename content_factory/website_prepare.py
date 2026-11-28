@@ -251,6 +251,9 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
         if op.action != "prepare" or op.generation != current.generation:
             raise WebsiteAuthorityError("operation_key_conflict", "The saved preparation belongs to another website.")
         if not created and retry:
+            from .website_prepare_setup_cap import handle_held_restart
+            if handle_held_restart(op):
+                return op
             from .website_run_authority import owned_goal_child, wait_for_execution
             owned_child = owned_goal_child(op, include_completed=False)
             if owned_child is not None:

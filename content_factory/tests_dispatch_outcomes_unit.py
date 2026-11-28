@@ -115,6 +115,75 @@ class DispatchObservationTests(SimpleTestCase):
     def response(status, body):
         return SimpleNamespace(status_code=status, content=b"synthetic", json=lambda: body)
 
+    def test_setup_reservation_seals_server_scan_source_once_for_dispatch_and_replay(self):
+        website = SimpleNamespace(pk="w", generation=2, repository_id=42, installation_id="17", blockers=[],
+            operations=rows(), organization_id=7)
+        saved = {}
+
+        def reserve(*, idempotency_key, defaults):
+            if idempotency_key in saved:
+                return saved[idempotency_key], False
+            op = SimpleNamespace(pk="op", receipt={}, save=Mock(), **defaults)
+            saved[idempotency_key] = op
+            return op, True
+
+        def dispatch(scan_id):
+            payload = {"client_request_id": "setup-key", "source_scan_run_id": scan_id,
+                "expected_source_sha": "f" * 40}
+            operation = website_operations.reserve_workflow_operation(website, workflow="article_system_setup",
+                payload=payload, pin_setup_source=True)
+            return operation, payload
+
+        for scan_id, initial_sha in (("", "a" * 40), ("matching-scan", "a" * 40), ("unknown-scan", None)):
+            saved.clear()
+            with self.subTest(scan_id=scan_id), \
+                    patch("content_factory.website_connections.authority_guard", return_value=nullcontext(website)), \
+                    patch.object(WebsiteConnectionOperation.objects, "get_or_create", side_effect=reserve), \
+                    patch("content_factory.website_hosted_build.current_scan_source", return_value=initial_sha) as resolve:
+                op, payload = dispatch(scan_id)
+                resolve.assert_called_once_with(website, scan_run_id=scan_id)
+                self.assertEqual(payload.get("expected_source_sha"), initial_sha)
+                self.assertEqual(op.payload.get("expected_source_sha"), initial_sha)
+                if initial_sha:
+                    self.assertIn("payload", op.save.call_args.kwargs["update_fields"])
+                resolve.return_value = "b" * 40
+                _, repeated = dispatch(scan_id)
+                self.assertEqual(repeated, payload)
+                self.assertEqual(resolve.call_count, 1)
+
+    def test_setup_source_uses_only_the_selected_generations_inventory_and_exact_scan(self):
+        from .website_hosted_build import current_scan_source
+        source = "a" * 40
+        scan = SimpleNamespace(source_sha=source, evidence={"repository_inventory": {"discovery_complete": True}})
+        inventory = rows(first=scan)
+        website = SimpleNamespace(generation=2, scan_snapshots=inventory)
+        with patch("content_factory.website_connections.observed_source_sha", return_value=source):
+            self.assertEqual(current_scan_source(website, scan_run_id="selected"), source)
+        inventory.filter.assert_any_call(generation=2)
+        inventory.exclude.assert_called_once_with(detector_version="github_head")
+        inventory.filter.assert_any_call(run_id="selected")
+        inventory.filter.assert_any_call(source_sha=source)
+
+    def test_only_initial_repository_setup_requests_a_source_pin(self):
+        company = SimpleNamespace(pk=7, domain="fixture.test")
+        website = SimpleNamespace(pk="w", generation=2, repository_id=42, github_repo="fixture/site",
+            app_root="", branch="main", organization=company)
+        config = SimpleNamespace(website_connection=website, refresh_from_db=Mock())
+        context = SimpleNamespace(organization=company)
+        with patch("content_factory.p2_foundation.stamp_run_request"), \
+                patch.object(views, "authority_guard", return_value=nullcontext(website)), \
+                patch.object(website_operations, "reserve_workflow_operation") as reserve, \
+                patch.object(website_operations, "bind_operation_run"), \
+                patch.object(views, "_queue_content_factory_run_authorized") as send:
+            for endpoint, workflow, expected in (("article-system-setup", "article_system_setup", True), ("scan", "repo_scan", False)):
+                views._queue_content_factory_run(endpoint=endpoint, workflow=workflow, context=context, config=config, payload={})
+                self.assertEqual(reserve.call_args.kwargs.get("pin_setup_source", False), expected)
+            reserve.reset_mock()
+            views._queue_content_factory_run(endpoint="generate", workflow="article_generation", context=context, config=config,
+                payload={"delivery_mode": "content_only", "expected_source_sha": "f" * 40})
+            reserve.assert_not_called()
+            self.assertNotIn("expected_source_sha", send.call_args.kwargs["payload"])
+
     def pending_run(self):
         now = timezone.now()
         return SimpleNamespace(pk=12, run_id="saved-key", workflow="article_generation", status="blocked",
