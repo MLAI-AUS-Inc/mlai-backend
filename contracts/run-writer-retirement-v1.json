@@ -5397,12 +5397,12 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "03f7c7dbdcf13da092acc44cb7acbe4787b52cd7f19ea393c430dc7694093072",
+      "function_sha256": "60c714d944a9a01694e5f740ef9bd09ec7466b948e64842a3621d86dee551817",
       "classification": "non_cf_model",
       "test_refs": [
         "tests/test_research_automations.py"
       ],
-      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun.",
+      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun. Backend #1433: Changes email markup and preserves signed topic approval and unsubscribe confirmation.",
       "guard": "AutomationRun annotations/imports/query assignments.",
       "pending_owner": null
     },
@@ -5421,12 +5421,12 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "cd9623fd7b9db63a19e7e73099a90eddec615cb310ca3d794159fdcb5ea0a869",
+      "function_sha256": "0abd9299c81e73efb85a18f4b8d8280b5a2088b902adc467e8a289aad900a494",
       "classification": "non_cf_model",
       "test_refs": [
         "tests/test_research_automations.py"
       ],
-      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun.",
+      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun. Backend #1433: Changes email markup and preserves the policy excluding email delivery for the event.",
       "guard": "AutomationRun annotations/imports/query assignments.",
       "pending_owner": null
     },
@@ -5445,12 +5445,12 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "a270636b40761ceab4ffe4546d641f3ce7a9e633b09ee6ff1eb80b1573a71fc7",
+      "function_sha256": "dde324a90d45319c3ecde0eac0c2c4816dd9e72d171f319207cacc98ba12b16b",
       "classification": "non_cf_model",
       "test_refs": [
         "tests/test_research_automations.py"
       ],
-      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun.",
+      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun. Backend #1433: Changes email markup and preserves the existing content-ready destinations and dispatch policy.",
       "guard": "AutomationRun annotations/imports/query assignments.",
       "pending_owner": null
     },
@@ -5469,12 +5469,12 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "15ca2b0503c632bc235a35699fec46e937442c45b7c59ef02f6d047013af5ab9",
+      "function_sha256": "c865e15c89c73b9bead3d35676e9536fae6c927fba6509d52ae04926d20d6601",
       "classification": "non_cf_model",
       "test_refs": [
         "tests/test_research_automations.py"
       ],
-      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun.",
+      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun. Backend #1433: Changes email markup and preserves the signed opt-out and review destinations.",
       "guard": "AutomationRun annotations/imports/query assignments.",
       "pending_owner": null
     },
@@ -5812,12 +5812,12 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "a57a3739e006b4ebe767daaa3dc6572cd14eb0913063d2a0882d088d7da6d47f",
+      "function_sha256": "72c3aa107edf87a775cbd438b6a3f1725204c018807e2ae12f5e8f0d02dbb91e",
       "classification": "non_cf_model",
       "test_refs": [
         "tests/test_research_automations.py"
       ],
-      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun.",
+      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun. Backend #1433: Separates presentation copy from the existing settings URL with no automation status or delivery-policy change.",
       "guard": "AutomationRun from resolve_automation_run; research_empty_applies checks slot, job id and delivered topics first.",
       "pending_owner": null
     }
