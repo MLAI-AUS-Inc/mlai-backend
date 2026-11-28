@@ -448,3 +448,48 @@ can contribute once per day. The overview uses the monthly chart's calendar
 range, and Locations uses the selected region and rolling window. A member's
 declared base supplies their region. The booking location is irrelevant to
 that attribution. Booking counts provide a separate activity measure.
+
+## Admin MLAI Wrapped stats
+
+`GET /api/v1/community-chat/admin/wrapped-stats/?year=2026` and
+`python manage.py export_wrapped_stats --year 2026` build one calendar year
+(Australia/Melbourne) of MLAI Wrapped stats as media-intel's stat-sheet CSV:
+comma-separated, `Name` first, then stat columns (at most 30). Both are
+read-only. The endpoint uses Member progress's gate (`member_progress`), so it
+needs an account-linked admin or superuser on a verified installation, and
+answers with `Cache-Control: no-store`.
+
+| Query / option | Values |
+| --- | --- |
+| `year` / `--year` | Required. 2025 up to the current Melbourne year. A running year stops at the request time. |
+| `scope` / `--scope` | `committee` (default: active `PointsAdmin` rows with role `committee`), `members`, or `all` (the whole Member progress roster) |
+| `member` / `--member` | An MLAI Chat public profile ID, repeatable (the endpoint takes up to 100). Selects `members`. |
+| `--name PROFILE_ID=NAME` | Command only. A confirmed name for one member, overriding the lookup below. |
+
+People, ranks, badges, volunteer check-ins and co-working days come from
+the Member progress roster and loader, so the two reports agree on who a
+member is. Each member's name is, in order: an override, their own MLAI Chat
+profile name, the 2026 committee roster name, then the account's first and
+last name. media-intel matches `Name` exactly (ignoring case and spacing), so
+names are reviewed before upload. Members with the same name stay as separate
+rows and are listed under `review.name_collisions` for one-by-one handling;
+`review.needs_name` lists members with no usable name. The response's
+`review` and `selection` and the command's stderr name profile IDs. The CSV
+itself never carries emails, account IDs or profile IDs.
+
+Roo points are split as `community_chat/wrapped_stats.py` defines:
+
+- **Roo points earned**: wallet credits for contributions, rewards and prizes.
+- **Roo points paid**: committee weekly remuneration and mentor session
+  payouts.
+- Purchased top-ups are excluded.
+
+**Volunteer hours (est.)** counts only earned credits that count toward a
+member's volunteer level. It uses logged manual-time minutes where they exist
+(from 2026-11-21) and otherwise 10 minutes per Roo point. Events attended are
+distinct Luma events with a CRM check-in, joined by account or account email.
+Mentoring counts completed sessions given and received. Badges earned counts
+published badges awarded (or, when undated, recorded) in the year. Rank names
+come from the volunteer ladder, including the three names still awaiting a
+committee decision. A zero leaves the cell empty, so media-intel shows no card
+for it. The `… standing` columns give "Top N%" within the exported group only.
