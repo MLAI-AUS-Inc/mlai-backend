@@ -75,8 +75,11 @@ class TransportTests(SimpleTestCase):
                 self.assertNotIn("canary",str(error.exception))
 
     def test_frozen_resend_request_uses_same_idempotency_key_and_only_safe_ack(self):
-        notice={"id":"a"*64,"subject":"Review setup","text":"Review setup","link":"https://chat.mlai.au/my-startup/create?company_id=9"}
+        notice={"id":"a"*64,"state":"needs_you","subject":"Review setup","text":"Review setup","link":"https://chat.mlai.au/my-startup/create?company_id=9"}
         payload=transport.email_payload(SimpleNamespace(route_id="owner@example.test"),notice)
+        self.assertIn("Continue setup", payload["html"])
+        self.assertIn(f'href="{notice["link"]}"', payload["html"])
+        self.assertEqual(payload["text"], "Review setup\n\n" + notice["link"])
         identifier=str(uuid4())
         with patch.object(transport,"post_webhook",return_value=WebhookResponse(200,json.dumps({"id":identifier}).encode())) as send:
             self.assertEqual(transport.post_email(payload,notice["id"]),identifier)

@@ -9,7 +9,7 @@ from django.test import SimpleTestCase, override_settings
 
 from crm import blast_email, message_types, reminders, roo_draft
 from crm.blasts import BlastError, check_channel_rules
-from crm.models import Blast, CrmEvent
+from crm.models import Blast, CrmEvent, SenderMailbox
 
 MELBOURNE = ZoneInfo("Australia/Melbourne")
 UTC = dt_timezone.utc
@@ -105,8 +105,33 @@ class LayoutTests(SimpleTestCase):
     def test_blast_puts_the_message_first_and_a_compact_card_below(self):
         body = message_types.layout(blast("blast", "event_update"), "Doors open at 5:45.", campaign="c")
         self.assertTrue(body.startswith("Doors open at 5:45."))
-        self.assertIn("View event →", body)
+        self.assertIn(">View event</a>", body)
+        self.assertIn("background:#4f3a75", body)
         self.assertNotIn("![", body)
+
+    def test_invite_retains_its_brand_and_secure_venue_in_both_formats(self):
+        item = blast("invite", "marketing", body_markdown="See you there.")
+        item.mailbox = SenderMailbox(email="hello@news.mlai.au", display_name="MLAI", reply_to="")
+        item.event.raw_payload = {"geo_address_visibility": "guests-only",
+                                  "geo_address_json": {"address": "Private HQ", "city_state": "Melbourne, VIC"}}
+        payload = blast_email.campaign_payload(item, 123)
+        self.assertIn("mlai-event-invite", payload["tags"])
+        self.assertIn("mlai-roo.png", payload["body"])
+        self.assertIn("Accept invite: https://luma.com/abc123", payload["altbody"])
+        for part in ("body", "altbody"):
+            self.assertIn("Register to see location", payload[part])
+            self.assertNotIn("Private HQ", payload[part])
+
+    def test_reconfirmation_button_keeps_the_go_url_in_both_formats(self):
+        from crm.deliverability import reconfirmation
+
+        item = blast("", "marketing", with_event=False, body_markdown="Still want to hear from us?",
+                     stats={"crm_lifecycle": {"kind": "reconfirmation"}})
+        item.mailbox = SenderMailbox(email="hello@news.mlai.au", display_name="MLAI", reply_to="")
+        payload = blast_email.campaign_payload(item, 123)
+        self.assertIn(f'href="{reconfirmation.GO_URL}"', payload["body"])
+        self.assertIn("background:#4f3a75", payload["body"])
+        self.assertIn(reconfirmation.GO_URL, payload["altbody"])
 
     def test_event_text_cannot_open_a_template_or_html(self):
         item = blast("blast", "event_update")

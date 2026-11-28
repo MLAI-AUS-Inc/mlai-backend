@@ -7,10 +7,11 @@ replayed. Legacy orgs, the flag off and old runs get no rows at all (G9).
 """
 import json
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest import mock
 from uuid import UUID, uuid4
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from agent_runtime import native_crypto
@@ -71,13 +72,31 @@ def _draft(org, *, created_at=None, status="completed", requested_by=None, workf
 
 
 def _rows():
-    return ContentFactoryCallbackEvent.objects.filter(event_type="founder_draft_ready")
+    return ContentFactoryCallbackEvent.objects.filter(event_type__in=(outbox.EVENT_TYPE, outbox.BRANDED_EMAIL_EVENT_TYPE))
 
 
 def _sweep(now=None, times=1):
     for _ in range(times):
         outbox.enqueue_ready_drafts(now)
         outbox.drain(now)
+
+
+class DraftReadyEmailRenderingTests(SimpleTestCase):
+    def test_sender_uses_the_format_pinned_to_the_callback(self):
+        run = SimpleNamespace(run_id="draft-email-test")
+        company = SimpleNamespace(pk=uuid4())
+        org = SimpleNamespace()
+        user = SimpleNamespace(email="founder@example.test")
+        with mock.patch("content_factory.founder_journey_p2.recipient_checks_enabled", return_value=False), \
+                mock.patch.object(outbox, "post_email") as send:
+            for event_type in (outbox.EVENT_TYPE, outbox.BRANDED_EMAIL_EVENT_TYPE):
+                row = SimpleNamespace(event_type=event_type, event_id="draft-ready:1:draft-email-test:email")
+                self.assertEqual(outbox._send(row, run, org, user, company), "sent")
+
+        ((plain, first_id), _), ((branded, second_id), _) = send.call_args_list
+        self.assertEqual((first_id, second_id), (run.run_id, run.run_id))
+        self.assertIn("Review your draft", branded["html"])
+        self.assertEqual(plain, {key: value for key, value in branded.items() if key != "html"})
 
 
 class DraftReadyOutboxTests(TestCase):
@@ -112,6 +131,7 @@ class DraftReadyOutboxTests(TestCase):
         self.assertEqual(payload["to"], [self.owner.email])
         self.assertEqual(payload["subject"], "Your draft is ready")
         self.assertTrue(payload["text"].startswith("Tap to review it and copy it to your website.\n\n"))
+        self.assertIn("Review your draft", payload["html"])
         self.assertEqual(payload["from"], "MLAI <notifications@example.test>")
         self.assertEqual(self.providers.messages(), [])  # no verified device: the DM is skipped
         self.assertTrue(any(f"founder_draft_ready_sent org={self.org.pk} run={run.run_id} channel=email" in line

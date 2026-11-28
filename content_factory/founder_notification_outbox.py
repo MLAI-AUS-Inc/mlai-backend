@@ -6,7 +6,9 @@ this outbox is keyed on the run alone and stores its once-only rows as
 ``ContentFactoryCallbackEvent`` leases (no migration):
 
 - ``event_id`` ``draft-ready:{org_id}:{run_id}:email`` (and ``...:dm``),
-- ``event_type`` ``founder_draft_ready``, ``job_id`` the run id,
+- ``event_type`` ``founder_draft_ready_branded`` for new email rows, or
+  ``founder_draft_ready`` for old email rows and Chat DMs,
+- ``job_id`` the run id,
 - ``claimed_at`` the drain lease, ``processed_at`` once the channel is done.
 
 :func:`enqueue_ready_drafts` and :func:`drain` are the two minute sweeps
@@ -33,9 +35,11 @@ from urllib.parse import quote, urlencode
 from uuid import UUID
 
 from django.conf import settings
-from integrations import system_mail
 from django.db.models import Q
 from django.utils import timezone
+
+from integrations import system_mail
+from system_email.layouts import render_transactional_email
 
 from . import founder_journey_cohort as cohort
 
@@ -43,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 FLAG = "ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED"
 EVENT_TYPE = "founder_draft_ready"
+BRANDED_EMAIL_EVENT_TYPE = "founder_draft_ready_branded"
 CHANNELS = ("email", "dm")
 # A draft that became ready more than this long ago is never announced.
 READY_WINDOW = timedelta(hours=48)
@@ -205,7 +210,11 @@ def enqueue_ready_drafts(now=None) -> dict:
             continue
         _, was_created = ContentFactoryCallbackEvent.objects.get_or_create(
             event_id=identifier,
-            defaults={"job_id": str(run.run_id)[:100], "event_type": EVENT_TYPE, "emitted_at": now})
+            defaults={
+                "job_id": str(run.run_id)[:100],
+                "event_type": BRANDED_EMAIL_EVENT_TYPE if identifier.endswith(":email") else EVENT_TYPE,
+                "emitted_at": now,
+            })
         created += int(was_created)
     return {"status": "completed", "created": created}
 
@@ -259,9 +268,14 @@ def _sender() -> str:
     return formataddr((SENDER_NAME, address if "@" in address else DEFAULT_SENDER_ADDRESS))
 
 
-def email_payload(email, link) -> dict:
-    """The whole Resend request body, frozen per send."""
-    return {"from": _sender(), "to": [email], "subject": SUBJECT, "text": f"{BODY}\n\n{link}"}
+def email_payload(email, link, *, branded=True) -> dict:
+    """Render the Resend request in the format selected when the row was enqueued."""
+    payload = {"from": _sender(), "to": [email], "subject": SUBJECT, "text": f"{BODY}\n\n{link}"}
+    if branded:
+        payload["html"] = render_transactional_email(
+            title=SUBJECT, paragraphs=(BODY,), action_label="Review your draft", action_url=link,
+        )
+    return payload
 
 
 def post_email(payload, run_id) -> str:
@@ -328,7 +342,8 @@ def _send(row, run, organization, user, company):
         email = str(getattr(user, "email", "") or "").strip()
         if not email:
             return "skipped"
-        payload = email_payload(email, link)
+        # An existing plain-text row may already have been accepted by Resend.
+        payload = email_payload(email, link, branded=row.event_type == BRANDED_EMAIL_EVENT_TYPE)
         if recipient_checks_enabled(organization):
             current, _company = recipient(run, organization)
             if current is None or current.pk != user.pk or not verified_email(current) or current.email != email:
@@ -406,7 +421,8 @@ def drain(now=None, *, clock=time.monotonic) -> dict:
     if not enabled():
         return {"status": "disabled"}
     now = now or timezone.now()
-    rows = list(ContentFactoryCallbackEvent.objects.filter(event_type=EVENT_TYPE, processed_at__isnull=True)
+    rows = list(ContentFactoryCallbackEvent.objects.filter(
+                event_type__in=(EVENT_TYPE, BRANDED_EMAIL_EVENT_TYPE), processed_at__isnull=True)
                 .filter(Q(claimed_at__isnull=True) | Q(claimed_at__lt=now - CLAIM_LEASE))
                 .order_by("created_at")[:DRAIN_LIMIT])
     counts = {"sent": 0, "skipped": 0, "retry": 0, "failed": 0, "deferred": 0}

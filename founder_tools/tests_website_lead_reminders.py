@@ -1,9 +1,11 @@
 """E3b: lead reminders keyed on the lead row, with opt-out, capped and deduplicated."""
 from datetime import timedelta
-from unittest.mock import patch
+from html import escape
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -39,6 +41,38 @@ class CapturedEmails:
 def lead(**overrides):
     return {"reason": "not_on_github", "domain": "acme.lovable.app", "hostClass": "ai_builder",
             "guidanceId": "lovable", "notify": True, **overrides}
+
+
+@override_settings(**ON)
+class LeadTemplateTests(SimpleTestCase):
+    def test_both_variants_keep_the_setup_and_opt_out_links(self):
+        link = "https://chat.example.test/my-startup/start?new=true&step=website"
+        opt_out = f"https://api.example.test{reminders.OPT_OUT_PATH}?token=sample"
+        for kind in ("reminder", "guidance_changed"):
+            with self.subTest(kind=kind):
+                branded = reminders._copy(kind, lead(), link, opt_out)
+                plain = reminders._copy(kind, lead(), link, opt_out, branded=False)
+                self.assertEqual(plain.text, branded.text)
+                self.assertEqual(plain.html, "")
+                self.assertIn("Continue setup", branded.html)
+                self.assertIn(f'href="{escape(link)}"', branded.html)
+                self.assertIn(f'href="{opt_out}"', branded.html)
+
+    def test_existing_claim_keeps_plain_text_and_new_claim_has_html(self):
+        user = SimpleNamespace(pk=7, email="founder@example.test")
+        contact = SimpleNamespace(pk=8, email=user.email)
+        old_claim = {"kind": "reminder", "key": "old-key"}
+        new_claim = {"kind": "reminder", "key": "new-key", "template": reminders.BRANDED_TEMPLATE}
+        send = Mock()
+        with patch.object(reminders, "_recipient", return_value=(user, None)), patch.object(reminders, "_close"):
+            for claim in (old_claim, new_claim):
+                self.assertEqual(reminders._deliver(contact, "lead-key", lead(), claim, send=send), "sent")
+        old_delivery, new_delivery = [call.kwargs for call in send.call_args_list]
+        self.assertEqual(old_delivery["idempotency_key"], old_claim["key"])
+        self.assertEqual(old_delivery["prerendered"].html, "")
+        self.assertEqual(new_delivery["idempotency_key"], new_claim["key"])
+        self.assertIn(new_delivery["unsubscribe_url"], new_delivery["prerendered"].html)
+        self.assertIn(new_delivery["unsubscribe_url"], new_delivery["prerendered"].text)
 
 
 @override_settings(**ON)

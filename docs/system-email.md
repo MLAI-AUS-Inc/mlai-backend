@@ -34,9 +34,24 @@ bounces never pause CRM senders (the CRM webhook ignores senders outside
 `python manage.py send_system_email_test mentor_invite` (sample context in
 `system_email/fixtures.py`, dummy link).
 
-Templates live in `system_email/templates/system_email/`. The four
-notification messages above `monthly_*` use the subject and body their
-callers already build.
+Templates live in `system_email/templates/system_email/`. The shared
+transactional layout provides the Roo mark, MLAI wordmark, mobile-width
+layout and a labelled action when the recipient needs one. Keep codes as
+selectable text. For emails built in the calling application, pass the HTML
+from `system_email.layouts.render_transactional_email` alongside the existing
+plain-text body. Pass plain strings as paragraphs and use safe HTML only for
+already escaped markup or a separately rendered template. Keep email
+preferences and unsubscribe links tied to the caller's existing controls.
+Mentor invitations, mentor feedback and startup invitations use their
+dedicated layouts.
+
+Preview templates with synthetic inputs and run
+`python scripts/test_without_database.py system_email.tests.test_system_email_unit`.
+Before releasing an HTML change, check for unresolved send attempts on
+affected keys. Resend expects the same payload when reusing an idempotency
+key. Let in-flight system emails finish on the current release, and
+reconcile uncertain deliveries before retrying them across the rollout.
+Founder transition retries with a checkpointed payload retain that payload.
 
 ## Switching a message over (and back)
 

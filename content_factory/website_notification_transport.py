@@ -10,6 +10,7 @@ from integrations import system_mail
 from django.utils import timezone
 from agent_runtime import native_crypto
 from agent_runtime.webhook_transport import post_webhook, CallbackEndpointError
+from system_email.layouts import render_transactional_email
 from .website_connections import require_unlocked_remote_call
 
 
@@ -71,17 +72,31 @@ def open_dm(pubkeys, notice_id, *, staging=False):
     except (ValueError,KeyError,TypeError) as exc:raise NotificationTransportError("chat_channel_unavailable") from exc
 
 
+def _action_label(notice):
+    return "View articles" if notice.get("state") == "done" else "Continue setup"
+
+
 def message_event(channel,pubkeys,notice,created_at):
     """Create one immutable channel message; replay always uses this saved signed event."""
     return native_crypto.sign_event(notifier_key(),kind=9,created_at=created_at,
         tags=[["h",str(UUID(channel))],["mlai-goal-notice",notice["id"]]]+[["p",key] for key in sorted(pubkeys)],
-        content=notice["text"]+"\n\n["+("View articles" if notice["state"]=="done" else "Continue setup")+"]("+notice["link"]+")")
+        content=notice["text"]+"\n\n["+_action_label(notice)+"]("+notice["link"]+")")
 
 
 def email_payload(channel,notice):
     """Freeze the entire provider request so a later config change cannot alter retries."""
-    sender=system_mail.sender()
-    return {"from":sender,"to":[channel.route_id],"subject":notice["subject"],"text":notice["text"]+"\n\n"+notice["link"]}
+    return {
+        "from": system_mail.sender(),
+        "to": [channel.route_id],
+        "subject": notice["subject"],
+        "text": notice["text"] + "\n\n" + notice["link"],
+        "html": render_transactional_email(
+            title=notice["subject"],
+            paragraphs=(notice["text"],),
+            action_label=_action_label(notice),
+            action_url=notice["link"],
+        ),
+    }
 
 
 def post_email(payload,notice_id,*,exact_key=False):

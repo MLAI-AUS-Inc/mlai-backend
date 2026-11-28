@@ -9,6 +9,7 @@ from django.test import SimpleTestCase, override_settings
 
 from system_email import api, health, transport_resend
 from system_email.fixtures import SAMPLE_CONTEXT
+from system_email.layouts import render_transactional_email
 from system_email.registry import MESSAGES, UnknownMessageError, get_spec
 from system_email.render import RenderedEmail, SystemEmailContextError, render
 from system_email.webhooks import parse_event, verify_signature
@@ -34,6 +35,7 @@ class RenderTests(SimpleTestCase):
                 self.assertTrue(rendered.subject)
                 self.assertNotIn("\n", rendered.subject)
                 self.assertIn("<html", rendered.html)
+                self.assertIn("/mlai-roo.png", rendered.html)
                 self.assertTrue(rendered.text.strip())
                 self.assertNotIn("{{", rendered.html + rendered.text)
                 self.assertNotIn("{%", rendered.html + rendered.text)
@@ -66,6 +68,42 @@ class RenderTests(SimpleTestCase):
         context = dict(SAMPLE_CONTEXT["magic_link"], first_name="<script>x</script>")
         rendered = render(get_spec("magic_link"), context)
         self.assertNotIn("<script>", rendered.html)
+
+    def test_shared_layout_keeps_link_destinations_and_escapes_plain_copy(self):
+        html = render_transactional_email(
+            title="Review <Acme>",
+            paragraphs=("Your draft is ready.\nHere is your <example>.",),
+            action_label="Review draft",
+            action_url="https://chat.mlai.au/draft?run=example&company_id=acme",
+            preferences_url="https://chat.mlai.au/settings",
+            unsubscribe_url="https://mlai.au/email/unsubscribe?token=sample",
+            content_html="<script>plain input</script>",
+            secondary_links=(("Preview & notes", "https://chat.mlai.au/preview?a=b&c=d"),),
+        )
+        self.assertIn("Review &lt;Acme&gt;", html)
+        self.assertIn("ready.<br>Here is your &lt;example&gt;.", html)
+        self.assertIn('href="https://chat.mlai.au/draft?run=example&amp;company_id=acme"', html)
+        self.assertIn("Manage email preferences", html)
+        self.assertIn("Unsubscribe", html)
+        self.assertNotIn("<script>", html)
+        self.assertLess(html.index("Review draft"), html.index("Preview &amp; notes"))
+
+    def test_shared_layout_omits_non_web_action_destinations(self):
+        html = render_transactional_email(
+            title="Draft ready",
+            action_label="Review draft",
+            action_url="javascript:alert(1)",
+            secondary_links=(("Preview", "https://name:password@example.com"),),
+            unsubscribe_url="https://[",
+        )
+        self.assertNotIn("Review draft", html)
+        self.assertNotIn("Preview", html)
+        self.assertNotIn("Unsubscribe", html)
+
+    def test_shared_layout_supports_an_informational_email(self):
+        html = render_transactional_email(title="Your account was updated", paragraphs=("Details",))
+        self.assertNotIn('bgcolor="#4f3a75"', html)
+        self.assertNotIn("Unsubscribe", html)
 
     def test_prerendered_requires_subject_and_body(self):
         spec = get_spec("article_review_ready")

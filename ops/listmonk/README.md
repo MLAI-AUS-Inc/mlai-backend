@@ -163,6 +163,35 @@ On the droplet, run this project from `/root/mlai-listmonk`, next to `/root/mlai
 
     Leave `CRM_SENDING_ENABLED=false` until a test blast to an internal MLAI-team segment has worked end to end. These keys are not pushed by `deploy.sh`, so add them by hand. The backend side is described in `mlai-backend` `docs/crm.md` (on the contacts API branch until MLAI-AUS-Inc/mlai-backend#1198 merges).
 
+## Updating the email design
+
+Create a new version of the campaign template with the body in
+[`templates/mlai-campaign.html`](templates/mlai-campaign.html). Preview an empty-list
+draft for each of general news, an invite, a guest reminder and reconfirmation.
+The backend tags invites `mlai-event-invite` so the wrapper leaves their
+existing host header in place. Deploy the backend change while the previous
+template is still selected. Then preview the tagged test invite with the new
+wrapper and check it has one masthead. Verify an absent consent reason in a
+plain-text preview omits the consent line, and a known reason appears in both
+parts alongside unsubscribe. Test approved examples on the seed inboxes, then
+select the new template for future campaigns by changing the provider default
+or the configured template ID. Keep the previous template, existing untagged
+invite drafts and completed campaigns on their original template. Update any
+untagged invite draft you intend to move by rebuilding it through the upgraded
+backend. Moving the default or updating the
+composed body invalidates earlier CRM preflight approval, so use the normal
+preflight and wave controls before an affected campaign resumes.
+
+Listmonk's built-in notifications use a separate static overlay. Copy the
+[system email overrides](templates/system/) to the `email-templates/` subfolder
+of a mounted custom Listmonk static directory. Listmonk 6.2 overlays those
+files on the embedded defaults when started with `--static-dir`; the other
+notifications receive the branded header and footer from the common base.
+Test the overlay against the exact Listmonk release in staging, including
+public and private double opt-in, a reset link, a data export, and operator
+alerts. Use the existing approved Listmonk release procedure for a runtime
+change. Removing the overlay restores the bundled system templates.
+
 ## DNS for every sending domain
 
 | Record | Value |
