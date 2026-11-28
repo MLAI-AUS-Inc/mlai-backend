@@ -44,6 +44,7 @@ from core.slack_founder_links import (
     ConflictingSlackFounderLinkError,
     assign_direct_slack_identity,
 )
+from system_email.layouts import render_transactional_email
 
 
 logger = logging.getLogger(__name__)
@@ -304,19 +305,21 @@ def send_email_verification(channel: NotificationChannel) -> None:
     )
 
     verify_url = build_email_verification_url(channel)
+    subject = "Confirm your notification email"
+    purpose = "Confirm this email address to receive your daily article topic suggestions."
+    ignore = "If you didn't request this, you can ignore this email."
     text = (
-        "Confirm this email address to receive your daily article topic suggestions.\n\n"
-        f"Confirm: {verify_url}\n\n"
-        "If you didn't request this, you can ignore this email."
+        f"{purpose}\n\nConfirm: {verify_url}\n\n{ignore}"
     )
-    html_body = (
-        "<p>Confirm this email address to receive your daily article topic suggestions.</p>"
-        f'<p><a href="{verify_url}">Confirm this email</a></p>'
-        "<p>If you didn't request this, you can ignore this email.</p>"
+    html_body = render_transactional_email(
+        title=subject,
+        paragraphs=(purpose, ignore),
+        action_label="Confirm this email",
+        action_url=verify_url,
     )
     success, _message_id, response_payload = _send_email(
         channel,
-        subject="Confirm your notification email",
+        subject=subject,
         text=text,
         html_body=html_body,
         idempotency_key=f"channel-verify:{channel.id}:{channel.verification_send_count}",

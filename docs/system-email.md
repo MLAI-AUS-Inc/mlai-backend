@@ -22,6 +22,9 @@ bounces never pause CRM senders (the CRM webhook ignores senders outside
 | `article_review_ready` | "Your article is ready to review" | `notification_adapters._send_channel_delivery` |
 | `article_content_ready` | "Article ready for {domain}" | same |
 | `article_report_ready` | Article performance brief | `content_analytics/services/report_notifications.py` |
+| `daily_research_topics` | Daily research shortlist | `notification_adapters._send_channel_delivery` |
+| `daily_research_empty` | Research needs new seed topics | same |
+| `daily_research_paused_points` | Daily research paused for points | same |
 | `monthly_update_7d`, `monthly_update_1d` | Coworking-rate reminders | `startup_updates/monthly_update_reminders.py` |
 | `mentor_invite` | "{Name} invited you to mentor at MLAI" | `mentoring/invite_email.py` (Mentoring admin) |
 
@@ -34,17 +37,33 @@ bounces never pause CRM senders (the CRM webhook ignores senders outside
 `python manage.py send_system_email_test mentor_invite` (sample context in
 `system_email/fixtures.py`, dummy link).
 
-Templates live in `system_email/templates/system_email/`. The four
-notification messages above `monthly_*` use the subject and body their
-callers already build.
+Templates live in `system_email/templates/system_email/`. The shared
+transactional layout provides the Roo mark, MLAI wordmark, mobile-width
+layout and a labelled action when the recipient needs one. Keep codes as
+selectable text. For emails built in the calling application, pass the HTML
+from `system_email.layouts.render_transactional_email` alongside the existing
+plain-text body. Pass plain strings as paragraphs and use safe HTML only for
+already escaped markup or a separately rendered template. Keep email
+preferences and unsubscribe links tied to the caller's existing controls.
+Mentor invitations, mentor feedback and startup invitations use their
+dedicated layouts.
+
+Preview templates with synthetic inputs and run
+`python scripts/test_without_database.py system_email.tests.test_system_email_unit`.
+Before releasing an HTML change, check for unresolved send attempts on
+affected keys. Resend expects the same payload when reusing an idempotency
+key. Let in-flight system emails finish on the current release, and
+reconcile uncertain deliveries before retrying them across the rollout.
+Founder transition retries with a checkpointed payload retain that payload.
 
 ## Switching a message over (and back)
 
-`SYSTEM_EMAIL_RESEND_MESSAGES` lists the keys sent through Resend, or `all`.
-Keys not listed keep their old provider. Rolling back is removing the key and
-restarting the web app and the email workers. Recommended order: the
-notification keys first, then after a clean week `password_reset`,
-`magic_link`, and last `chat_sign_in_code`, a day apart.
+`SYSTEM_EMAIL_RESEND_MESSAGES=all` routes all registered messages through the
+dedicated Resend sender and keeps remaining inline notifications on their
+existing Resend transport. Resend delivery failures stay with the original
+sender and idempotency key. A partial list is useful for installations with both
+providers active. If the HTML templates need to be rolled back after Customer.io
+is retired, retain the routing code and `all` setting.
 
 Before the first key: create `notify.mlai.au` in Resend with open/click
 tracking off, a sending-only API key for that domain

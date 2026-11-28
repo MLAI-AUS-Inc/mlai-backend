@@ -169,6 +169,11 @@ def campaign_payload(blast, list_id: int) -> dict[str, Any]:
 
     mailbox = blast.mailbox
     reply_to = "".join(str(mailbox.reply_to or "").split())
+    tags = campaign_tags(blast.pk)
+    from .message_types import INVITE
+    if getattr(blast, "message_type", "") == INVITE and blast.event is not None:
+        from .email_layouts import INVITE_BODY_TAG
+        tags.append(INVITE_BODY_TAG)
     payload: dict[str, Any] = {
         "name": resource_name(blast.pk),
         "subject": listmonk_text(" ".join(blast.subject.split()), blast.event, markdown=False),
@@ -177,14 +182,48 @@ def campaign_payload(blast, list_id: int) -> dict[str, Any]:
         "type": "regular",
         "content_type": "markdown",
         "body": campaign_body(blast),
+        "altbody": plain_body(blast) + "\n\n{{ with .Subscriber.Attribs.consent_reason }}{{ Safe . }}\n{{ end }}Unsubscribe: {{ UnsubscribeURL }}",
         "messenger": "email",
-        "tags": campaign_tags(blast.pk),
+        "tags": tags,
         "headers": [{"Reply-To": reply_to}] if reply_to else [],
     }
     template_id = listmonk.template_id()
     if template_id:
         payload["template_id"] = template_id
     return payload
+
+
+def plain_body(blast) -> str:
+    """Keep action destinations and event facts in the plain-text alternative."""
+    from . import email_layouts, message_types
+    from .deliverability import reconfirmation
+
+    text = re.sub(r'(?m)^\s{0,3}#{1,6}\s+', '', blast.body_markdown)
+    text = re.sub(r'(?m)^\s*[-*]\s+', '• ', text)
+    if getattr(blast, 'sign_off_name', ''):
+        text += '\n\n— ' + blast.sign_off_name
+    text = listmonk_text(text.replace('**', '').replace('__', ''), blast.event, markdown=False)
+    text = re.sub(r'!?\[([^\]]+)\]\((https?://[^\s)]+)\)', r'\1 (\2)', text)
+
+    event = blast.event
+    kind = getattr(blast, "message_type", "")
+    if event is not None and kind in (message_types.INVITE, message_types.BLAST, message_types.REMINDER):
+        facts = [event.name]
+        when = email_layouts.event_when(event)
+        if when:
+            facts.extend((when["date"], when["times"]))
+        where = email_layouts.event_where(event)
+        if where:
+            facts.extend(part for part in (where["title"], where["detail"]) if part)
+        url = message_types.tracked_event_url(event, campaign=resource_name(blast.pk))
+        if url:
+            label = "Accept invite" if kind == message_types.INVITE else "View event"
+            facts.append(f"{label}: {url}")
+        # Event data can contain literal braces. Encode them as quoted Go literals.
+        text += "\n\n" + "\n".join(line.replace("{", '{{ "{" }}') for line in facts)
+    if reconfirmation.is_reconfirmation(blast):
+        text += '\n\nYes, keep me subscribed: ' + reconfirmation.GO_URL
+    return text
 
 
 # Blast state

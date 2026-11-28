@@ -50,15 +50,18 @@ from django.core import signing
 from django.db import transaction
 from django.http import HttpResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.html import format_html
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from django.utils.dateparse import parse_datetime
+
+from system_email.layouts import render_transactional_email
 
 logger = logging.getLogger(__name__)
 
 FLAG = "MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED"
 MESSAGE_KEY = "founder_website_lead_reminder"
+BRANDED_TEMPLATE = "branded"
 SWEEP_CAP = 10
 RETRY_WINDOW = timedelta(hours=23)
 OPT_OUT_SALT = "founder-website-lead-opt-out-v1"
@@ -249,7 +252,7 @@ def _recipient(contact, lead):
     return user, None
 
 
-def _copy(kind, lead, link, unsubscribe):
+def _copy(kind, lead, link, unsubscribe, *, branded=True):
     from system_email.render import RenderedEmail
     domain = lead.get("domain") or "your website"
     name = GUIDANCE_NAMES.get(str(lead.get("guidanceId") or ""))
@@ -262,10 +265,13 @@ def _copy(kind, lead, link, unsubscribe):
         what = f"websites built with {name}" if name else "websites like yours"
         opening = (f"You asked us to tell you when anything changed for {what} ({domain}). It has: the steps "
                    "to connect it are new. Have a look, your website is filled in for you.")
-    text = (f"{opening}\n\nContinue: {link}\n\n"
-            "You're getting this because you pressed \"Tell me when this changes\" in MLAI Chat. "
-            f"Stop these emails: {unsubscribe}\n")
-    return RenderedEmail(subject=subject, html="", text=text)
+    reason = "You're getting this because you pressed \"Tell me when this changes\" in MLAI Chat."
+    text = f"{opening}\n\nContinue: {link}\n\n{reason} Stop these emails: {unsubscribe}\n"
+    html = render_transactional_email(
+        title=subject, paragraphs=(opening, reason), action_label="Continue setup",
+        action_url=link, unsubscribe_url=unsubscribe,
+    ) if branded else ""
+    return RenderedEmail(subject=subject, html=html, text=text)
 
 
 def _claim(contact_pk, lead_key, *, now):
@@ -298,7 +304,7 @@ def _claim(contact_pk, lead_key, *, now):
         return None
     kind, state = due
     claim = {"kind": kind, "state": state, "key": _send_key(contact, lead_key, kind, state, lead),
-             "status": "sending", "at": now.isoformat()}
+             "status": "sending", "at": now.isoformat(), "template": BRANDED_TEMPLATE}
     lead["reminder"] = claim
     if kind == "reminder":
         lead.update(remindedAt=now.isoformat(), remindAt=None)
@@ -336,10 +342,12 @@ def _deliver(contact, lead_key, lead, claim, *, send):
     if user is None or link is None:
         _close(contact.pk, lead_key, claim, "skipped", why or "no_link")
         return "skipped"
-    rendered = _copy(claim["kind"], lead, link, opt_out_url(contact))
+    unsubscribe = opt_out_url(contact)
+    # A claim made by an older worker may already have sent a plain-text email.
+    rendered = _copy(claim["kind"], lead, link, unsubscribe, branded=claim.get("template") == BRANDED_TEMPLATE)
     try:
         send(MESSAGE_KEY, to=user.email, idempotency_key=claim["key"], prerendered=rendered, user_id=user.pk,
-             unsubscribe_url=opt_out_url(contact))
+             unsubscribe_url=unsubscribe)
     except SystemEmailRetryable as exc:
         logger.warning("founder_website_lead_reminder_retry contact=%s code=%s", contact.pk, getattr(exc, "code", ""))
         return "retry"

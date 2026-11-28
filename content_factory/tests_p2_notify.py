@@ -3,6 +3,7 @@ from django.db import connections
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import timedelta
+from html import escape
 import json
 import time
 import threading
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.db import close_old_connections, connection, transaction
-from django.test import TransactionTestCase, override_settings, tag
+from django.test import SimpleTestCase, TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from django.test.utils import CaptureQueriesContext
 
@@ -28,6 +29,47 @@ from .website_models import WebsiteConnection
 
 FLAGS = {**ALL_FLAGS_ON, "RESEND_API_KEY": "synthetic", "COMMUNITY_CHAT_FRONTEND_URL": "https://chat.mlai.au",
     "ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP": 0, "ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD": 0}
+
+
+class TransitionEmailRenderingTests(SimpleTestCase):
+    def setUp(self):
+        self.row = SimpleNamespace()
+        self.config = SimpleNamespace()
+        self.user = SimpleNamespace(email="owner@example.test")
+        self.link = "https://chat.mlai.au/my-startup/runs/run-1/draft?company_id=example&tab=review"
+        self.notice = {
+            "channel": "email", "key": "founder-transition:example",
+            "subject": "Please check your draft", "body": "Your draft is ready.",
+            "button": "Read your article", "link": self.link,
+        }
+        self.enterContext(patch.object(transitions, "_assert_claim"))
+        self.enterContext(patch.object(transitions, "_current", return_value=self.user))
+        self.enterContext(patch.object(projection, "verified_email", return_value=True))
+        self.checkpoint = self.enterContext(patch.object(transitions, "_checkpoint"))
+        self.post_email = self.enterContext(patch.object(transport, "post_email"))
+
+    def test_new_email_checkpoints_brand_layout_and_original_deep_link(self):
+        self.assertEqual(transitions._deliver(self.row, self.config, self.notice, now=timezone.now()), "sent")
+
+        payload = self.notice["payload"]
+        self.assertEqual(payload["text"], f"Your draft is ready.\n\nRead your article: {self.link}")
+        self.assertIn("Read your article", payload["html"])
+        self.assertIn(f'href="{escape(self.link)}"', payload["html"])
+        self.checkpoint.assert_called_once_with(self.config, self.row, self.notice)
+        self.post_email.assert_called_once_with(payload, self.notice["key"], exact_key=True)
+
+    def test_retry_sends_preexisting_plain_payload_under_the_same_key(self):
+        payload = {
+            "from": "MLAI <notifications@example.test>", "to": [self.user.email],
+            "subject": self.notice["subject"], "text": f"Your draft is ready.\n\nRead your article: {self.link}",
+        }
+        self.notice["payload"] = payload
+        expected = deepcopy(payload)
+        with patch.object(transitions, "render_transactional_email") as render:
+            self.assertEqual(transitions._deliver(self.row, self.config, self.notice, now=timezone.now()), "sent")
+        render.assert_not_called()
+        self.checkpoint.assert_not_called()
+        self.post_email.assert_called_once_with(expected, self.notice["key"], exact_key=True)
 
 
 @override_settings(**FLAGS)

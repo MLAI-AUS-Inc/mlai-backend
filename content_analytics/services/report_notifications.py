@@ -13,6 +13,7 @@ import logging
 from typing import Any, Optional
 
 from django.conf import settings
+from django.utils.safestring import mark_safe
 
 from content_analytics.models import ArticlePerformanceReport
 from content_factory.models import (
@@ -28,6 +29,7 @@ from integrations.services.notification_adapters import (
     _send_whatsapp,
     record_delivery_status,
 )
+from system_email.layouts import render_transactional_email
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +122,7 @@ def _report_email_html(report: ArticlePerformanceReport) -> str:
     headline = _headline(report)
     categories = _categories(report)
     domain = html.escape(report.organization.domain)
-    url = html.escape(_brief_url())
-    link_html = f'<p><a href="{url}">Open the full brief</a></p>' if url else ""
-    return (
+    metrics_html = (
         f"<p>Your article performance brief for <strong>{domain}</strong> — "
         f"{report.report_date.isoformat()}.</p>"
         f"<p>Last {_window_days(report)} days: "
@@ -135,7 +135,13 @@ def _report_email_html(report: ArticlePerformanceReport) -> str:
         f"{categories['high_interest']} high-interest · "
         f"{categories['needs_attention']} needs attention · "
         f"{categories['gathering_data']} gathering data.</p>"
-        f"{link_html}"
+    )
+    return render_transactional_email(
+        title="Article performance brief",
+        preheader=f"Recent article performance for {report.organization.domain}.",
+        content_html=mark_safe(metrics_html),
+        action_label="Open the full brief",
+        action_url=_brief_url(),
     )
 
 
@@ -202,7 +208,7 @@ def send_report_ready(report: ArticlePerformanceReport) -> list[NotificationDeli
         f"Article performance brief — {report.organization.domain} "
         f"{report.report_date.isoformat()}"
     )
-    html_body = _report_email_html(report)
+    html_body = None
     template_id = str(getattr(settings, "CUSTOMERIO_REPORT_TEMPLATE_ID", "") or "").strip()
 
     deliveries: list[NotificationDelivery] = []
@@ -236,6 +242,7 @@ def send_report_ready(report: ArticlePerformanceReport) -> list[NotificationDeli
             if channel.channel_type == NotificationChannelType.SLACK:
                 success, provider_id, response_payload = _send_slack(channel, text=text)
             elif channel.channel_type == NotificationChannelType.EMAIL:
+                html_body = html_body or _report_email_html(report)
                 success, provider_id, response_payload = _send_email(
                     channel,
                     subject=subject,

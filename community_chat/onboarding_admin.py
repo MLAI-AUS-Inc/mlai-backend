@@ -14,6 +14,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from integrations import http_client
+from system_email.layouts import render_transactional_email
 
 from .models import CommunityMemberConsent, CommunityMemberProfile, CommunityMemberReviewRule
 from .onboarding import name_is_complete
@@ -55,11 +56,21 @@ def send_review_cleared_email(member_id, user_id):
                        member_id, bool(api_key))
         return False
     try:
+        chat_url = settings.COMMUNITY_CHAT_FRONTEND_URL.strip()
+        html_body = render_transactional_email(
+            title="Welcome to MLAI",
+            preheader="Your MLAI membership is approved.",
+            paragraphs=(REVIEW_CLEARED_BODY,),
+            action_label="Open MLAI Chat",
+            action_url=chat_url,
+        )
         with system_mail.observe("resend") as attempt:
             response = http_client.post(
                 "https://api.resend.com/emails",
                 json={"from": REVIEW_CLEARED_FROM, "to": [user.email],
-                      "subject": REVIEW_CLEARED_SUBJECT, "text": REVIEW_CLEARED_BODY},
+                      "subject": REVIEW_CLEARED_SUBJECT,
+                      "text": f"{REVIEW_CLEARED_BODY}\n\nOpen MLAI Chat: {chat_url}",
+                      "html": html_body},
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
                          "Idempotency-Key": key},
                 timeout=(3, 8),

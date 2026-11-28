@@ -10,6 +10,10 @@ fewer than three eligible topics remain, send the smaller shortlist rather than
 repeat recent topics or invent search data. An exhausted pool produces no topic
 message; existing operational failure reporting remains internal.
 
+Daily topic emails feature a card for each recommendation. Email actions open a
+signed page and require confirmation before starting an article or changing a
+notification subscription.
+
 ## A founder's new direction
 
 Saving researched islands records a preference event in the owning research

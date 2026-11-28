@@ -14,8 +14,10 @@ from typing import Any, Optional
 from django.conf import settings
 from integrations import system_mail
 from django.core import signing
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.safestring import mark_safe
 
 from content_factory.models import (
     AutomationRun,
@@ -37,6 +39,7 @@ from integrations.services.article_generation import (
     set_article_delivery_mode,
 )
 from integrations.services.slack import SlackService
+from system_email.layouts import render_transactional_email
 
 
 logger = logging.getLogger(__name__)
@@ -403,7 +406,7 @@ def _performance_email_html(digest: Optional[dict[str, Any]]) -> str:
         for page in top_pages:
             title = html.escape(str(page.get("title") or ""))
             page_summary = html.escape(str(page.get("summary") or ""))
-            url = _https_image_url(page.get("url"))
+            url = _email_link_url(page.get("url"), https_only=True)
             title_html = (
                 f'<a href="{html.escape(url)}">{title}</a>' if url else f"<strong>{title}</strong>"
             )
@@ -420,8 +423,8 @@ def _performance_email_html(digest: Optional[dict[str, Any]]) -> str:
         if extra:
             items.append(f"<li>…and {extra} more in the full brief.</li>")
         parts.append(f"<p><strong>Needs attention</strong></p><ul>{''.join(items)}</ul>")
-    brief = str(digest.get("brief_url") or "")
-    if brief.startswith("https://"):
+    brief = _email_link_url(digest.get("brief_url"), https_only=True)
+    if brief:
         parts.append(f'<p><a href="{html.escape(brief)}">Open the full brief</a></p>')
     parts.append("<hr>")
     return "".join(parts)
@@ -513,48 +516,13 @@ def _topic_email_html(
     channel: Optional[NotificationChannel] = None,
     digest: Optional[dict[str, Any]] = None,
 ) -> str:
-    domain = html.escape(str(data.get("domain") or run.automation.organization.domain or "your site"))
-    rows = []
-    for index, option in enumerate(_topic_options(data), start=1):
-        keyword = html.escape(_option_keyword(option))
-        raw_title = _option_title(option)
-        title = html.escape(raw_title)
-        explanation = html.escape(str(option.get("explanation") or ""))
-        trend_summary = html.escape(str(option.get("trend_summary") or "").strip())
-        chart_url = html.escape(_https_image_url(option.get("chart_url")))
-        chart_alt = html.escape(str(option.get("chart_alt") or f"Demand trend for {raw_title}"))
-        explanation_html = f"<p>{explanation}</p>" if explanation else ""
-        trend_html = f"<p>{trend_summary}</p>" if trend_summary else ""
-        chart_html = (
-            f'<p><img src="{chart_url}" alt="{chart_alt}" width="480" '
-            'style="display:block;width:100%;max-width:480px;height:auto"></p>'
-            if chart_url
-            else ""
-        )
-        approve_url = html.escape(
-            build_action_url(
-                run,
-                "approve_topic",
-                option_index=index - 1,
-                confirmation_required=True,
-            )
-        )
-        rows.append(
-            "<li>"
-            f"<strong>{title}</strong><br>"
-            f"<code>{keyword}</code>"
-            f"{explanation_html}"
-            f"{trend_html}"
-            f"{chart_html}"
-            f'<p><a href="{approve_url}">Approve this topic</a></p>'
-            "</li>"
-        )
-    unsubscribe_url = html.escape(_unsubscribe_url(run, channel))
-    return (
-        _performance_email_html(digest)
-        + f"<p>Research topics are ready for <strong>{domain}</strong>.</p>"
-        f"<ol>{''.join(rows)}</ol>"
-        f'<p><a href="{unsubscribe_url}">Pause or unsubscribe</a></p>'
+    context = _topic_email_message_data(run, data, channel, digest)
+    context["performance_html"] = mark_safe(_performance_email_html(digest))
+    return render_transactional_email(
+        title="Your daily research topics",
+        preheader=f"Choose a topic for {context['domain']}.",
+        content_html=mark_safe(render_to_string("integrations/email/daily_topics.html", context)),
+        unsubscribe_url=context["unsubscribe_url"],
     )
 
 
@@ -565,13 +533,17 @@ def _recipient_first_name(run: AutomationRun) -> str:
     return str(getattr(user, "first_name", "") or "").strip()
 
 
-def _https_image_url(value: Any) -> str:
-    """Allow only absolute HTTPS image URLs into outbound email markup."""
+def _email_link_url(value: Any, *, https_only: bool = False) -> str:
+    """Allow only absolute web URLs with no credentials into email markup."""
     raw = str(value or "").strip()
     if not raw or len(raw) > 4096:
         return ""
-    parsed = urlparse(raw)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return ""
+    schemes = {"https"} if https_only else {"http", "https"}
+    if parsed.scheme not in schemes or not parsed.hostname or parsed.username or parsed.password:
         return ""
     return raw
 
@@ -608,7 +580,7 @@ def _topic_email_message_data(
                 "trend_period_label": str(option.get("trend_period_label") or ""),
                 "trend_summary": str(option.get("trend_summary") or ""),
                 "trend_percent": option.get("trend_percent"),
-                "chart_url": _https_image_url(option.get("chart_url")),
+                "chart_url": _email_link_url(option.get("chart_url"), https_only=True),
                 "chart_alt": str(option.get("chart_alt") or ""),
                 "confirm_url": build_action_url(
                     run,
@@ -733,22 +705,22 @@ def _founder_tools_run_url(run_id: str, *, expanded_review: bool = False) -> str
     return marketing_delivery_url(url)
 
 
-def _content_ready_text(run: AutomationRun, data: dict[str, Any]) -> str:
+def _content_ready_message(run: AutomationRun, data: dict[str, Any]) -> tuple[str, list[tuple[str, str]]]:
     domain = data.get("domain") or run.automation.organization.domain
     title = data.get("title") or data.get("topic") or "Article"
     # publish_pr_url is a relative content-factory API path, not a browsable
     # link — only render pull-request lines for absolute URLs.
     pr_url = str(data.get("pr_url") or data.get("publish_pr_url") or "")
-    preview_url = data.get("preview_url") or data.get("primary_review_url") or ""
+    preview_url = str(data.get("preview_url") or data.get("primary_review_url") or "")
     review_url = _founder_tools_run_url(run.article_content_factory_run_id or _callback_job_id(data))
-    lines = [f"{title} is ready for {domain}."]
+    links = []
     if review_url:
-        lines.append(f"Review and approve: {review_url}")
+        links.append(("Review and approve", review_url))
     if preview_url:
-        lines.append(f"Preview: {preview_url}")
+        links.append(("Preview", preview_url))
     if pr_url.startswith("http"):
-        lines.append(f"Pull request: {pr_url}")
-    return "\n".join(lines)
+        links.append(("Pull request", pr_url))
+    return f"{title} is ready for {domain}.", links
 
 
 def _review_ready_url(run: AutomationRun, data: dict[str, Any]) -> str:
@@ -779,22 +751,17 @@ def _review_ready_email_html(
     data: dict[str, Any],
     channel: Optional[NotificationChannel] = None,
 ) -> str:
-    domain = html.escape(str(data.get("domain") or run.automation.organization.domain or "your site"))
-    title = html.escape(str(data.get("title") or data.get("topic") or "Article"))
-    review_url = html.escape(_review_ready_url(run, data))
-    unsubscribe_url = html.escape(_unsubscribe_url(run, channel))
-    action = (
-        f'<p><a href="{review_url}" style="display:inline-block;padding:12px 18px;'
-        'border-radius:10px;background:#111827;color:#ffffff;text-decoration:none;font-weight:700">'
-        "Review article</a></p>"
-        f'<p style="font-size:13px;color:#6b7280">Or open this link: <a href="{review_url}">{review_url}</a></p>'
-        if review_url
-        else ""
-    )
-    return (
-        f"<p><strong>{title}</strong> is ready for <strong>{domain}</strong>.</p>"
-        f"{action}"
-        f'<p style="font-size:13px"><a href="{unsubscribe_url}">Manage notifications</a></p>'
+    domain = str(data.get("domain") or run.automation.organization.domain or "your site")
+    title = str(data.get("title") or data.get("topic") or "Article")
+    review_url = _review_ready_url(run, data)
+    return render_transactional_email(
+        title="Your article is ready to review",
+        paragraphs=(f"{title} is ready for {domain}.",),
+        action_label="Review article",
+        action_url=review_url,
+        secondary_links=((review_url, review_url),) if review_url else (),
+        unsubscribe_url=_unsubscribe_url(run, channel),
+        unsubscribe_label="Manage notifications",
     )
 
 
@@ -882,7 +849,7 @@ def _send_email_via_customerio(
     *,
     subject: str,
     text: str,
-    html_body: Optional[str],
+    html_body: str,
     message_data: Optional[dict[str, Any]] = None,
     transactional_message_id: str = "",
 ) -> tuple[bool, str, dict]:
@@ -905,7 +872,7 @@ def _send_email_via_customerio(
     else:
         # Inline raw body (no template configured): subject/body shipped directly.
         request_body["subject"] = subject
-        request_body["body"] = html_body or html.escape(text).replace("\n", "<br>")
+        request_body["body"] = html_body
         request_body["body_plain"] = text
     from_email = str(getattr(settings, "CUSTOMERIO_FROM_EMAIL", "") or "").strip()
     if from_email:
@@ -925,7 +892,7 @@ def _send_email_via_resend(
     *,
     subject: str,
     text: str,
-    html_body: Optional[str],
+    html_body: str,
     idempotency_key: str,
 ) -> tuple[bool, str, dict]:
     api_key = system_mail.resend_key()
@@ -938,9 +905,8 @@ def _send_email_via_resend(
         "to": [to_email],
         "subject": subject,
         "text": text,
+        "html": html_body,
     }
-    if html_body:
-        payload["html"] = html_body
     with system_mail.observe("resend") as attempt:
         response = http_client.post(
             "https://api.resend.com/emails",
@@ -969,7 +935,7 @@ def _send_email_via_system_email(
     message_key: str,
     subject: str,
     text: str,
-    html_body: Optional[str],
+    html_body: str,
     idempotency_key: str,
     unsubscribe_url: str = "",
 ) -> tuple[bool, str, dict]:
@@ -984,7 +950,7 @@ def _send_email_via_system_email(
             idempotency_key=idempotency_key,
             prerendered=RenderedEmail(
                 subject=subject,
-                html=html_body or html.escape(text).replace("\n", "<br>"),
+                html=html_body,
                 text=text,
             ),
             user_id=channel.user_id,
@@ -1000,6 +966,8 @@ SYSTEM_EMAIL_KEY_FOR_EVENT = {
     "review_ready": "article_review_ready",
     "content_ready": "article_content_ready",
     "topic_selection": "daily_research_topics",
+    "research_empty": "daily_research_empty",
+    "automation_paused_points": "daily_research_paused_points",
 }
 
 
@@ -1017,24 +985,25 @@ def _send_email(
 ) -> tuple[bool, str, dict]:
     """Send one notification email.
 
-    A ``message_key`` switched on in ``SYSTEM_EMAIL_RESEND_MESSAGES`` goes
-    through our own Resend sender on the transactional domain. Everything else
-    keeps the legacy order: Customer.io when its key is set, else Resend.
+    Registered messages switched to Resend use the transactional domain.
+    The ``all`` setting also keeps uncategorized notifications off Customer.io.
     """
-    if message_key:
-        from system_email.api import routes_to_resend
+    from system_email.api import resend_message_keys, routes_to_resend
 
-        if routes_to_resend(message_key):
-            return _send_email_via_system_email(
-                channel,
-                message_key=message_key,
-                subject=subject,
-                text=text,
-                html_body=html_body,
-                idempotency_key=idempotency_key,
-                unsubscribe_url=unsubscribe_url,
-            )
-    if str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
+    html_body = html_body or render_transactional_email(
+        title=subject, paragraphs=(text,), unsubscribe_url=unsubscribe_url,
+    )
+    if message_key and routes_to_resend(message_key):
+        return _send_email_via_system_email(
+            channel,
+            message_key=message_key,
+            subject=subject,
+            text=text,
+            html_body=html_body,
+            idempotency_key=idempotency_key,
+            unsubscribe_url=unsubscribe_url,
+        )
+    if "all" not in resend_message_keys() and str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
         return _send_email_via_customerio(
             channel,
             subject=subject,
@@ -1315,7 +1284,10 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
             "blocks": _topic_slack_blocks(run, data, channel, digest=digest),
             # Raw-HTML fallback used when no Customer.io template id is configured
             # (or when email goes via Resend).
-            "html_body": _topic_email_html(run, data, channel, digest=digest),
+            "html_body": (
+                _topic_email_html(run, data, channel, digest=digest)
+                if channel.channel_type == NotificationChannelType.EMAIL else None
+            ),
             "whatsapp_variables": _whatsapp_topic_variables(run, data, digest=digest),
             "email_message_data": _topic_email_message_data(run, data, channel, digest=digest),
             "email_transactional_message_id": str(
@@ -1343,14 +1315,18 @@ def send_delivery_mode_required(data: dict[str, Any]) -> list[NotificationDelive
     run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "updated_at"])
 
     text = _delivery_mode_text(run, data)
+    subject = f"Choose article delivery mode for {run.automation.organization.domain}"
     return _fan_out_event(
         run=run,
         event_type="delivery_mode_required",
         request_payload={"event_type": "delivery_mode_required", "job_id": job_id},
         build_kwargs=lambda channel: {
             "text": text,
-            "subject": f"Choose article delivery mode for {run.automation.organization.domain}",
-            "html_body": html.escape(text).replace("\n", "<br>"),
+            "subject": subject,
+            "html_body": (
+                render_transactional_email(title=subject, paragraphs=(text,))
+                if channel.channel_type == NotificationChannelType.EMAIL else None
+            ),
         },
     )
 
@@ -1370,7 +1346,10 @@ def send_content_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
     run.last_error = ""
     run.save(update_fields=["article_content_factory_run_id", "callback_payload", "status", "last_error", "updated_at"])
 
-    text = _content_ready_text(run, data)
+    message, links = _content_ready_message(run, data)
+    text = "\n".join([message, *(f"{label}: {url}" for label, url in links)])
+    email_links = [(label, url) for label, url in links if _email_link_url(url)]
+    action_label, action_url = email_links[0] if email_links else ("", "")
     return _fan_out_event(
         run=run,
         event_type="content_ready",
@@ -1378,7 +1357,13 @@ def send_content_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
         build_kwargs=lambda channel: {
             "text": text,
             "subject": f"Article ready for {run.automation.organization.domain}",
-            "html_body": html.escape(text).replace("\n", "<br>"),
+            "html_body": render_transactional_email(
+                title="Your article is ready",
+                paragraphs=(message,),
+                action_label=action_label,
+                action_url=action_url,
+                secondary_links=tuple(email_links[1:]),
+            ) if channel.channel_type == NotificationChannelType.EMAIL else None,
         },
     )
 
@@ -1423,18 +1408,12 @@ def send_review_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
             "text": _review_ready_text(run, data, channel),
             "subject": "Your article is ready to review",
             "blocks": _review_ready_slack_blocks(run, data, channel),
-            "html_body": _review_ready_email_html(run, data, channel),
+            "html_body": (
+                _review_ready_email_html(run, data, channel)
+                if channel.channel_type == NotificationChannelType.EMAIL else None
+            ),
             "whatsapp_variables": _whatsapp_review_variables(run, data),
         },
-    )
-
-
-def research_empty_notice_text(run: AutomationRun) -> str:
-    from founder_tools.my_startup.links import frontend_origin
-    return (
-        f"Research for {run.automation.organization.domain} has found nothing new for "
-        "a few nights. Add seed topics or competitors so it has fresh ground to cover: "
-        f"{frontend_origin()}/my-startup/settings"
     )
 
 
@@ -1473,7 +1452,13 @@ def send_research_empty(data: dict[str, Any]) -> list[NotificationDelivery]:
     from .daily_research_policy import EMPTY_NIGHTS_BEFORE_NOTICE, record_empty_night
     if not record_empty_night(run):
         return []
-    text = research_empty_notice_text(run)
+    from founder_tools.my_startup.links import frontend_origin
+
+    message = (
+        f"Research for {run.automation.organization.domain} has found nothing new for "
+        "a few nights. Add seed topics or competitors so it has fresh ground to cover"
+    )
+    url = f"{frontend_origin()}/my-startup/settings"
     return _fan_out_event(
         run=run,
         event_type="research_empty",
@@ -1481,38 +1466,45 @@ def send_research_empty(data: dict[str, Any]) -> list[NotificationDelivery]:
                          "empty_nights": EMPTY_NIGHTS_BEFORE_NOTICE,
                          "empty_reason": str(data.get("empty_reason") or "")},
         build_kwargs=lambda channel: {
-            "text": text,
+            "text": f"{message}: {url}",
             "subject": "Research needs new seed topics",
-            "html_body": html.escape(text).replace("\n", "<br>"),
+            "html_body": render_transactional_email(
+                title="Research needs new seed topics",
+                paragraphs=(f"{message}.",),
+                action_label="Edit research settings",
+                action_url=url,
+            ) if channel.channel_type == NotificationChannelType.EMAIL else None,
         },
-    )
-
-
-def automation_paused_points_text(run: AutomationRun, *, required_points=None, current_balance=None) -> str:
-    from founder_tools.my_startup.links import frontend_origin
-    numbers = ""
-    if required_points and current_balance is not None and current_balance < required_points:
-        numbers = (f" The next run uses {required_points} points and you have {current_balance}, "
-                   f"so you need {required_points - current_balance} more.")
-    return (
-        f"Daily research for {run.automation.organization.domain} is paused because there are not "
-        f"enough points.{numbers} Get points and it starts again on its own: "
-        f"{frontend_origin()}/my-startup/credits"
     )
 
 
 def send_automation_paused_points(run: AutomationRun, *, required_points=None, current_balance=None) -> list[NotificationDelivery]:
     """The one notice for a points pause (B18), idempotent per run and channel."""
-    text = automation_paused_points_text(run, required_points=required_points, current_balance=current_balance)
+    from founder_tools.my_startup.links import frontend_origin
+
+    numbers = ""
+    if required_points and current_balance is not None and current_balance < required_points:
+        numbers = (f" The next run uses {required_points} points and you have {current_balance}, "
+                   f"so you need {required_points - current_balance} more.")
+    message = (
+        f"Daily research for {run.automation.organization.domain} is paused because there are not "
+        f"enough points.{numbers} Get points and it starts again on its own"
+    )
+    url = f"{frontend_origin()}/my-startup/credits"
     return _fan_out_event(
         run=run,
         event_type="automation_paused_points",
         request_payload={"event_type": "automation_paused_points", "required_points": required_points,
                          "current_balance": current_balance},
         build_kwargs=lambda channel: {
-            "text": text,
+            "text": f"{message}: {url}",
             "subject": "Daily research is paused",
-            "html_body": html.escape(text).replace("\n", "<br>"),
+            "html_body": render_transactional_email(
+                title="Daily research is paused",
+                paragraphs=(f"{message}.",),
+                action_label="Get Roo points",
+                action_url=url,
+            ) if channel.channel_type == NotificationChannelType.EMAIL else None,
         },
     )
 

@@ -6,17 +6,27 @@
 <meta name="color-scheme" content="light">
 <title>{{ subject }}</title>
 </head>
-<body style="margin:0;padding:0;background:#f4f5f7;">
-{% if preheader %}<div style="display:none;max-height:0;overflow:hidden;opacity:0;">{{ preheader }}</div>{% endif %}
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;margin:0;padding:24px 0;">
+<body style="margin:0;padding:0;background:#f4f2f7;">
+{% if preheader %}<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">{{ preheader }}</div>{% endif %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f4f2f7" style="background:#f4f2f7;">
   <tr>
-    <td align="center">
+    <td align="center" style="padding:24px 12px;">
       <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+        <tr>
+          <td bgcolor="#f3eff9" style="padding:16px 32px;background:#f3eff9;border-bottom:1px solid #e6def0;">
+            <table role="presentation" cellpadding="0" cellspacing="0">
+              <tr>
+                <td valign="middle" style="padding-right:10px;"><img src="{{ asset_base|default:'https://api.mlai.au/static/crm/email' }}/mlai-roo.png" width="32" height="32" alt="" style="display:block;width:32px;height:32px;border:0;border-radius:16px;background:#2fd8bf;"></td>
+                <td valign="middle" style="font-size:18px;line-height:24px;font-weight:700;color:#2e2243;">MLAI</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
         {% block content %}{% endblock %}
         <tr>
-          <td style="padding:0 32px 28px;">
-            <p style="margin:0;font-size:12px;line-height:1.5;color:#9ca3af;">{% block footer %}{% endblock %}MLAI · <a href="https://mlai.au" style="color:#9ca3af;">mlai.au</a>{% if unsubscribe_url %} · <a href="{{ unsubscribe_url }}" style="color:#9ca3af;">Unsubscribe</a>{% endif %}</p>
+          <td style="padding:0 32px 24px;">
+            <p style="border-top:1px solid #e6def0;margin:0;padding-top:16px;font-size:13px;line-height:1.5;color:#5e566d;">{% block footer %}{% endblock %}MLAI · <a href="https://mlai.au" style="color:#4f3a75;">mlai.au</a>{% if preferences_url %} · <a href="{{ preferences_url }}" style="color:#4f3a75;">Manage email preferences</a>{% endif %}{% if unsubscribe_url %} · <a href="{{ unsubscribe_url }}" style="color:#4f3a75;">{{ unsubscribe_label|default:"Unsubscribe" }}</a>{% endif %}</p>
           </td>
         </tr>
       </table>

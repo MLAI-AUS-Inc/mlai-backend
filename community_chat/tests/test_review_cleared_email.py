@@ -14,7 +14,8 @@ from community_chat.onboarding_admin import CommunityMemberProfileAdmin
 from content_factory.founder_journey_testing import ALL_P1_FLAGS_ON
 
 POLICY = "test-v1"
-BASE = dict(COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION=POLICY, RESEND_API_KEY="re_test_key")
+BASE = dict(COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION=POLICY, RESEND_API_KEY="re_test_key",
+            COMMUNITY_CHAT_FRONTEND_URL="https://chat.example.test")
 ON = {**BASE, "COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED": True, "COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED": True}
 
 
@@ -58,7 +59,10 @@ class ReviewClearedEmailTests(TestCase):
         self.assertEqual(call.kwargs["json"]["to"], ["priya@example.com"])
         self.assertEqual(call.kwargs["json"]["subject"], "You're in")
         self.assertEqual(call.kwargs["json"]["text"],
-                         "Your MLAI membership is approved. You can now post in the community.")
+                         "Your MLAI membership is approved. You can now post in the community.\n\n"
+                         "Open MLAI Chat: https://chat.example.test")
+        self.assertIn("Welcome to MLAI", call.kwargs["json"]["html"])
+        self.assertIn('href="https://chat.example.test"', call.kwargs["json"]["html"])
         self.assertEqual(call.kwargs["headers"]["Idempotency-Key"], f"chat-review-cleared/{profile.pk}")
         for text in (call.kwargs["json"]["subject"], call.kwargs["json"]["text"]):
             self.assertNotIn(chr(0x2014), text)

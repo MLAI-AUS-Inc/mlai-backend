@@ -15,6 +15,7 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef, Q, Sum
 from django.utils import timezone
 
+from crm import email_layouts
 from crm.blasts import BlastError
 from crm.models import Blast, BlastDelivery, BlastWave, Contact, ContactConsentEvent, CrmAuditEvent, SendingStream
 from crm.queries import banned
@@ -25,8 +26,10 @@ from .streams import is_owner, stream_configured
 PATH = '/api/v1/crm/preferences/reconfirm/'
 SALT = 'crm.dormant-reconfirmation.v1'
 ATTRIBUTE = 'crm_reconfirmation_url'
-GO_URL = '{{ .Subscriber.Attribs.crm_reconfirmation_url }}'
-BUTTON = '\n\n[Yes, keep me subscribed](' + GO_URL + ')'
+# Listmonk uses html/template for the plain part too. Safe keeps ampersands
+# literal there, while the HTML href context still escapes the link.
+GO_URL = '{{ with .Subscriber.Attribs.crm_reconfirmation_url }}{{ Safe . }}{{ end }}'
+BUTTON = '\n\n' + email_layouts.reconfirmation_action(GO_URL)
 
 
 def is_reconfirmation(blast):

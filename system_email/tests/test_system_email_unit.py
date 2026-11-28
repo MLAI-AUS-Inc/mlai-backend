@@ -9,6 +9,7 @@ from django.test import SimpleTestCase, override_settings
 
 from system_email import api, health, transport_resend
 from system_email.fixtures import SAMPLE_CONTEXT
+from system_email.layouts import render_transactional_email
 from system_email.registry import MESSAGES, UnknownMessageError, get_spec
 from system_email.render import RenderedEmail, SystemEmailContextError, render
 from system_email.webhooks import parse_event, verify_signature
@@ -34,6 +35,7 @@ class RenderTests(SimpleTestCase):
                 self.assertTrue(rendered.subject)
                 self.assertNotIn("\n", rendered.subject)
                 self.assertIn("<html", rendered.html)
+                self.assertIn("/mlai-roo.png", rendered.html)
                 self.assertTrue(rendered.text.strip())
                 self.assertNotIn("{{", rendered.html + rendered.text)
                 self.assertNotIn("{%", rendered.html + rendered.text)
@@ -66,6 +68,42 @@ class RenderTests(SimpleTestCase):
         context = dict(SAMPLE_CONTEXT["magic_link"], first_name="<script>x</script>")
         rendered = render(get_spec("magic_link"), context)
         self.assertNotIn("<script>", rendered.html)
+
+    def test_shared_layout_keeps_link_destinations_and_escapes_plain_copy(self):
+        html = render_transactional_email(
+            title="Review <Acme>",
+            paragraphs=("Your draft is ready.\nHere is your <example>.",),
+            action_label="Review draft",
+            action_url="https://chat.mlai.au/draft?run=example&company_id=acme",
+            preferences_url="https://chat.mlai.au/settings",
+            unsubscribe_url="https://mlai.au/email/unsubscribe?token=sample",
+            content_html="<script>plain input</script>",
+            secondary_links=(("Preview & notes", "https://chat.mlai.au/preview?a=b&c=d"),),
+        )
+        self.assertIn("Review &lt;Acme&gt;", html)
+        self.assertIn("ready.<br>Here is your &lt;example&gt;.", html)
+        self.assertIn('href="https://chat.mlai.au/draft?run=example&amp;company_id=acme"', html)
+        self.assertIn("Manage email preferences", html)
+        self.assertIn("Unsubscribe", html)
+        self.assertNotIn("<script>", html)
+        self.assertLess(html.index("Review draft"), html.index("Preview &amp; notes"))
+
+    def test_shared_layout_omits_non_web_action_destinations(self):
+        html = render_transactional_email(
+            title="Draft ready",
+            action_label="Review draft",
+            action_url="javascript:alert(1)",
+            secondary_links=(("Preview", "https://name:password@example.com"),),
+            unsubscribe_url="https://[",
+        )
+        self.assertNotIn("Review draft", html)
+        self.assertNotIn("Preview", html)
+        self.assertNotIn("Unsubscribe", html)
+
+    def test_shared_layout_supports_an_informational_email(self):
+        html = render_transactional_email(title="Your account was updated", paragraphs=("Details",))
+        self.assertNotIn('bgcolor="#4f3a75"', html)
+        self.assertNotIn("Unsubscribe", html)
 
     def test_prerendered_requires_subject_and_body(self):
         spec = get_spec("article_review_ready")
@@ -312,3 +350,49 @@ class CallerRoutingTests(SimpleTestCase):
                                      message_key="article_review_ready")
         self.assertFalse(ok)
         self.assertEqual(payload, {"error": "resend_429", "retryable": True})
+
+    @override_settings(SYSTEM_EMAIL_RESEND_MESSAGES=("all",), CUSTOMERIO_API_KEY="legacy")
+    @patch("integrations.services.notification_adapters._send_email_via_customerio")
+    @patch("system_email.api.send")
+    def test_research_status_notices_use_registered_resend_routes(self, send, customerio):
+        from types import SimpleNamespace
+
+        from integrations.services.notification_adapters import SYSTEM_EMAIL_KEY_FOR_EVENT, _send_email
+
+        send.return_value = self._result()
+        channel = SimpleNamespace(route_id="a@example.com", user_id=5)
+        for event, key in (
+            ("research_empty", "daily_research_empty"),
+            ("automation_paused_points", "daily_research_paused_points"),
+        ):
+            with self.subTest(event=event):
+                self.assertEqual(SYSTEM_EMAIL_KEY_FOR_EVENT[event], key)
+                self.assertTrue(get_spec(key).unsubscribe)
+                status, provider_id, _ = _send_email(
+                    channel, subject="Research status", text="Details", html_body=None,
+                    idempotency_key=event, message_key=key, unsubscribe_url="https://mlai.au/unsubscribe",
+                )
+                self.assertTrue(status)
+                self.assertEqual(provider_id, "re_123")
+                self.assertEqual(send.call_args.args, (key,))
+                self.assertEqual(send.call_args.kwargs["idempotency_key"], event)
+                self.assertIn("/mlai-roo.png", send.call_args.kwargs["prerendered"].html)
+                self.assertEqual(send.call_args.kwargs["unsubscribe_url"], "https://mlai.au/unsubscribe")
+        customerio.assert_not_called()
+
+    @override_settings(SYSTEM_EMAIL_RESEND_MESSAGES=("all",), CUSTOMERIO_API_KEY="legacy", RESEND_API_KEY="resend")
+    @patch("integrations.services.notification_adapters._send_email_via_customerio")
+    @patch("integrations.services.notification_adapters._send_email_via_resend")
+    def test_resend_only_mode_keeps_uncategorized_mail_off_customerio(self, resend, customerio):
+        from types import SimpleNamespace
+
+        from integrations.services.notification_adapters import _send_email
+
+        resend.return_value = (True, "re_123", {})
+        result = _send_email(
+            SimpleNamespace(route_id="a@example.com", user_id=5), subject="Notification",
+            text="Details", html_body=None, idempotency_key="unchanged-key",
+        )
+        self.assertEqual(result, (True, "re_123", {}))
+        self.assertEqual(resend.call_args.kwargs["idempotency_key"], "unchanged-key")
+        customerio.assert_not_called()

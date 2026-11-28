@@ -24,6 +24,8 @@ from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from system_email.layouts import render_transactional_email
+
 from . import founder_journey_p2 as projection, p2_foundation
 from .models import ContentFactoryCallbackEvent, OrganizationContentConfig
 
@@ -586,8 +588,19 @@ def _deliver(row, config, notice, *, now):
     if notice["channel"] == "email":
         if not projection.verified_email(user):return "skipped"
         if not notice.get("payload"):
-            notice["payload"] = {"from": _sender(), "to": [user.email], "subject": notice["subject"],
-                "text": notice["body"] + "\n\n" + notice["button"] + ": " + notice["link"]}
+            notice["payload"] = {
+                "from": _sender(),
+                "to": [user.email],
+                "subject": notice["subject"],
+                "text": notice["body"] + "\n\n" + notice["button"] + ": " + notice["link"],
+                "html": render_transactional_email(
+                    title=notice["subject"],
+                    preheader=notice["body"],
+                    paragraphs=(notice["body"],),
+                    action_label=notice["button"],
+                    action_url=notice["link"],
+                ),
+            }
             _checkpoint(config, row, notice)
         # A changed email may not borrow a frozen message or idempotency key.
         user = _current(config, notice, now=timezone.now())

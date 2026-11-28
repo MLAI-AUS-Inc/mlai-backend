@@ -1,0 +1,18 @@
+{% extends "system_email/base.html" %}
+{% block content %}
+<tr>
+  <td style="padding:26px 32px 32px;color:#29243a;font-size:16px;line-height:1.6;overflow-wrap:anywhere;">
+    <h1 style="margin:0 0 16px;color:#241d33;font-size:26px;line-height:1.25;">{{ subject }}</h1>
+    {% for paragraph in paragraphs %}
+      <p style="margin:0 0 12px;">{{ paragraph|force_escape|linebreaksbr }}</p>
+    {% endfor %}
+    {{ content_html }}
+    {% if action_url and action_label %}
+      {% include "system_email/_button.html" with href=action_url label=action_label only %}
+    {% endif %}
+    {% for label, url in secondary_links %}
+      <p style="margin:14px 0 0;font-size:14px;"><a href="{{ url }}" style="color:#4f3a75;overflow-wrap:anywhere;word-break:break-word;">{{ label }}</a></p>
+    {% endfor %}
+  </td>
+</tr>
+{% endblock %}

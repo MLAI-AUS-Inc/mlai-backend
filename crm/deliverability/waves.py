@@ -8,7 +8,6 @@ against that same campaign, never replaced by another wave.
 
 import math
 import logging
-import re
 from collections import Counter
 from datetime import timedelta
 from time import monotonic
@@ -53,24 +52,9 @@ def consent_reason(delivery):
     return f"You're getting this because you opted in to MLAI emails{date}."
 
 
-def plain_body(blast):
-    """Keep link destinations in a readable alternative part; escape Go actions."""
-    text = re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)', r'\1 (\2)', blast.body_markdown)
-    text = re.sub(r'(?m)^\s{0,3}#{1,6}\s+', '', text)
-    text = re.sub(r'(?m)^\s*[-*]\s+', '• ', text)
-    if getattr(blast, 'sign_off_name', ''):
-        text += '\n\n— ' + blast.sign_off_name
-    text = blast_email.listmonk_text(text.replace('**', '').replace('__', ''), blast.event, markdown=False)
-    from . import reconfirmation
-    if reconfirmation.is_reconfirmation(blast):
-        text += '\n\nYes, keep me subscribed: ' + reconfirmation.GO_URL
-    return text
-
-
 def campaign_payload(wave, blast):
     payload = blast_email.campaign_payload(blast, wave.listmonk_list_id)
-    payload.update(name=resource_name(wave), from_email=blast_email.from_address('MLAI', blast.mailbox.email),
-        altbody=plain_body(blast) + '\n\n{{ .Subscriber.Attribs.consent_reason }}\nUnsubscribe: {{ UnsubscribeURL }}')
+    payload.update(name=resource_name(wave), from_email=blast_email.from_address('MLAI', blast.mailbox.email))
     payload['headers'] += [{'X-MLAI-Blast': str(blast.pk)}, {'X-MLAI-Wave': str(wave.index)},
         {'Feedback-ID': f'{wave.index}:{str(blast.pk)[:8]}:{blast.stream.key}:mlai'}]
     return payload

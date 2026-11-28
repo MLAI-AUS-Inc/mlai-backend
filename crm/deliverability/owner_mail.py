@@ -12,6 +12,7 @@ from django.utils.dateparse import parse_datetime
 
 from crm import blast_email, sending_domains
 from crm.models import CrmAuditEvent, SendingStream
+from system_email.layouts import render_transactional_email
 
 from . import policy
 from .streams import protected_domain, stream_configured
@@ -42,9 +43,12 @@ def send(subject, body, *, key, now):
             SendingStream.objects.select_for_update().get(pk=stream.pk)
             row = CrmAuditEvent.objects.select_for_update().filter(target_type='deliverability_alert_email', target_id=identity).order_by('-created_at', '-pk').first()
             if row is None:
+                subject_text = subject[:200]
+                plain_body = body[:20000]
+                html_body = render_transactional_email(title=subject_text, paragraphs=(plain_body,))
                 row = CrmAuditEvent.objects.create(action='send', target_type='deliverability_alert_email', target_id=identity,
                     detail={'state': 'pending', 'first_attempt_at': now.isoformat(), 'attempts': 0,
-                        'subject': subject[:200], 'body': body[:20000], 'credential_hash': hashlib.sha256(settings.CRM_NOTIFY_API_KEY.encode()).hexdigest(), 'from': blast_email.from_address('MLAI', stream.mailbox.email)})
+                        'subject': subject_text, 'body': plain_body, 'html': html_body, 'credential_hash': hashlib.sha256(settings.CRM_NOTIFY_API_KEY.encode()).hexdigest(), 'from': blast_email.from_address('MLAI', stream.mailbox.email)})
             state = dict(row.detail)
             if state.get('state') == 'sent':
                 continue
@@ -60,6 +64,8 @@ def send(subject, body, *, key, now):
                 next_attempt_at=(now + timedelta(seconds=min(3600, 60 * 2 ** min(attempts, 6)))).isoformat())
             CrmAuditEvent.objects.create(action='sync', target_type='deliverability_alert_email', target_id=identity, detail=state)
             payload = {'from': state['from'], 'to': [owner], 'subject': state['subject'], 'text': state['body']}
+            if 'html' in state:
+                payload['html'] = state['html']
         outcome = 'uncertain'
         try:
             with system_mail.observe("resend") as attempt:

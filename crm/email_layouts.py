@@ -27,10 +27,12 @@ from . import merge_tags
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 INK = "#111827"
 MUTED = "#6b7280"
-FAINT = "#9ca3af"
+FAINT = "#595367"
 LINE = "#e5e7eb"
 TEAL = "#2fd8bf"  # The MLAI roo's teal.
+PLUM = "#4f3a75"
 HOST_NAME = "MLAI"
+INVITE_BODY_TAG = "mlai-event-invite"
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _MONTHS = ("January", "February", "March", "April", "May", "June", "July",
            "August", "September", "October", "November", "December")
@@ -164,12 +166,27 @@ def _place_row(where: dict) -> str:
     return _row(tile, title, _text(where["detail"]))
 
 
-def _button(label: str, url: str, *, primary: bool) -> str:
-    background, color = (TEAL, "#0a0a0a") if primary else ("#f3f4f6", "#4b5563")
+def _button(label: str, href: str, *, primary: bool) -> str:
+    background, color = (PLUM, "#ffffff") if primary else ("#f3f4f6", "#4b5563")
     return (f'<td style="background:{background};border-radius:8px;mso-padding-alt:12px 22px">'
-            f'<a href="{_href(url)}" style="display:inline-block;padding:12px 22px;font-family:{FONT};'
+            f'<a href="{href}" style="display:inline-block;padding:12px 22px;font-family:{FONT};'
             f'font-size:16px;line-height:20px;font-weight:600;color:{color};text-decoration:none;'
-            f'border-radius:8px">{label}</a></td>')
+            f'border-radius:8px">{_text(label)}</a></td>')
+
+
+def campaign_action(label: str, url: str) -> str:
+    """Render a button for a trusted event URL in the campaign Markdown."""
+    return _action_table(label, _href(url))
+
+
+def reconfirmation_action(go_url: str) -> str:
+    """Render the button with the CRM-owned per-recipient Go URL expression."""
+    return _action_table("Yes, keep me subscribed", go_url)
+
+
+def _action_table(label: str, href: str) -> str:
+    return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0">'
+            f'<tr>{_button(label, href, primary=True)}</tr></table>')
 
 
 def _share_links(event, share_url: str) -> str:
@@ -215,9 +232,9 @@ def invite(event, body: str, *, event_url: str, share_url: str) -> str:
         f'{table}'
         f'<tr><td style="padding:0 0 14px 0"><table role="presentation" cellpadding="0" cellspacing="0" '
         f'border="0"><tr><td valign="middle" style="padding:0 8px 0 0">'
-        f'<img src="{_href(asset("mlai-roo.png"))}" width="24" height="24" alt="" '
-        f'style="display:block;width:24px;height:24px;border:0;border-radius:12px;background:{TEAL}"></td>'
-        f'<td valign="middle" style="font-family:{FONT};font-size:16px;line-height:20px;color:{MUTED}">'
+        f'<img src="{_href(asset("mlai-roo.png"))}" width="34" height="34" alt="" '
+        f'style="display:block;width:34px;height:34px;border:0;border-radius:17px;background:{TEAL}"></td>'
+        f'<td valign="middle" style="font-family:{FONT};font-size:21px;line-height:28px;font-weight:700;color:#21182e">'
         f'{HOST_NAME}</td></tr></table></td></tr>'
         f'<tr><td style="font-family:{FONT};font-size:26px;line-height:32px;color:{FAINT};padding:0">'
         f'You&rsquo;re invited to</td></tr>'
@@ -236,11 +253,12 @@ def invite(event, body: str, *, event_url: str, share_url: str) -> str:
 
     footer = '</td></tr>'
     if event_url:
+        event_href = _href(event_url)
         footer += (
             f'<tr><td style="padding:24px 0 0 0"><table role="presentation" cellpadding="0" cellspacing="0" '
-            f'border="0"><tr>{_button("Accept Invite", event_url, primary=True)}'
+            f'border="0"><tr>{_button("Accept Invite", event_href, primary=True)}'
             f'<td style="width:10px;font-size:0;line-height:0">&nbsp;</td>'
-            f'{_button("View Event", event_url, primary=False)}</tr></table></td></tr>'
+            f'{_button("View Event", event_href, primary=False)}</tr></table></td></tr>'
         )
     footer += (
         f'<tr><td style="padding:24px 0 0 0;font-family:{FONT};font-size:15px;line-height:22px;color:{MUTED}">'

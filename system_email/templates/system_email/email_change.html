@@ -1,11 +1,16 @@
 {% extends "system_email/base.html" %}
 {% block content %}
-{% if verification_code %}
-<p>Enter this code in MLAI Chat to approve the sign-in email change to {{ new_email_masked }}.</p>
-<p><strong>{{ verification_code }}</strong></p>
-<p>Return to Settings to finish. If you didn't start this request, you can ignore this email.</p>
-{% else %}
-<p>Your MLAI sign-in email changed to {{ new_email_masked }}. Use the new address when you sign in again.</p>
-{% endif %}
-<p>If this activity is unexpected, contact hi@mlai.au. MLAI staff will never ask for your code.</p>
+<tr>
+  <td style="padding:26px 32px 28px;color:#29243a;font-size:16px;line-height:1.6;">
+    <h1 style="margin:0 0 16px;color:#241d33;font-size:24px;line-height:1.25;">{{ subject }}</h1>
+    {% if verification_code %}
+      <p style="margin:0 0 12px;">Enter this code in MLAI Chat to approve the sign-in email change to {{ new_email_masked }}.</p>
+      <p style="margin:16px 0;font-size:30px;line-height:1.25;letter-spacing:.16em;font-weight:700;font-family:SFMono-Regular,Menlo,Consolas,monospace;">{{ verification_code }}</p>
+      <p style="margin:0 0 12px;">Return to Settings to finish. If you didn't start this request, you can ignore this email.</p>
+    {% else %}
+      <p style="margin:0 0 12px;">Your MLAI sign-in email changed to {{ new_email_masked }}. Use the new address when you sign in again.</p>
+    {% endif %}
+    <p style="margin:0;font-size:14px;color:#5e566d;">If this activity is unexpected, contact <a href="mailto:hi@mlai.au" style="color:#4f3a75;">hi@mlai.au</a>. MLAI staff will never ask for your code.</p>
+  </td>
+</tr>
 {% endblock %}

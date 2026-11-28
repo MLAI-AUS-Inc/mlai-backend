@@ -29,6 +29,11 @@ def content_hash(blast, template_body):
     data['reconfirmation'] = is_reconfirmation(blast)
     if data['reconfirmation']:
         data['preference_origin'] = settings.DEFAULT_BACKEND_URL
+    try:
+        data.update(campaign_body=blast_email.campaign_body(blast), altbody=blast_email.plain_body(blast))
+    except merge_tags.UnsupportedMergeTag:
+        # The normal preflight check gives the draft author a precise validation error.
+        pass
     data.update(stream=blast.stream.key, domain=blast.stream.domain, from_address=blast.mailbox.email,
         reply_to=blast.mailbox.reply_to, template_id=listmonk.template_id(),
         template_hash=hashlib.sha256(template_body.encode()).hexdigest(), event=event_context(blast))

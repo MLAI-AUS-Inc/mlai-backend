@@ -1,0 +1,18 @@
+{{ performance_html }}
+<p style="margin:0 0 20px;">Research topics are ready for <strong>{{ domain }}</strong>. Choose a topic to review before you start the article.</p>
+{% for topic in topics %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 16px;border:1px solid #e6def0;border-radius:12px;">
+  <tr>
+    <td style="padding:16px 18px;">
+      <h2 style="margin:0 0 6px;font-size:18px;line-height:1.4;">{{ topic.display_title }}</h2>
+      {% if topic.keyword %}<p style="margin:0 0 8px;font-size:14px;">Keyword: {{ topic.keyword }}</p>{% endif %}
+      {% if topic.why_recommended %}<p style="margin:0 0 10px;">{{ topic.why_recommended }}</p>{% endif %}
+      {% if topic.trend_summary %}<p style="margin:0 0 10px;">{{ topic.trend_summary }}</p>{% endif %}
+      {% if topic.chart_url %}
+      <p style="margin:0 0 12px;"><img src="{{ topic.chart_url }}" alt="{{ topic.chart_alt|default:'Demand trend for this topic' }}" width="480" style="display:block;width:100%;max-width:480px;height:auto;"></p>
+      {% endif %}
+      {% include "system_email/_button.html" with href=topic.confirm_url label="Approve this topic" only %}
+    </td>
+  </tr>
+</table>
+{% endfor %}

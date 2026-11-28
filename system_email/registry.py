@@ -120,6 +120,8 @@ _SPECS = (
     MessageSpec(key="article_content_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(key="article_report_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(key="daily_research_topics", category=NOTIFICATION, prerendered=True, unsubscribe=True),
+    MessageSpec(key="daily_research_empty", category=NOTIFICATION, prerendered=True, unsubscribe=True),
+    MessageSpec(key="daily_research_paused_points", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     # Plan E3b: "Tell me when this changes" on the not-on-GitHub exit.
     MessageSpec(key="founder_website_lead_reminder", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(

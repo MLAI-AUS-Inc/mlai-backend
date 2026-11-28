@@ -222,7 +222,9 @@ def _safe_url(url: str) -> str:
 
 def event_card(event, *, button: str, campaign: str, with_cover: bool) -> str:
     when = merge_tags.format_event_start(event.start_at, getattr(event, "timezone", ""))
-    place = event_place(event)
+    from . import email_layouts
+    where = email_layouts.event_where(event)
+    place = " · ".join(filter(None, (where["title"], where["detail"]))) if where else ""
     url = tracked_event_url(event, campaign=campaign)
     lines = []
     cover = str(getattr(event, "cover_url", "") or "").strip()
@@ -236,7 +238,7 @@ def event_card(event, *, button: str, campaign: str, with_cover: bool) -> str:
         lines.append(details)
     if url:
         lines.append("")
-        lines.append(f"**[{button} →]({url})**")
+        lines.append(email_layouts.campaign_action(button, url))
     return "\n".join(lines)
 
 
