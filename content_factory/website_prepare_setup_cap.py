@@ -72,6 +72,11 @@ def handle_held_restart(op) -> bool:
     if op.state != "cancelled":
         from .website_contract import WebsiteAuthorityError
         raise WebsiteAuthorityError("website_prepare_blocked", message)
+    # The generic preparation stop counts step failures. This stop counts
+    # dispatched setup runs, including the ones saved before Stop was clicked.
+    count = len(dispatched(op))
+    at_limit = f"after {count} setup {'attempt' if count == 1 else 'attempts'}" if count else "at the setup attempt limit"
+    message = f"We stopped setting up your website {at_limit}. The MLAI team needs to review it before starting another setup."
     op.state, op.next_attempt_at = "needs_attention", None
     op.receipt = {**op.receipt, "status": "needs_attention", "reason_code": CODE, "retryable": False,
         "message": message, "user_action": None, "dispatch_outcome": "replayed"}

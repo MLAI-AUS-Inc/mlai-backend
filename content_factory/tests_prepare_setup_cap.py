@@ -105,6 +105,8 @@ class SetupDispatchCapPrepareTests(SimpleTestCase):
                         resumed = prepare.start_prepare(self.replay.config, expected={}, company_id=9, retry=True)
                         self.assertIs(resumed, self.op)
                         self.assertIsNone(resumed.next_attempt_at)
+                        self.assertIn("after 3 setup attempts", prepare_receipt(resumed)["message"])
+                        self.assertNotIn("after 1 attempt", prepare_receipt(resumed)["message"])
                     else:
                         with self.assertRaises(WebsiteAuthorityError) as raised:
                             prepare.start_prepare(self.replay.config, expected={}, company_id=9, retry=True)

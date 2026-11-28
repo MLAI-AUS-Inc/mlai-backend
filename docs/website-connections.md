@@ -124,8 +124,10 @@ live check. With the flag off, merged articles still count as published and
 while explicitly retryable worker failures retain bounded retries. Owners may cancel
 an active or waiting prepare operation and explicitly reopen it with another Prepare
 click; cancelling fences its child and queues the ordinary run cancellation path.
-Once a preparation has stopped at its setup dispatch limit, further Prepare
-requests return HTTP 409 (`website_prepare_blocked`) and preserve the attempt.
+Once a preparation stops at its setup dispatch limit, retrying the same goal
+with unchanged consent returns HTTP 409 (`website_prepare_blocked`) and
+preserves its attempt count. An enrolled owner who submits different setup
+choices or a different goal follows the ordinary successor-goal consent checks.
 The owner card hides Prepare and Stop for that hold. If the owner previously
 stopped a capped operation, an explicit retry returns it to staff review
 without starting work or changing its dispatch count. Staff can review the
