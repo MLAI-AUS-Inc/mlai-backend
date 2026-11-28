@@ -80,19 +80,10 @@
 {%- assign site_domain = trigger.domain | default: domain | default: message_data.domain -%}
 {%- assign optout_url = trigger.unsubscribe_url | default: unsubscribe_url | default: message_data.unsubscribe_url -%}
 {%- assign perf = trigger.analytics | default: analytics | default: message_data.analytics -%}
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f2f7;margin:0;padding:24px 0;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;margin:0;padding:24px 0;">
   <tr>
-    <td align="center" style="padding:0 12px">
-      <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:100%;background:#ffffff;border-radius:12px;border:1px solid #e5e7eb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-        <tr>
-          <td style="padding:26px 32px 0">
-            <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-              <td valign="middle" style="padding-right:10px"><img src="https://api.mlai.au/static/crm/email/mlai-roo.png" width="34" height="34" alt="" style="display:block;width:34px;height:34px;border:0;border-radius:17px"></td>
-              <td valign="middle" style="font-size:21px;line-height:28px;font-weight:700;color:#21182e">MLAI</td>
-            </tr></table>
-          </td>
-        </tr>
+    <td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
 
         <!-- Header -->
         <tr>
@@ -121,7 +112,7 @@
                   <p style="margin:14px 0 4px 0;font-size:13px;color:#374151;font-weight:700;">Top pages</p>
                   {% for page in perf.top_pages %}
                   <p style="margin:2px 0 0 0;font-size:13px;color:#4b5563;line-height:1.5;">
-                    {{ page.rank }}. {% if page.url != blank %}<a href="{{ page.url }}" style="color:#4f3a75;text-decoration:none;font-weight:600;">{{ page.title }}</a>{% else %}<strong>{{ page.title }}</strong>{% endif %} &mdash; {{ page.summary }}
+                    {{ page.rank }}. {% if page.url != blank %}<a href="{{ page.url }}" style="color:#4f46e5;text-decoration:none;font-weight:600;">{{ page.title }}</a>{% else %}<strong>{{ page.title }}</strong>{% endif %} &mdash; {{ page.summary }}
                   </p>
                   {% endfor %}
                   {% endif %}
@@ -132,12 +123,12 @@
                   <p style="margin:2px 0 0 0;font-size:13px;color:#4b5563;line-height:1.5;"><strong>{{ page.title }}</strong> &mdash; {{ page.summary }}</p>
                   {% endfor %}
                   {% if perf.extra_attention_count > 0 %}
-                  <p style="margin:6px 0 0 0;font-size:12px;color:#595367;">&hellip;and {{ perf.extra_attention_count }} more in the full brief.</p>
+                  <p style="margin:6px 0 0 0;font-size:12px;color:#9ca3af;">&hellip;and {{ perf.extra_attention_count }} more in the full brief.</p>
                   {% endif %}
                   {% endif %}
 
                   {% if perf.brief_url != blank %}
-                  <p style="margin:14px 0 0 0;font-size:13px;"><a href="{{ perf.brief_url }}" style="color:#4f3a75;text-decoration:underline;">Open the full brief</a></p>
+                  <p style="margin:14px 0 0 0;font-size:13px;"><a href="{{ perf.brief_url }}" style="color:#4f46e5;text-decoration:underline;">Open the full brief</a></p>
                   {% endif %}
                 </td>
               </tr>
@@ -171,7 +162,7 @@
                   <span style="display:inline-block;background:#eef2ff;color:#4338ca;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:4px 10px;border-radius:999px;margin-bottom:10px;">{{ topic.tier_label }}</span>
                   {% endif %}
 
-                  <p style="margin:0;font-size:13px;color:#595367;">Topic {{ topic.rank }}</p>
+                  <p style="margin:0;font-size:13px;color:#9ca3af;">Topic {{ topic.rank }}</p>
                   <h2 style="margin:4px 0 0 0;font-size:18px;line-height:1.3;color:#111827;font-weight:700;">{{ topic.display_title }}</h2>
                   <p style="margin:6px 0 0 0;font-size:13px;color:#6b7280;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">{{ topic.keyword }}</p>
 
@@ -192,7 +183,7 @@
                   <p style="margin:14px 0 0 0;font-size:13px;color:#374151;line-height:1.5;"><strong>Demand trend:</strong> {{ topic.trend_summary }}</p>
                   {% endif %}
                   {% if topic.chart_url != blank %}
-                  <p style="margin:6px 0 8px 0;font-size:11px;color:#595367;">
+                  <p style="margin:6px 0 8px 0;font-size:11px;color:#9ca3af;">
                     {{ topic.trend_source_label }}{% if topic.trend_period_label != blank %} &middot; {{ topic.trend_period_label }}{% endif %}
                   </p>
                   <img src="{{ topic.chart_url | escape }}" alt="{{ topic.chart_alt | escape }}" width="480" style="display:block;width:100%;max-width:480px;height:auto;border:0;border-radius:8px;background:#ffffff;" />
@@ -201,14 +192,14 @@
                   <!-- Bulletproof CTA button -->
                   <table role="presentation" cellpadding="0" cellspacing="0" style="margin:16px 0 4px 0;">
                     <tr>
-                      <td align="center" bgcolor="#4f3a75" style="border-radius:8px;">
+                      <td align="center" bgcolor="#4f46e5" style="border-radius:8px;">
                         <!--[if mso]>
-                        <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ topic.confirm_url }}" style="height:44px;v-text-anchor:middle;width:220px;" arcsize="18%" strokecolor="#4f3a75" fillcolor="#4f3a75">
+                        <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ topic.confirm_url }}" style="height:44px;v-text-anchor:middle;width:220px;" arcsize="18%" strokecolor="#4f46e5" fillcolor="#4f46e5">
                         <w:anchorlock/><center style="color:#ffffff;font-family:sans-serif;font-size:15px;font-weight:bold;">&#9997;&#65039; Write this article</center>
                         </v:roundrect>
                         <![endif]-->
                         <!--[if !mso]><!-->
-                        <a href="{{ topic.confirm_url }}" style="display:inline-block;padding:13px 28px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px;background:#4f3a75;">&#9997;&#65039; Write this article</a>
+                        <a href="{{ topic.confirm_url }}" style="display:inline-block;padding:13px 28px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px;background:#4f46e5;">&#9997;&#65039; Write this article</a>
                         <!--<![endif]-->
                       </td>
                     </tr>
@@ -225,7 +216,7 @@
         <tr>
           <td style="padding:28px 32px 32px 32px;">
             <hr style="border:none;border-top:1px solid #e5e7eb;margin:0 0 16px 0;">
-            <p style="margin:0;font-size:12px;line-height:1.5;color:#595367;">
+            <p style="margin:0;font-size:12px;line-height:1.5;color:#9ca3af;">
               You're getting this because daily research is on for {{ site_domain }}.
               <a href="{{ optout_url }}" style="color:#6b7280;text-decoration:underline;">Pause these emails</a>.
             </p>
@@ -233,7 +224,6 @@
         </tr>
 
       </table>
-      <!--[if mso]></td></tr></table><![endif]-->
     </td>
   </tr>
 </table>

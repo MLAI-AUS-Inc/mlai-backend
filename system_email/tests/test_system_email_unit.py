@@ -350,3 +350,49 @@ class CallerRoutingTests(SimpleTestCase):
                                      message_key="article_review_ready")
         self.assertFalse(ok)
         self.assertEqual(payload, {"error": "resend_429", "retryable": True})
+
+    @override_settings(SYSTEM_EMAIL_RESEND_MESSAGES=("all",), CUSTOMERIO_API_KEY="legacy")
+    @patch("integrations.services.notification_adapters._send_email_via_customerio")
+    @patch("system_email.api.send")
+    def test_research_status_notices_use_registered_resend_routes(self, send, customerio):
+        from types import SimpleNamespace
+
+        from integrations.services.notification_adapters import SYSTEM_EMAIL_KEY_FOR_EVENT, _send_email
+
+        send.return_value = self._result()
+        channel = SimpleNamespace(route_id="a@example.com", user_id=5)
+        for event, key in (
+            ("research_empty", "daily_research_empty"),
+            ("automation_paused_points", "daily_research_paused_points"),
+        ):
+            with self.subTest(event=event):
+                self.assertEqual(SYSTEM_EMAIL_KEY_FOR_EVENT[event], key)
+                self.assertTrue(get_spec(key).unsubscribe)
+                status, provider_id, _ = _send_email(
+                    channel, subject="Research status", text="Details", html_body=None,
+                    idempotency_key=event, message_key=key, unsubscribe_url="https://mlai.au/unsubscribe",
+                )
+                self.assertTrue(status)
+                self.assertEqual(provider_id, "re_123")
+                self.assertEqual(send.call_args.args, (key,))
+                self.assertEqual(send.call_args.kwargs["idempotency_key"], event)
+                self.assertIn("/mlai-roo.png", send.call_args.kwargs["prerendered"].html)
+                self.assertEqual(send.call_args.kwargs["unsubscribe_url"], "https://mlai.au/unsubscribe")
+        customerio.assert_not_called()
+
+    @override_settings(SYSTEM_EMAIL_RESEND_MESSAGES=("all",), CUSTOMERIO_API_KEY="legacy", RESEND_API_KEY="resend")
+    @patch("integrations.services.notification_adapters._send_email_via_customerio")
+    @patch("integrations.services.notification_adapters._send_email_via_resend")
+    def test_resend_only_mode_keeps_uncategorized_mail_off_customerio(self, resend, customerio):
+        from types import SimpleNamespace
+
+        from integrations.services.notification_adapters import _send_email
+
+        resend.return_value = (True, "re_123", {})
+        result = _send_email(
+            SimpleNamespace(route_id="a@example.com", user_id=5), subject="Notification",
+            text="Details", html_body=None, idempotency_key="unchanged-key",
+        )
+        self.assertEqual(result, (True, "re_123", {}))
+        self.assertEqual(resend.call_args.kwargs["idempotency_key"], "unchanged-key")
+        customerio.assert_not_called()

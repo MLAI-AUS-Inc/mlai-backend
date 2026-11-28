@@ -965,6 +965,8 @@ SYSTEM_EMAIL_KEY_FOR_EVENT = {
     "review_ready": "article_review_ready",
     "content_ready": "article_content_ready",
     "topic_selection": "daily_research_topics",
+    "research_empty": "daily_research_empty",
+    "automation_paused_points": "daily_research_paused_points",
 }
 
 
@@ -982,27 +984,25 @@ def _send_email(
 ) -> tuple[bool, str, dict]:
     """Send one notification email.
 
-    A ``message_key`` switched on in ``SYSTEM_EMAIL_RESEND_MESSAGES`` goes
-    through our own Resend sender on the transactional domain. Everything else
-    keeps the legacy order: Customer.io when its key is set, else Resend.
+    Registered messages switched to Resend use the transactional domain.
+    The ``all`` setting also keeps uncategorized notifications off Customer.io.
     """
+    from system_email.api import resend_message_keys, routes_to_resend
+
     html_body = html_body or render_transactional_email(
         title=subject, paragraphs=(text,), unsubscribe_url=unsubscribe_url,
     )
-    if message_key:
-        from system_email.api import routes_to_resend
-
-        if routes_to_resend(message_key):
-            return _send_email_via_system_email(
-                channel,
-                message_key=message_key,
-                subject=subject,
-                text=text,
-                html_body=html_body,
-                idempotency_key=idempotency_key,
-                unsubscribe_url=unsubscribe_url,
-            )
-    if str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
+    if message_key and routes_to_resend(message_key):
+        return _send_email_via_system_email(
+            channel,
+            message_key=message_key,
+            subject=subject,
+            text=text,
+            html_body=html_body,
+            idempotency_key=idempotency_key,
+            unsubscribe_url=unsubscribe_url,
+        )
+    if "all" not in resend_message_keys() and str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
         return _send_email_via_customerio(
             channel,
             subject=subject,
