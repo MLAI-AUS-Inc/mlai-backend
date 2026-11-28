@@ -885,7 +885,8 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
 
     if decision is None and run is not None and (
             (run.status in FAILED_STATUSES and not is_retrying(run))
-            or (run.status == "cancelled" and not is_owner_initiated_stop(run))):
+            or (run.status == "cancelled" and not is_owner_initiated_stop(run))) \
+            and not is_stale_setup_run(run, connection, config):
         price, _balance = article_price_and_balance(organization, user)
         support = _support_code(run)
         from .no_generic_stop import is_generic_stop

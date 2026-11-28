@@ -218,6 +218,25 @@ def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=Non
         "runId": run_id, "supportCode": None}
 
 
+def article_outcome(run):
+    """The points outcome of an article run, as every founder surface shows it.
+
+    A pending (or missing) receipt on an article whose request charged nothing
+    and used no free entitlement reads "No charge.": there are no points to
+    check. The journey card and the article_stopped email share this answer.
+    """
+    outcome = optional("content_factory.no_delivery_refunds", "points_outcome", run)
+    if run is None or (outcome is not None and outcome.get("state") != "pending"):
+        return outcome
+    from .billing_lineage import paid_article_request
+    from .first_article_entitlement import entitled_request
+    from .run_state import ARTICLE_WORKFLOWS
+    saved = mapping(run.run_request)
+    if run.workflow in ARTICLE_WORKFLOWS and not paid_article_request(saved) and not entitled_request(saved):
+        return {"state": "no_charge", "points": None}
+    return outcome
+
+
 def run_decision(organization, run, *, config, user, now, queue=None, follow_publication=True):
     """Apply P2 precedence to one run; None leaves the P1 rule in charge."""
     if run is None or not registry_policy._policy_v2_for(organization):
@@ -240,12 +259,13 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
             return None
         return line("working_publishing", run=run)
     from .founder_journey import SETUP_WORKFLOWS, _connection, is_owner_initiated_stop, is_stale_setup_run
-    if run.status == "cancelled" and is_owner_initiated_stop(run):
-        # The owner's own cancel, Clear saved setup, a disconnect or Stop: no
-        # card, so the setup prompt or the normal next step shows.
-        return None
-    if run.workflow in SETUP_WORKFLOWS and is_stale_setup_run(run, _connection(organization), config):
-        return None  # Clear saved setup, reconnect or disconnect started setup over.
+    # The owner's own cancel, Clear saved setup, a disconnect or Stop, or a
+    # setup run a reset, reconnect or disconnect started over. Such a stop is
+    # not ours to fix: it gets no failure or fixing line, so the setup prompt
+    # or the normal next step shows. A draft it already delivered (live, ready
+    # to copy, highlighted claims, review) keeps its card.
+    owner_stopped = bool((run.status == "cancelled" and is_owner_initiated_stop(run))
+        or (run.workflow in SETUP_WORKFLOWS and is_stale_setup_run(run, _connection(organization), config)))
     code = result.get("error_code") or mapping(result.get("failure")).get("code")
     entry = registry_policy.effective_entry(code, organization)
     channel = mapping(result.get("channel_v1"))
@@ -254,15 +274,13 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
     from .run_state import ARTICLE_WORKFLOWS
     # A publication child counts as its article; a setup run has no points line.
     article = run.workflow in ARTICLE_WORKFLOWS or not follow_publication
-    outcome = optional("content_factory.no_delivery_refunds", "points_outcome", run) if article else None
-    if follow_publication and run.workflow in ARTICLE_WORKFLOWS and (outcome is None or outcome.get("state") == "pending"):
-        # Nothing was charged for this article, so there are no points to check.
-        # (A publication child carries no points fields of its own: never here.)
-        from .billing_lineage import paid_article_request
-        from .first_article_entitlement import entitled_request
-        saved = mapping(run.run_request)
-        if not paid_article_request(saved) and not entitled_request(saved):
-            outcome = {"state": "no_charge", "points": None}
+    if not article:
+        outcome = None
+    elif follow_publication:
+        outcome = article_outcome(run)
+    else:
+        # A publication child carries no points fields of its own: never "No charge.".
+        outcome = optional("content_factory.no_delivery_refunds", "points_outcome", run)
     copy_id = None
     if run.status == "queued" and queue and queue.get("queuePosition"):
         copy_id = "working_queue"
@@ -277,7 +295,7 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
         if is_delivered_content_only(run):
             exhausted = mapping(mapping(getattr(config, "pillar_strategy", None)).get("self_heal")).get("ladder")
             copy_id = "done_copy_ready_ladder_exhausted" if mapping(exhausted).get("exhausted_at") else "done_copy_ready_strategy"
-    if copy_id is None and run.status in {"failed", "blocked"}:
+    if copy_id is None and run.status in {"failed", "blocked"} and not owner_stopped:
         from .failure_policy_engine import class_before_wall_enabled, settled_without_delivery
         if class_before_wall_enabled() and settled_without_delivery(run):
             # D16: the points came back, so the founder starts again, never resumes.
@@ -287,6 +305,8 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
     from .founder_journey_contract import effective_approval_state
     if copy_id is None and ready_before_preview(run, organization) and effective_approval_state(run) != "approved":
         copy_id = "ask_review_draft"
+    if copy_id is None and owner_stopped:
+        return None
     if copy_id is None and code in {"SITE_TEST_CHANGE_REQUIRED", "BRANCH_PROTECTION_APPROVAL_REQUIRED"}:
         copy_id = "ask_approve_on_github_site_test" if code == "SITE_TEST_CHANGE_REQUIRED" else "ask_approve_on_github_protected"
     if copy_id is None and entry and entry.get("founder_copy_id") == "ask_authorize_github_revoked":

@@ -139,6 +139,41 @@ class OwnerInitiatedStopTests(SimpleTestCase):
         self.assertFalse(founder_journey.is_stale_setup_run(_run("running", run_id="setup-old"), None, config))
 
 
+class ArticleOutcomeTests(SimpleTestCase):
+    """One points outcome for the journey card and the article_stopped email; no database."""
+
+    def outcome(self, run, receipt):
+        with patch("content_factory.no_delivery_refunds.points_outcome", return_value=receipt):
+            return founder_journey_p2.article_outcome(run)
+
+    def test_an_unpaid_article_with_a_pending_receipt_reads_no_charge(self):
+        unpaid = _run("failed", workflow="article_generation", request={"delivery_mode": "content_only"})
+        for receipt in ({"state": "pending", "points": None}, None):
+            with self.subTest(receipt=receipt):
+                self.assertEqual(self.outcome(unpaid, receipt), {"state": "no_charge", "points": None})
+
+    def test_a_paid_article_or_a_settled_receipt_is_unchanged(self):
+        paid = _run("failed", workflow="article_generation",
+                    request={"delivery_mode": "content_only", "roo_points_billing_status": "charged"})
+        pending = {"state": "pending", "points": None}
+        self.assertEqual(self.outcome(paid, pending), pending)
+        unpaid = _run("failed", workflow="article_generation")
+        refunded = {"state": "refunded", "points": 12}
+        self.assertEqual(self.outcome(unpaid, refunded), refunded)
+        self.assertEqual(self.outcome(_run("failed"), pending), pending)  # a setup run is not an article
+
+    def test_the_article_stopped_email_reads_the_same_points_line_as_the_card(self):
+        from . import founder_transitions
+        unpaid = _run("failed", workflow="article_generation", request={"delivery_mode": "content_only"})
+        organization = SimpleNamespace(domain="example.com", name="Example")
+        with patch("content_factory.no_delivery_refunds.points_outcome",
+                   return_value={"state": "pending", "points": None}):
+            _headline, body, _label = founder_transitions._copy("article_stopped", {"run": unpaid}, organization)
+            card = founder_journey_p2.line("stopped", run=unpaid, outcome=founder_journey_p2.article_outcome(unpaid))
+        self.assertEqual(body, "No charge.")
+        self.assertEqual(body, card["body"])
+
+
 class P1JourneyGenericStopTests(JourneyFixture, TestCase):
     """The flag-off path of the failure policy: the P1 journey cases."""
 
@@ -183,6 +218,17 @@ class P1JourneyGenericStopTests(JourneyFixture, TestCase):
         self.assertNotIn(body.get("copyId"), {"fixing", "failed"})
         self.assertNotIn("We couldn't write this one", body.get("body") or "")
 
+    def test_a_setup_that_failed_before_clear_saved_setup_is_not_a_failure_card_by_run_id(self):
+        connection = self.connection()
+        run = make_run(self.org, workflow="article_system_setup", status="failed", step="setup",
+                       request={"website_connection_id": str(connection.pk),
+                                "connection_generation": connection.generation})
+        type(connection).objects.filter(pk=connection.pk).update(generation=connection.generation + 1)
+        body = self.journey(run_id=run.run_id)
+        self.assertNotEqual(body["headline"], "We're fixing this")
+        self.assertFalse(str(body.get("copyId") or "").startswith(("fixing", "failed")))
+        self.assertNotIn("We couldn't write this one", body.get("body") or "")
+
 
 class P2CopyGenericStopTests(JourneyFixture, TestCase):
     def test_copy_id_for_answers_fixing_for_a_generic_terminal_in_the_cohort(self):
@@ -213,6 +259,21 @@ class P2CopyGenericStopTests(JourneyFixture, TestCase):
         stop.error = "Website operation cancelled."
         stop.save(update_fields=["error"])
         self.assertIsNone(self.decide(stop))
+
+    def test_a_delivered_draft_keeps_its_card_after_a_website_action_stops_its_run(self):
+        reset = {"cancellation_reason": "system_stop", "cancelled_by": "system", "cancellation_transition": "reset"}
+        ready = make_run(self.org, status="cancelled", step="write_article", result={**reset, "channel_v1": {
+            "channel": "copy_ready", "waiting_to_publish": True, "dispatch_state": "accepted"}})
+        with patch("content_factory.founder_draft_views.is_delivered_content_only", return_value=True):
+            self.assertEqual(self.decide(ready)["copyId"], "done_copy_ready_strategy")
+        live = make_run(self.org, status="cancelled", step="write_article",
+                        result={**reset, "deploy_v1": {"url": "https://example.com/blog/a"}})
+        self.assertEqual(self.decide(live)["headline"], "Your article is live!")
+        claims = make_run(self.org, status="cancelled", step="write_article", result=reset)
+        with patch.object(founder_journey_p2, "claims_count", return_value=2):
+            self.assertEqual(self.decide(claims)["copyId"], "ask_check_highlighted")
+        bare = make_run(self.org, status="cancelled", step="write_article", result=reset)
+        self.assertIsNone(self.decide(bare))
 
     def test_a_setup_that_failed_before_a_reset_has_no_card(self):
         connection = self.connection()

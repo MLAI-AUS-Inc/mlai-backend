@@ -174,7 +174,8 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
     current_copy = _copy(payload["headline"], payload.get("body"), button)
     code = result.get("error_code") or _mapping(result.get("failure")).get("code")
     failed = bool(run is not None and run.status in {"failed", "blocked", "denied", "cancelled"}
-        and not journey.is_owner_initiated_stop(run) and not ready)
+        and not journey.is_owner_initiated_stop(run)
+        and not journey.is_stale_setup_run(run, connection, config) and not ready)
     failure = None
     if failed:
         registry = load_registry()
