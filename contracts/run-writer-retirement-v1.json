@@ -6019,8 +6019,8 @@
     {
       "path": "content_factory/founder_journey_contract.py",
       "function": "enrich_journey",
-      "function_sha256": "53892a58b5b0c3d53d9082466a7d038afab2a5f31cb87e245d75d4e316441ac7",
-      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities. The website step reads has_connected_website (read-only) to stay pending until the site is connected when ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE is on. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): adds the read-only repoHealth projection (ARTICLES_REPO_HEALTH_ENABLED, default off); no lifecycle or monetary effect. The repo-health projection reads evidence for the selected target and grants no command authority.",
+      "function_sha256": "ff62f41f8a71bae8cb76e3826e73b9a6906a9b1c88b9cb28856b964ead3ca56e",
+      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities. The website step reads has_connected_website (read-only) to stay pending until the site is connected when ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE is on. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): adds the read-only repoHealth projection (ARTICLES_REPO_HEALTH_ENABLED, default off); no lifecycle or monetary effect. The repo-health projection reads evidence for the selected target and grants no command authority. 28 Nov 2026 (backend #1432, awaiting owner review): the failed flag also skips owner-initiated stops (is_owner_initiated_stop, which replaces is_owner_cancel) and stale setup runs (is_stale_setup_run); both are read-only checks of the run record and connection generation, with no lifecycle or monetary effect.",
       "test_refs": [
         "content_factory.tests_founder_article_contract",
         "content_factory.tests_founder_article_controls",
