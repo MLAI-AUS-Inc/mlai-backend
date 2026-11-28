@@ -59,6 +59,27 @@ def reached(op) -> bool:
     return bool(cap) and len(dispatched(op)) >= cap
 
 
+def held_for_staff(state, receipt) -> bool:
+    """A saved cap stop survives an owner's Stop or a repeated Prepare request."""
+    return state in {"needs_attention", "cancelled", "stopped"} and isinstance((receipt or {}).get(HELD_KEY), dict)
+
+
+def handle_held_restart(op) -> bool:
+    """Keep the staff hold; an owner who previously stopped can return the case to staff."""
+    if not held_for_staff(op.state, op.receipt):
+        return False
+    message = "Website preparation reached its setup attempt limit. The MLAI team needs to review it before starting another setup."
+    if op.state != "cancelled":
+        from .website_contract import WebsiteAuthorityError
+        raise WebsiteAuthorityError("website_prepare_blocked", message)
+    op.state, op.next_attempt_at = "needs_attention", None
+    op.receipt = {**op.receipt, "status": "needs_attention", "reason_code": CODE, "retryable": False,
+        "message": message, "user_action": None, "dispatch_outcome": "replayed"}
+    op.payload = {**op.payload, "user_clicks": op.payload.get("user_clicks", 1) + 1}
+    op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
+    return True
+
+
 def hold(op, *, now) -> None:
     """Wait for staff instead of dispatching another setup (``alert`` tells them once saved)."""
     runs = dispatched(op)

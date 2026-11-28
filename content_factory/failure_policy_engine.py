@@ -27,6 +27,8 @@ from .models import OrganizationContentConfig
 from .website_goal import mapping, stamp
 
 logger = logging.getLogger(__name__)
+# Internal evidence from the exact keyed refusal, never a field from a provider payload.
+_SETUP_RESUME_REFUSED = object()
 ACTIONS = frozenset({'retry', 'resume', 're_pin', 'rescan', 'advance_rung', 'switch_channel'})
 WORKFLOWS = ('article_generation', 'article_revision', 'confirmed_topic', 'direct_generate', 'article_system_setup', 'repo_scan', 'auto_discovery', 'island_refresh')
 # Changing website strategy or delivery channel only means something for work
@@ -245,8 +247,9 @@ def _decide(subject, *, now=None, prospective=False):
     if class_first and isinstance(subject, ContentFactoryRun) and settled_without_delivery(subject):
         # D16: refunded or released points end the run; its ask offers "start again".
         return Decision('none', None, 'terminal', attempt, None, mode)
-    if mapping(receipt.get('pending_action')).get('state') == 'reconciliation_required':
-        return Decision('none', None, 'reconciliation_required', attempt, None, mode)
+    pending = mapping(receipt.get('pending_action'))
+    if pending.get('state') in {'reconciliation_required', 'refused'}:
+        return Decision('none', None, pending['state'], attempt, None, mode)
     if receipt.get('last_action') == 'stop':
         return Decision('none', None, 'terminal', attempt, None, mode)
     if isinstance(subject, ContentFactoryRun) and (request.get('first_article_goal_operation_id') or request.get('strategy_goal_id')):
@@ -257,7 +260,7 @@ def _decide(subject, *, now=None, prospective=False):
         return Decision('none', None, 'waiting', attempt, None, mode)
     if receipt.get('code') == 'pull_request_daily_cap' and (stamp(receipt.get('next_at')) or now) > now:
         return Decision('wait', stamp(receipt['next_at']), 'waiting', attempt, 'pull_request_day', mode)
-    in_flight = mapping(receipt.get('pending_action')).get('state') in {'reserved', 'uncertain'}
+    in_flight = pending.get('state') in {'reserved', 'uncertain'}
     if class_first and not in_flight:
         # Class before wall (B1): the wall only bounds work the engine retries or
         # repairs. A founder ask waits for the founder; a code no automatic path
@@ -280,7 +283,6 @@ def _decide(subject, *, now=None, prospective=False):
         if mode == 'policy' and not _executor(action, organization):
             return Decision('observe', None, 'executor_off', attempt, 'transient_elapsed', mode)
         return Decision(action, None, 'cap' if mode == 'policy' or prospective else 'legacy_observe', attempt, 'transient_elapsed', mode)
-    pending = mapping(receipt.get('pending_action'))
     if (pending.get('state') in {'reserved', 'uncertain'} and pending.get('action') in ACTIONS
             and (strategy_ok or pending.get('action') not in STRATEGY_ACTIONS)):
         action = pending['action']
@@ -523,8 +525,16 @@ def _execute_run(run, decision, *, now):
             action='resume', payload=payload, transport_errors_are_pending=True, preserve_run_clock=True)
         ack = mapping(mapping(outcome).get('self_heal_resume'))
         intent = 're_pin' if decision.action == 're_pin' else 'rescan' if decision.action == 'rescan' else 'resume'
-        if ack != {'version': 1, 'run_id': run.run_id, 'key': payload['self_heal_key'],
-                   'intent': intent, 'state': 'accepted'}:
+        identity = {'version': 1, 'run_id': run.run_id, 'key': payload['self_heal_key'], 'intent': intent}
+        if run.workflow == 'article_system_setup':
+            if mapping(outcome).get('content_factory_status_code') == 409:
+                # A conflict rejects this request. An earlier transmission of this
+                # key may have succeeded, so keep its reservation for reconciliation.
+                return {'status': 'blocked', 'reconciliation_required': True, 'reason': 'policy_setup_resume_conflict'}
+            if type(ack.get('version')) is int and ack == {**identity, 'state': 'refused'}:
+                # CF durably declined this exact attempt without reserving a task.
+                return _SETUP_RESUME_REFUSED
+        if ack != {**identity, 'state': 'accepted'}:
             # Older CF versions ignored these keys and could accidentally queue
             # ordinary work. Only the exact durable task reservation acknowledges
             # policy intent; uncertainty keeps this same attempt and charge held.
@@ -684,16 +694,30 @@ def apply(subject, decision, *, now=None):
         logger.warning('self_heal_action_pending run_id=%s action=%s', current.run_id, decision.action, exc_info=True)
     if decision.action in ACTIONS:
         with transaction.atomic():
+            # Keep the same org -> config -> run lock order as the claim. A stale
+            # reply cannot release a slot held by the lease that replaced it.
+            config = _locked_config(organization) if outcome is _SETUP_RESUME_REFUSED else None
             locked = ContentFactoryRun.objects.select_for_update().get(pk=current.pk)
+            if locked.organization_id != organization.pk or _event_owner(locked):
+                return {'status': 'deferred', 'reason': 'execution_owned'}
             receipt = mapping(mapping(locked.result).get('self_heal_v1'))
             pending = mapping(receipt.get('pending_action'))
             if pending.get('attempt') == decision.attempt and pending.get('claim') == lease_claim:
                 receipt['pending_action'] = {**pending, 'state': 'uncertain' if uncertain else 'accepted'}
-                if (uncertain and mapping(outcome).get('reconciliation_required') is True
-                        and outcome.get('reason') == 'policy_resume_dispatch_uncertain'):
+                if outcome is _SETUP_RESUME_REFUSED:
+                    receipt['pending_action'].update(state='refused')
+                    receipt.update(last_action='none', next_at=None)
+                    day = _daily(config, now)
+                    slot = f'{locked.run_id}:{decision.attempt}'
+                    slots = day.get('pull_request_slots') or []
+                    if slot in slots and slot not in (day.get('pull_request_slot_completions') or []):
+                        day['pull_request_slots'] = [saved for saved in slots if saved != slot]
+                        _save_daily(config, day)
+                elif (uncertain and mapping(outcome).get('reconciliation_required') is True
+                        and outcome.get('reason') in {'policy_resume_dispatch_uncertain', 'policy_setup_resume_conflict'}):
                     due = now + timedelta(hours=24)
                     receipt['pending_action'].update(state='reconciliation_required', owner='staff',
-                                                     reconcile_by=due.isoformat())
+                                                     reason=outcome['reason'], reconcile_by=due.isoformat())
                     receipt.update(last_action='none', next_at=None)
                     transaction.on_commit(lambda: _alert(organization, 'resume_reconciliation_required', run=locked))
                 _write_locked_run(locked, receipt)

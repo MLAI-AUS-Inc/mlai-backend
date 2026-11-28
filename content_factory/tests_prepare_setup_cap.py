@@ -6,6 +6,7 @@ R3: once preparation holds a newer setup pull request, MLAI's own older open
 setup pull requests of the same connection generation are closed.
 These run without a database or provider access.
 """
+from contextlib import nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -78,6 +79,51 @@ class SetupDispatchCapPrepareTests(SimpleTestCase):
         with patch.object(stuck, "queue_operation_stopped_alert", return_value=1) as alert:
             self.replay.advance({"setup": setup})
         return alert
+
+    def test_repeated_owner_prepare_preserves_a_staff_hold_even_after_stop(self):
+        from .website_contract import WebsiteAuthorityError
+        from .website_operations import prepare_receipt
+        connection = self.op.connection
+        connection.blockers = []
+        connection.operations = Mock()
+        connection.operations.select_for_update.return_value.filter.return_value.order_by.return_value.first.return_value = self.op
+        self.op.receipt = {setup_cap.HELD_KEY: {"limit": 3}, setup_cap.RECEIPT_KEY: ["s1", "s2", "s3"]}
+        self.op.payload["attempt"] = 4
+        for state in ("needs_attention", "cancelled"):
+            for enrolled in (False, True):
+                self.op.state = state
+                self.assertEqual(prepare_receipt(self.op)["owner_can_retry"], state == "cancelled")
+                with self.subTest(state=state, enrolled=enrolled), \
+                        patch.object(prepare, "authority_guard", return_value=nullcontext(connection)), \
+                        patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                        patch.object(prepare.WebsiteConnectionOperation.objects, "filter",
+                                     return_value=replay.FrozenPrepareContextTests.rows(first=None)), \
+                        patch("content_factory.website_goal.enrolled", return_value=enrolled), \
+                        patch.object(prepare, "_cancel_prepare_child") as cancel:
+                    if state == "cancelled":
+                        self.assertIn("ask the MLAI team", prepare_receipt(self.op)["message"])
+                        resumed = prepare.start_prepare(self.replay.config, expected={}, company_id=9, retry=True)
+                        self.assertIs(resumed, self.op)
+                        self.assertIsNone(resumed.next_attempt_at)
+                    else:
+                        with self.assertRaises(WebsiteAuthorityError) as raised:
+                            prepare.start_prepare(self.replay.config, expected={}, company_id=9, retry=True)
+                        self.assertEqual((raised.exception.status, raised.exception.code), (409, "website_prepare_blocked"))
+                self.assertEqual((self.op.state, self.op.payload["attempt"]), ("needs_attention", 4))
+                self.assertEqual(setup_cap.dispatched(self.op), ["s1", "s2", "s3"])
+                cancel.assert_not_called()
+
+    def test_owner_actions_distinguish_an_active_setup_from_a_saved_cap_stop(self):
+        from .website_journey import project_journey
+        website = {"status": "connected", "repositoryId": 123, "writePolicy": {"allowed": True}}
+        for state, receipt, expected in (("pending", {}, True),
+                ("needs_attention", {}, True), ("needs_attention", {setup_cap.HELD_KEY: {"limit": 3}}, False)):
+            with self.subTest(state=state, receipt=receipt):
+                result = project_journey(company_id=9, domain="fixture.test", website=website,
+                    capabilities={"repositoryAccessVerified": True, "repositoryWriteVerified": True},
+                    operation={"action": "prepare", "state": state, "receipt": receipt})
+                for action in ("prepare", "cancel-operation"):
+                    self.assertEqual(action in result["allowedActions"], expected)
 
     def test_setups_below_the_cap_are_dispatched_and_counted(self):
         self.op.receipt = {setup_cap.RECEIPT_KEY: ["setup-1", "setup-2"]}

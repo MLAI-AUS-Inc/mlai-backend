@@ -34,6 +34,11 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
     compatible = goals.valid_goal(goal, scope) and goal.get("target") == target
     if compatible and selected is not None and setup_consent.valid(goal) and selected != goal["consent"]["answers"]:
         force_successor = True
+    if (latest and retry and not force_successor and str(latest.payload.get("company_id")) == str(company_id)
+            and (compatible or goal is None and target == "ready")):
+        from .website_prepare_setup_cap import handle_held_restart
+        if handle_held_restart(latest):
+            return latest
     if compatible and selected is not None and not setup_consent.valid(goal):
         # Explicit owner submission can enroll an existing ready goal without a new run.
         goal = {**goal, "consent": setup_consent.seal(goal, selected, user_id=user.pk, now=now), "revision": goal["revision"]+1}

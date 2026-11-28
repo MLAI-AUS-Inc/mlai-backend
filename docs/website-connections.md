@@ -124,6 +124,13 @@ live check. With the flag off, merged articles still count as published and
 while explicitly retryable worker failures retain bounded retries. Owners may cancel
 an active or waiting prepare operation and explicitly reopen it with another Prepare
 click; cancelling fences its child and queues the ordinary run cancellation path.
+Once a preparation has stopped at its setup dispatch limit, further Prepare
+requests return HTTP 409 (`website_prepare_blocked`) and preserve the attempt.
+The owner card hides Prepare and Stop for that hold. If the owner previously
+stopped a capped operation, an explicit retry returns it to staff review
+without starting work or changing its dispatch count. Staff can review the
+operation and use its audited `restart_prepare` action with `resetAttemptCap`
+when the other recovery checks and the organisation's daily PR budget allow it.
 Choosing an ambiguous page through the existing setup form saves and attaches that
 direct setup child to the waiting prepare. Its saved company/domain, setup workflow,
 route and original connection tuple must match; its own workflow operation remains

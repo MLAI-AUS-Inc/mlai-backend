@@ -1,0 +1,33 @@
+{
+  "schema": "replay-record-v1",
+  "id": "be-setup-resume-conflict",
+  "source": {
+    "org_id": null,
+    "run_pk": null,
+    "catalogue": "Website setup recovery, 28 November 2026",
+    "synthetic": true
+  },
+  "workflow": "article_system_setup",
+  "step": "validate_directory_dependencies",
+  "code": "DIRECTORY_DEPENDENCY_VALIDATION_FAILED",
+  "framework_fingerprint": null,
+  "http": [
+    {
+      "method": "POST",
+      "url": "https://worker.example/api/runs/example/resume",
+      "status": 409,
+      "headers": {},
+      "body": ""
+    }
+  ],
+  "inputs": {
+    "status": "failed",
+    "attempt": 1
+  },
+  "replay": {
+    "repo": "be",
+    "handler": "setup_resume_response"
+  },
+  "expected": "code:policy_setup_resume_conflict",
+  "notes": "A failed setup received repeated resume requests under one retry key. An unacknowledged conflict leaves that attempt with staff for reconciliation."
+}

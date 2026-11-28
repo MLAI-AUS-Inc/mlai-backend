@@ -365,6 +365,9 @@ def prepare_receipt(op):
     """
     from .website_prepare_counters import at_cap, owner_can_retry, same_failure_stops
     receipt = without_stale_channel_options(op.receipt)
+    from .website_prepare_setup_cap import held_for_staff
+    if op.state == "cancelled" and held_for_staff(op.state, receipt):
+        receipt["message"] = "Website preparation is stopped. Select Try again to ask the MLAI team to review the setup attempt limit."
     if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live", "handoff_prepared"}:
         # B11/B25: ours to fix, or an honest closed-list answer; never "Try again".
         # C7: delivered as content files, not yet live; a retry cannot change that.
