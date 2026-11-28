@@ -139,6 +139,10 @@ route and original connection tuple must match; its own workflow operation remai
 unchanged. A callback that wakes preparation before the handoff is saved adopts the
 same saved child, and bounded waiting while dispatch is in flight prevents a second
 setup request. A directly blocked child retains its actual failure prompt.
+New repository setup requests save the source commit from the selected website's
+current-generation inventory before dispatch. When the request selects a scan,
+that scan must supply the matching evidence. A retry uses the original pin.
+Setups without matching inventory keep their existing worker-side source check.
 
 Repository selection (plan E8). `GET /github/repos` ranks the founder's
 repositories (homepage equals the domain, the domain in `CNAME` or the wrangler,

@@ -228,9 +228,13 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     return op
 
 
-def reserve_workflow_operation(connection, *, workflow, payload):
+def reserve_workflow_operation(connection, *, workflow, payload, pin_setup_source=False):
     """Reserve a stable operation before any dispatch, preserving debit identity."""
     from .website_connections import authority_guard
+    if pin_setup_source:
+        # The server chooses this pin after locking the operation. A client
+        # value or a populated payload reused on retry cannot choose the SHA.
+        payload.pop("expected_source_sha", None)
     # Request keys survive reload in the operation row. An in-flight logical
     # scan/setup also resumes when an older client minted a replacement key.
     # Billing appends its free-domain verdict after this operation is reserved.
@@ -281,7 +285,19 @@ def reserve_workflow_operation(connection, *, workflow, payload):
         payload.update(operation_id=str(op.pk), operation_attempt=op.payload.get("attempt", 1), deletion_epoch=deletion_epoch(connection))
         from .setup_delivery_enrollment import enroll_setup_delivery
         fields = ["receipt", "updated_at"]
-        if enroll_setup_delivery(op, payload, connection, workflow, new_run=created):
+        source_sha = None
+        if pin_setup_source:
+            # A retry keeps the original pin, including its absence on old
+            # operations. A new key takes fresh evidence for this generation.
+            source_sha = op.payload.get("expected_source_sha")
+            if created:
+                from .website_hosted_build import current_scan_source
+                source_sha = current_scan_source(connection, scan_run_id=payload.get("source_scan_run_id"))
+            if source_sha:
+                payload["expected_source_sha"] = source_sha
+                if created:
+                    op.payload = {**op.payload, "expected_source_sha": source_sha}
+        if enroll_setup_delivery(op, payload, connection, workflow, new_run=created) or (created and source_sha):
             fields.insert(0, "payload")
         op.receipt = {**(getattr(op, "receipt", None) or {}), "dispatch_outcome": "new_attempt" if created else "replayed"}
         op.save(update_fields=fields)
