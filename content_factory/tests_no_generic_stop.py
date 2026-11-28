@@ -249,6 +249,10 @@ class P2CopyGenericStopTests(JourneyFixture, TestCase):
 
     def decide(self, run):
         from django.utils import timezone
+        # optional() resolves seams through a cached lookup; clear it so a
+        # patched seam (publication child, points outcome) is the one read.
+        p2_foundation._optional.cache_clear()
+        self.addCleanup(p2_foundation._optional.cache_clear)
         with patch.object(registry_policy, "_policy_v2_for", return_value=True):
             return founder_journey_p2.run_decision(self.org, run, config=self.built.config, user=self.owner,
                                                    now=timezone.now())
