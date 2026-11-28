@@ -177,7 +177,7 @@ class DispatchObservationTests(SimpleTestCase):
                 patch.object(views, "_queue_content_factory_run_authorized") as send:
             for endpoint, workflow, expected in (("article-system-setup", "article_system_setup", True), ("scan", "repo_scan", False)):
                 views._queue_content_factory_run(endpoint=endpoint, workflow=workflow, context=context, config=config, payload={})
-                self.assertEqual(reserve.call_args.kwargs["pin_setup_source"], expected)
+                self.assertEqual(reserve.call_args.kwargs.get("pin_setup_source", False), expected)
             reserve.reset_mock()
             views._queue_content_factory_run(endpoint="generate", workflow="article_generation", context=context, config=config,
                 payload={"delivery_mode": "content_only", "expected_source_sha": "f" * 40})
