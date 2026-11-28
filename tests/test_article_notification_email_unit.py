@@ -79,7 +79,7 @@ class ArticleNotificationEmailTests(SimpleTestCase):
         escaped_url = review_url.replace("&", "&amp;")
         self.assertEqual(html.count(f'href="{escaped_url}"'), 2)
         self.assertLess(html.index("Review article"), html.index(f">{escaped_url}</a>"))
-        self.assertIn("Unsubscribe</a>", html)
+        self.assertIn("Manage notifications</a>", html)
 
     @override_settings(COMMUNITY_CHAT_FRONTEND_URL="https://chat.example.test")
     def test_research_empty_uses_the_same_message_and_edit_settings_destination_in_both_parts(self):

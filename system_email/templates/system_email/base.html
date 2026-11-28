@@ -26,7 +26,7 @@
         {% block content %}{% endblock %}
         <tr>
           <td style="padding:0 32px 24px;">
-            <p style="border-top:1px solid #e6def0;margin:0;padding-top:16px;font-size:13px;line-height:1.5;color:#5e566d;">{% block footer %}{% endblock %}MLAI · <a href="https://mlai.au" style="color:#4f3a75;">mlai.au</a>{% if preferences_url %} · <a href="{{ preferences_url }}" style="color:#4f3a75;">Manage email preferences</a>{% endif %}{% if unsubscribe_url %} · <a href="{{ unsubscribe_url }}" style="color:#4f3a75;">Unsubscribe</a>{% endif %}</p>
+            <p style="border-top:1px solid #e6def0;margin:0;padding-top:16px;font-size:13px;line-height:1.5;color:#5e566d;">{% block footer %}{% endblock %}MLAI · <a href="https://mlai.au" style="color:#4f3a75;">mlai.au</a>{% if preferences_url %} · <a href="{{ preferences_url }}" style="color:#4f3a75;">Manage email preferences</a>{% endif %}{% if unsubscribe_url %} · <a href="{{ unsubscribe_url }}" style="color:#4f3a75;">{{ unsubscribe_label|default:"Unsubscribe" }}</a>{% endif %}</p>
           </td>
         </tr>
       </table>

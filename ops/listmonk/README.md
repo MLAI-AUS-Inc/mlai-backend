@@ -168,17 +168,16 @@ On the droplet, run this project from `/root/mlai-listmonk`, next to `/root/mlai
 Create a new version of the campaign template with the body in
 [`templates/mlai-campaign.html`](templates/mlai-campaign.html). Preview an empty-list
 draft for each of general news, an invite, a guest reminder and reconfirmation.
-The backend tags invites `mlai-event-invite` so the wrapper leaves their
-existing host header in place. Deploy the backend change while the previous
-template is still selected. Then preview the tagged test invite with the new
-wrapper and check it has one masthead. Verify an absent consent reason in a
+The backend tags invites `mlai-event-invite`. The wrapper recognizes both the
+tag and earlier invite bodies that already contain the MLAI masthead. Preview
+both tagged and untagged test invites with the new wrapper and check that each
+has one masthead. Verify an absent consent reason in a
 plain-text preview omits the consent line, and a known reason appears in both
 parts alongside unsubscribe. Test approved examples on the seed inboxes, then
 select the new template for future campaigns by changing the provider default
 or the configured template ID. Keep the previous template, existing untagged
-invite drafts and completed campaigns on their original template. Update any
-untagged invite draft you intend to move by rebuilding it through the upgraded
-backend. Moving the default or updating the
+invite drafts and completed campaigns on their original template. Moving the
+default or updating the
 composed body invalidates earlier CRM preflight approval, so use the normal
 preflight and wave controls before an affected campaign resumes.
 

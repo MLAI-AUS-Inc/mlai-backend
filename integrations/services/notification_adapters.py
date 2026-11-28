@@ -761,6 +761,7 @@ def _review_ready_email_html(
         action_url=review_url,
         secondary_links=((review_url, review_url),) if review_url else (),
         unsubscribe_url=_unsubscribe_url(run, channel),
+        unsubscribe_label="Manage notifications",
     )
 
 

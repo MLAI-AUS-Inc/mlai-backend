@@ -25,6 +25,7 @@ def render_transactional_email(
     preheader: str = "",
     preferences_url: str = "",
     unsubscribe_url: str = "",
+    unsubscribe_label: str = "",
     content_html: SafeData | str = "",
     secondary_links: tuple[tuple[str, str], ...] = (),
 ) -> str:
@@ -43,6 +44,7 @@ def render_transactional_email(
             "preheader": preheader,
             "preferences_url": _web_url(preferences_url),
             "unsubscribe_url": _web_url(unsubscribe_url),
+            "unsubscribe_label": unsubscribe_label,
             "content_html": content_html,
             "secondary_links": [(label, safe_url) for label, url in secondary_links if (safe_url := _web_url(url))],
         },
