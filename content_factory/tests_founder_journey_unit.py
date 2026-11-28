@@ -229,6 +229,26 @@ class ContractFixtureTests(JourneyFixture, TestCase):
         self.assertEqual((body["holdingReason"], body["headline"], body["body"], body["pollAfterMs"]),
                          ("website_update", "Publishing…", "Waiting for your website to update.", 15000))
 
+    def test_files_only_delivery_stays_a_handoff_until_the_same_run_is_live(self):
+        from .website_content_files import STATE
+        run = make_run(self.org, status="completed", step="deliver", approval_state="approved",
+                       request={"delivery_mode": "review_draft"},
+                       result={"content_files_delivery": {"state": STATE}})
+        prepared = self.journey(run_id=run.run_id)
+        self.assertNotEqual(prepared["headline"], "Your article files are on GitHub")
+        run.result["content_files_delivery"]["pr_url"] = "https://github.com/fixture/site/pull/1"
+        run.save(update_fields=["result"])
+        draft = self.journey(run_id=run.run_id)
+        self.assertStep(draft, "done", "done", next_kind="view_draft")
+        self.assertEqual(draft["headline"], "Your article files are on GitHub")
+        self.assertIsNone(draft["next"]["url"])
+        live_url = "https://fixture.example/articles/first/"
+        with patch.object(journeys, "_live_article", return_value=SimpleNamespace(live_url=live_url)) as observe:
+            live = self.journey(run_id=run.run_id)
+        observe.assert_called_once_with(self.org, run)
+        self.assertStep(live, "done", "done", next_kind="view_article")
+        self.assertEqual(live["next"]["url"], live_url)
+
     def test_12_live(self):
         run = make_run(self.org, status="completed", step="deliver", approval_state="approved",
                        request={"delivery_mode": "review_draft"}, result={"delivery_mode": "review_draft"})

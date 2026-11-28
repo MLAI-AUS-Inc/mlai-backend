@@ -155,6 +155,8 @@ COPY = {
                           "Open on GitHub"),
     "publishing": ("Publishing…", "Waiting for your website to update.", None),
     "done_live": ("Your article is live!", None, "View article"),
+    "done_files": ("Your article files are on GitHub",
+                   "Connect the files to your blog to make the article live.", "Review your draft"),
     # Plan C14 fallback; the ask itself carries the host class's copy.
     "deploy_site": ("Your live site hasn't updated yet",
                     "Your change is merged on GitHub, but your website hasn't picked it up.", "How to fix this"),
@@ -785,7 +787,7 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         setup_run = run if run.workflow in SETUP_WORKFLOWS else None
     else:
         run = latest_article_run(organization)
-    decision = None
+    decision = _files_only_delivery(organization, run)
     facts = {"etaSeconds": None, "queuePosition": None, "switchTopicAvailable": False}
 
     from . import founder_journey_p2 as p2
@@ -793,7 +795,7 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
     p2_active = p2_applies(organization)
     from .run_reconciliation import authoritative_run
     from .founder_draft_views import is_delivered_article
-    if (run is not None and run.status in {"failed", "blocked", "cancelled", "denied"}
+    if (decision is None and run is not None and run.status in {"failed", "blocked", "cancelled", "denied"}
             and authoritative_run(run) and is_delivered_article(run)):
         # A later execution stop cannot revoke the independently earned body.
         # This affects presentation only; the article DTO retains typed status.
@@ -1271,6 +1273,23 @@ def _live_article(organization, run=None):
     if run is not None:
         articles = articles.filter(source_run_id=run.run_id)
     return articles.order_by("-live_verified_at", "-published_at").first()
+
+
+def _files_only_delivery(organization, run):
+    from .website_content_files import run_delivered_as_content_files
+    if run is None or not run_delivered_as_content_files(run):
+        return None
+    result = _result(run)
+    receipt = _mapping(result.get("content_files_delivery"))
+    pr_url = _pull_request_url(run) or _https_or_none(receipt.get("pr_url"))
+    if not pr_url or not pr_url.startswith("https://github.com/"):
+        return None
+    live = _live_article(organization, run)
+    live_url = _https_or_none(getattr(live, "live_url", None))
+    if live_url:
+        return _decide("done", "done", "done_live", next_kind="view_article",
+                       run_id=run.run_id, url=live_url)
+    return _decide("done", "done", "done_files", next_kind="view_draft", run_id=run.run_id)
 
 
 def _publishing_or_done(*, organization, config, marker, run, connection):
